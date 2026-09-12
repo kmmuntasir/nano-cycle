@@ -5,6 +5,7 @@ export interface NodeState {
   status: NodeStatus;
   usage: { input: number; output: number; cacheRead: number };
   retries: number;
+  durationMs: number;
   startedAt: number | null;
   endedAt: number | null;
   error: string | null;
@@ -17,6 +18,9 @@ export interface RunState {
   project: string;
   status: "running" | "awaiting-gate" | "awaiting-answers" | "completed" | "failed" | "cancelled";
   createdAt: string;
+  finishedAt: number | null;
+  gateWaitMs: number;
+  gateSince: number | null;
   models: Record<string, string>;
   gate: {
     type?: "divergence" | "answers";
@@ -34,6 +38,7 @@ export interface RunState {
   } | null;
   error: string | null;
   nodes: NodeState[];
+  nodeModels?: Record<string, string>;
   artifacts: Record<string, unknown>;
 }
 
@@ -109,6 +114,12 @@ export const api = {
       body: JSON.stringify({ answers }),
     }),
   cancel: (id: string) => jfetch<{ ok: boolean }>(`/api/runs/${id}/cancel`, { method: "POST" }),
+  setNodeModel: (id: string, node: string, model: string) =>
+    jfetch<{ ok: boolean }>(`/api/runs/${id}/model`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ node, model }),
+    }),
 };
 
 export function openWs(onMessage: (msg: { type: string; runId?: string; state?: RunState; nodeId?: string; ev?: RunEvent["ev"] }) => void): WebSocket {

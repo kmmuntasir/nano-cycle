@@ -31,8 +31,30 @@ const STATUS_COLOR: Record<string, "default" | "primary" | "success" | "warning"
 
 const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
+function fmtDuration(ms: number): string {
+  if (!ms || ms < 0) return "0s";
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
+  if (m > 0) return `${m}m ${String(sec).padStart(2, "0")}s`;
+  return `${sec}s`;
+}
+
 const roleOf = (id: string) =>
   id === "plan" ? "plan" : id === "verify" ? "verify" : id.endsWith("-fe") ? "frontend" : "backend";
+
+/** Ticks every second while the run is live so elapsed timers advance. */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  return now;
+}
 
 function EventFeed({ events, nodeId }: { events: RunEvent[]; nodeId: string | null }) {
   const feedRef = useRef<HTMLDivElement>(null);
@@ -152,16 +174,27 @@ export default function App() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [task, setTask] = useState("Create fizzbuzz.js that prints fizzbuzz for 1..15, one per line (divisible by 3 → Fizz, by 5 → Buzz, both → FizzBuzz).");
   const [tier, setTier] = useState("demo");
-  const [modelPick, setModelPick] = useState<Record<string, string>>({});
+  const [modelPick, setModelPick] = useState<Record<string, string>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("nano-cycle-models") ?? "{}");
+    } catch {
+      return {};
+    }
+  });
+  const [masterModel, setMasterModel] = useState<string>("");
   const [clarify, setClarify] = useState(false);
   const [maxFixRounds, setMaxFixRounds] = useState(2);
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [starting, setStarting] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
 
   const refreshRuns = useCallback(() => {
     api.listRuns().then(setRuns).catch(() => {});
   }, []);
+
+  // Model picks persist across sessions until the owner changes them.
+  useEffect(() => {
+    localStorage.setItem("nano-cycle-models", JSON.stringify(modelPick));
+  }, [modelPick]);
 
   useEffect(() => {
     api.models().then(setModels).catch(() => {});
@@ -186,7 +219,6 @@ export default function App() {
         setEvents((prev) => [...prev.slice(-3000), ev]);
       }
     });
-    wsRef.current = ws;
     return () => ws.close();
   }, [runId, refreshRuns]);
 
@@ -221,6 +253,8 @@ export default function App() {
   };
 
   const nodeIds = useMemo(() => state?.nodes.map((n) => n.id) ?? [], [state]);
+  const live = state?.status === "running" || state?.status === "awaiting-gate" || state?.status === "awaiting-answers";
+  const now = useNow(!!live);
   const totalUsage = useMemo(
     () =>
       (state?.nodes ?? []).reduce(
@@ -232,7 +266,18 @@ export default function App() {
       ),
     [state],
   );
-  const running = state?.status === "running" || state?.status === "awaiting-gate";
+  const timing = useMemo(() => {
+    if (!state) return null;
+    const start = Date.parse(state.createdAt) || 0;
+    const end = state.finishedAt ?? (live ? now : Date.parse(state.finishedAt ?? "") || now);
+    const wall = Math.max(0, end - start);
+    const gateMs =
+      (state.gateWaitMs ?? 0) +
+      (state.gateSince && live ? Math.max(0, now - state.gateSince) : 0);
+    const work = Math.max(0, wall - gateMs);
+    return { wall, work, gateMs, waitingNow: !!state.gateSince };
+  }, [state, live, now]);
+  const running = state?.status === "running" || state?.status === "awaiting-gate" || state?.status === "awaiting-answers";
   const projectPath = projects.find((p) => p.name === project)?.path ?? "";
 
   return (
@@ -256,10 +301,16 @@ export default function App() {
             Add project
           </Button>
           <Box sx={{ flexGrow: 1 }} />
-          {state && (
+          {state && timing && (
             <>
               <Chip label={`run ${state.id}`} size="small" />
               <Chip label={state.status} size="small" color={STATUS_COLOR[state.status] ?? "default"} />
+              <Chip size="small" label={`⏱ ${fmtDuration(timing.wall)}`} />
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`working ${fmtDuration(timing.work)}${timing.gateMs > 0 ? ` · waited ${fmtDuration(timing.gateMs)}` : ""}`}
+              />
               <Chip size="small" label={`tokens ▲${fmtTokens(totalUsage.input)} ▼${fmtTokens(totalUsage.output)}`} />
               {running && (
                 <Button size="small" color="error" onClick={() => api.cancel(state.id)}>
@@ -300,6 +351,33 @@ export default function App() {
                   </MenuItem>
                 ))}
               </Select>
+              {nodeIds.length === 0 && (
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography variant="caption" sx={{ width: 96 }}>
+                    All roles
+                  </Typography>
+                  <Select
+                    size="small"
+                    value={masterModel}
+                    displayEmpty
+                    fullWidth
+                    onChange={(e) => {
+                      const m = e.target.value;
+                      setMasterModel(m);
+                      if (m) setModelPick(Object.fromEntries(Object.keys(roles).map((r) => [r, m])));
+                    }}
+                  >
+                    <MenuItem value="">
+                      <em>choose to fill all…</em>
+                    </MenuItem>
+                    {models.map((m) => (
+                      <MenuItem key={m.label} value={m.label}>
+                        {m.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </Stack>
+              )}
               {nodeIds.length === 0 &&
                 Object.entries(roles).map(([role, label]) => (
                   <Stack key={role} direction="row" spacing={1} alignItems="center">
@@ -473,31 +551,56 @@ export default function App() {
 
           {state && (
             <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
-              {state.nodes.map((n) => (
-                <Paper
-                  key={n.id}
-                  variant="outlined"
-                  onClick={() => setSelectedNode(n.id)}
-                  sx={{
-                    p: 1.5,
-                    cursor: "pointer",
-                    minWidth: 180,
-                    borderColor: selectedNode === n.id ? "primary.main" : undefined,
-                  }}
-                >
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Typography variant="subtitle2">{n.id}</Typography>
-                    <Chip label={n.status} size="small" color={STATUS_COLOR[n.status] ?? "default"} />
-                  </Stack>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    {state.models[roleOf(n.id)] ?? "auto"}
-                  </Typography>
-                  <Typography variant="caption" sx={{ display: "block" }}>
-                    ▲{fmtTokens(n.usage.input)} ▼{fmtTokens(n.usage.output)}
-                    {n.retries > 0 ? ` · retries ${n.retries}` : ""}
-                  </Typography>
-                </Paper>
-              ))}
+              {state.nodes.map((n) => {
+                const effective = state.nodeModels?.[n.id] ?? state.models[roleOf(n.id)] ?? "auto";
+                return (
+                  <Paper
+                    key={n.id}
+                    variant="outlined"
+                    onClick={() => setSelectedNode(n.id)}
+                    sx={{
+                      p: 1.5,
+                      cursor: "pointer",
+                      minWidth: 190,
+                      borderColor: selectedNode === n.id ? "primary.main" : undefined,
+                    }}
+                  >
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography variant="subtitle2">{n.id}</Typography>
+                      <Chip label={n.status} size="small" color={STATUS_COLOR[n.status] ?? "default"} />
+                    </Stack>
+                    {live ? (
+                      <Select
+                        size="small"
+                        value={effective}
+                        fullWidth
+                        sx={{ my: 0.5, fontSize: 12 }}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          api.setNodeModel(state.id, n.id, e.target.value);
+                        }}
+                      >
+                        {models.map((m) => (
+                          <MenuItem key={m.label} value={m.label}>
+                            {m.label}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    ) : (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                        {effective}
+                      </Typography>
+                    )}
+                    <Typography variant="caption" sx={{ display: "block" }}>
+                      {n.status === "running" && n.startedAt
+                        ? `⏱ ${fmtDuration(now - n.startedAt)}`
+                        : `took ${fmtDuration(n.durationMs)}`}
+                      {n.retries > 0 ? ` · ${n.retries} retr${n.retries === 1 ? "y" : "ies"}` : ""}
+                    </Typography>
+                  </Paper>
+                );
+              })}
             </Stack>
           )}
 

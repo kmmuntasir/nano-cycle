@@ -69,8 +69,11 @@ declare why it legally has no counterpart (`plumbing` / `devops` / `qa` /
 `no-counterpart`) or the plan is rejected and the planner retries with the reason.
 Verify is an independent gate that must run the code before it may accept.
 
-Model selection is **role-based** — `plan`, `backend`, `frontend`, `verify` — so a
-dynamic graph with any number of coder nodes inherits the right model per role.
+Model selection is **role-based** — `PM (clarify)`, `Plan`, `Backend coder`,
+`Frontend coder`, `Verify` — so a dynamic graph with any number of coder nodes inherits
+the right model per role. Picks persist in the browser (localStorage) until changed;
+a master chooser fills every role at once. Mid-run swaps are live: a queued node picks
+up the new model when it starts, a running node stops and restarts with it.
 
 ## How nodes are constrained
 

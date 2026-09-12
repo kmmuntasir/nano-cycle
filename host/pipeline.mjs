@@ -89,10 +89,25 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     const n = nodeState(run, id);
     n.status = patch.status ?? "done";
     n.endedAt = Date.now();
+    // Duration accumulates across fix-round re-runs of the same node.
+    if (n.startedAt) n.durationMs = (n.durationMs ?? 0) + Math.max(0, n.endedAt - n.startedAt);
     Object.assign(n, patch);
     run.current.delete(id);
     emit.state(run);
   }
+
+  // Gate-wait accounting: time spent at human gates is excluded from "working time".
+  const gateOpen = (run) => {
+    run.gateSince = Date.now();
+    run.state.gateSince = run.gateSince;
+  };
+  const gateClose = (run) => {
+    if (run.gateSince) {
+      run.state.gateWaitMs = (run.state.gateWaitMs ?? 0) + Math.max(0, Date.now() - run.gateSince);
+      run.gateSince = null;
+      run.state.gateSince = null;
+    }
+  };
 
   function systemFor(run, id) {
     if (id === "verify") return SYSTEM_FOR.verify();
@@ -118,6 +133,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
 
     let lastErr = null;
     for (let attempt = 0; attempt <= 1; attempt++) {
+      node.startedAt = Date.now();
+      // Per-attempt resolution: a queued node picks up a model change made while
+      // it waited; a running node restarts when the owner swaps its model.
+      const modelSpec = run.nodeModels?.[id] ?? run.models[roleOf(id)] ?? "auto";
       try {
         const store = { artifacts: [] };
         const reportTool = makeTool({
@@ -137,7 +156,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           systemPrompt,
           prompt,
           cwd: run.projectPath,
-          modelSpec: run.models[roleOf(id)] ?? "auto",
+          modelSpec,
           modelRuntime,
           signal: run.current.get(id)?.signal,
           onEvent: (nodeId, ev) => {
@@ -151,6 +170,14 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       } catch (err) {
         lastErr = err;
         if (run.cancelRequested) break;
+        if (run.modelRestart.has(id)) {
+          // the owner swapped this node's model mid-flight — restart fresh, the
+          // attempt budget resets with the new model
+          run.modelRestart.delete(id);
+          attempt = -1;
+          emit.event(run.id, id, { t: "notice", s: `restarting with ${run.nodeModels?.[id] ?? "auto"}` });
+          continue;
+        }
         node.retries += 1;
         emit.event(run.id, id, { t: "notice", s: `attempt failed: ${err.message}` });
         emit.event(run.id, id, { t: "notice", s: (err.stack ?? "").split("\n").slice(0, 6).join(" | ") });
@@ -235,6 +262,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           status: "queued",
           usage: { input: 0, output: 0, cacheRead: 0 },
           retries: 0,
+          durationMs: 0,
           startedAt: null,
           endedAt: null,
           error: null,
@@ -297,6 +325,36 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           };
           run.nodeWork["implement-be"] = { lane: "backend", title: "backend half", files: plan?.backend ?? [] };
           run.nodeWork["implement-fe"] = { lane: "frontend", title: "frontend half", files: plan?.frontend ?? [] };
+
+          // M: compile ONLY the halves that have files — no wasted coder spawns.
+          if (tier === "M") {
+            const halves = [];
+            if (plan?.backend?.length) halves.push("implement-be");
+            if (plan?.frontend?.length) halves.push("implement-fe");
+            if (halves.length === 0) throw new Error("plan has no work on either side");
+            const nodes = [{ id: "plan", dependsOn: [] }];
+            for (const h of halves) nodes.push({ id: h, dependsOn: ["plan"] });
+            nodes.push({ id: "verify", dependsOn: [...halves] });
+            for (const n of nodes) {
+              if (!nodeState(run, n.id)) {
+                run.state.nodes.push({
+                  id: n.id,
+                  status: "queued",
+                  usage: { input: 0, output: 0, cacheRead: 0 },
+                  retries: 0,
+                  durationMs: 0,
+                  startedAt: null,
+                  endedAt: null,
+                  error: null,
+                });
+              }
+            }
+            run.dynamicGraph = nodes;
+            emit.event(run.id, "_run", {
+              t: "notice",
+              s: `compiled work graph: ${halves.join(" ∥ ") || "no coder"} → verify`,
+            });
+          }
         }
         return plan;
       } catch (err) {
@@ -365,6 +423,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       // questions → human answers gate
       run.state.gate = { type: "answers", nodeId: "clarify", round, questions: qs };
       run.state.status = "awaiting-answers";
+      gateOpen(run);
       emit.state(run);
       emit.event(run.id, "clarify", {
         t: "notice",
@@ -374,6 +433,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         run.answersResolver = resolve;
       });
       run.answersResolver = null;
+      gateClose(run);
       if (answers === "cancel") throw new Error("cancelled at answers gate");
       rounds.push({ questions: qs, answers });
       run.state.gate = null;
@@ -580,9 +640,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   async function runDag(run) {
     const done = (id) => nodeState(run, id)?.status === "done";
     while (!run.cancelRequested) {
-      // Resolved per-iteration: for L the compile happens mid-round (right after
-      // plan), and the running loop must pick the graph up immediately.
-      const graph = run.tier === "L" ? (run.dynamicGraph ?? TIERS.L) : TIERS[run.tier];
+      // Resolved per-iteration: for M/L the compile happens mid-round (right
+      // after plan), and the running loop must pick the graph up immediately.
+      const graph = run.dynamicGraph ?? TIERS[run.tier];
       const ready = graph.filter(
         (n) => nodeState(run, n.id)?.status === "queued" && n.dependsOn.every(done),
       );
@@ -614,11 +674,13 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
 
   async function waitGate(run) {
     run.state.status = "awaiting-gate";
+    gateOpen(run);
     emit.state(run);
     const decision = await new Promise((resolve) => {
       run.gateResolver = resolve;
     });
     run.gateResolver = null;
+    gateClose(run);
     if (decision === "cancel") throw new Error("cancelled at gate");
     run.state.status = "running";
     run.state.gate = null;
@@ -663,6 +725,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       }
       run.state.status = verdict === "accepted" ? "completed" : "failed";
     } catch (err) {
+      gateClose(run);
       if (run.cancelRequested) {
         run.state.status = "cancelled";
       } else {
@@ -671,6 +734,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         emit.event(run.id, "_run", { t: "notice", s: `run failed: ${err.message}` });
       }
     }
+    run.state.finishedAt = Date.now();
     emit.state(run);
     run.done.resolve(run.state.status);
   }
@@ -686,6 +750,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         project: project.name,
         status: "running",
         createdAt: new Date().toISOString(),
+        finishedAt: null,
+        gateWaitMs: 0,
+        gateSince: null,
         models,
         gate: null,
         error: null,
@@ -697,11 +764,13 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           status: "queued",
           usage: { input: 0, output: 0, cacheRead: 0 },
           retries: 0,
+          durationMs: 0,
           startedAt: null,
           endedAt: null,
           error: null,
         })),
         artifacts: {},
+        nodeModels: {},
       };
       const run = {
         id,
@@ -713,6 +782,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         // Optional owner policy: force >=1 question round (finalize tool
         // withheld on round 1). Default off — prompt quality drives asking.
         requireQuestions: clarify && requireQuestions === true,
+        nodeModels: {},
+        modelRestart: new Set(),
         maxFixRounds: Number.isFinite(maxFixRounds) ? Math.min(Math.max(maxFixRounds, 0), 5) : MAX_FIX_ROUNDS,
         spec: null,
         state,
@@ -729,6 +800,25 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       emit.state(run);
       execute(run).catch(() => {}); // execute() never throws — it finalizes state
       return state;
+    },
+
+    setNodeModel(id, node, model) {
+      const run = runs.get(id);
+      if (!run) return { ok: false, error: "unknown run" };
+      if (!nodeState(run, node)) return { ok: false, error: "unknown node" };
+      const spec = String(model ?? "auto");
+      run.nodeModels[node] = spec;
+      run.state.nodeModels = { ...run.nodeModels };
+      const st = nodeState(run, node);
+      if (st.status === "running") {
+        run.modelRestart.add(node);
+        run.current.get(node)?.abort();
+        emit.event(id, node, { t: "notice", s: `model changed → restarting with ${spec}` });
+      } else {
+        emit.event(id, node, { t: "notice", s: `model set → ${spec}` });
+      }
+      emit.state(run);
+      return { ok: true };
     },
 
     answer(id, answers) {

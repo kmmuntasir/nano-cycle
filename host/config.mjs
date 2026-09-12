@@ -182,13 +182,9 @@ export const TIERS = {
     { id: "implement", dependsOn: [] },
     { id: "verify", dependsOn: ["implement"] },
   ],
-  // M: one slice — plan splits into BE/FE halves; parallel when disjoint
-  M: [
-    { id: "plan", dependsOn: [] },
-    { id: "implement-be", dependsOn: ["plan"] },
-    { id: "implement-fe", dependsOn: ["plan"] },
-    { id: "verify", dependsOn: ["implement-be", "implement-fe"] },
-  ],
+  // M: one slice — plan splits into BE/FE halves; the engine compiles ONLY the
+  // halves that have files, so an unused side never spawns a coder.
+  M: [{ id: "plan", dependsOn: [] }],
   // L: DYNAMIC — the plan decomposes into capabilities; the engine compiles each
   // into backend/frontend coder nodes with capability-level dependencies. The
   // resulting graph can have any number of parallel coders per side.
