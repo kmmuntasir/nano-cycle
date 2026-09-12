@@ -27,10 +27,10 @@ export function saveState(runId, state) {
   fs.writeFileSync(path.join(runDir(runId), "state.json"), JSON.stringify(state, null, 2));
 }
 
-export function appendEvent(runId, nodeId, ev) {
+export function appendEvent(runId, nodeId, ev, ts = Date.now()) {
   fs.appendFileSync(
     path.join(runDir(runId), "events.jsonl"),
-    JSON.stringify({ ts: Date.now(), nodeId, ev }) + "\n",
+    JSON.stringify({ ts, nodeId, ev }) + "\n",
   );
 }
 

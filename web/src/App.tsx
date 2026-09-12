@@ -27,9 +27,16 @@ const STATUS_COLOR: Record<string, "default" | "primary" | "success" | "warning"
   "awaiting-answers": "warning",
   failed: "error",
   cancelled: "default",
+  interrupted: "error",
 };
 
 const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+const fmtTimestamp = (ms: number): string => {
+  const d = new Date(ms || Date.now());
+  const p = (v: number) => String(v).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
 
 function fmtDuration(ms: number): string {
   if (!ms || ms < 0) return "0s";
@@ -78,28 +85,37 @@ function EventFeed({ events, nodeId }: { events: RunEvent[]; nodeId: string | nu
       )}
       {shown.map((e, i) => {
         const ev = e.ev;
-        if (ev.t === "text") return <span key={i}>{ev.s}</span>;
+        const stamp = `[${fmtTimestamp(e.ts ?? (ev as { ts?: number }).ts ?? 0)}] `;
+        if (ev.t === "text") {
+          const burstStart = i === 0 || shown[i - 1].ev.t !== "text";
+          return (
+            <span key={i}>
+              {burstStart && <span style={{ color: "#6aa84f" }}>{stamp}</span>}
+              {ev.s}
+            </span>
+          );
+        }
         if (ev.t === "think") return <span key={i} style={{ color: "#777", fontStyle: "italic" }}>{ev.s}</span>;
         if (ev.t === "tool")
           return (
             <div key={i} style={{ color: "#90caf9", margin: "4px 0" }}>
-              ▸ {ev.name} {ev.args}
+              {stamp}▸ {ev.name} {ev.args}
             </div>
           );
         if (ev.t === "tool_end")
           return (
             <div key={i} style={{ color: ev.ok ? "#66bb6a" : "#ef5350" }}>
-              ✔ {ev.name} {ev.ok ? "" : "(error)"}
+              {stamp}✔ {ev.name} {ev.ok ? "" : "(error)"}
             </div>
           );
         if (ev.t === "usage")
           return (
             <div key={i} style={{ color: "#888" }}>
-              ⏱ tokens in {ev.usage?.input} / out {ev.usage?.output}
+              {stamp}⏱ tokens in {ev.usage?.input} / out {ev.usage?.output}
             </div>
           );
         if (ev.t === "notice")
-          return <div key={i} style={{ color: "#ffa726", margin: "4px 0" }}>⚠ {ev.s}</div>;
+          return <div key={i} style={{ color: "#ffa726", margin: "4px 0" }}>{stamp}⚠ {ev.s}</div>;
         return null;
       })}
     </Paper>
@@ -463,6 +479,15 @@ export default function App() {
 
         {/* Right: run view */}
         <Stack spacing={2} sx={{ flexGrow: 1, minWidth: 0 }}>
+          {state && (
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="caption" color="text.secondary">
+                ORIGINAL TASK
+              </Typography>
+              <Typography variant="body2">{state.task}</Typography>
+            </Paper>
+          )}
+
           {state?.gate?.type === "answers" && state.gate.questions && (
             <Paper variant="outlined" sx={{ p: 2, borderColor: "warning.main" }}>
               <Typography variant="subtitle2" color="warning.main">
@@ -575,6 +600,10 @@ export default function App() {
                         value={effective}
                         fullWidth
                         sx={{ my: 0.5, fontSize: 12 }}
+                        disabled={
+                          n.status === "done" &&
+                          (n.id === "plan" || n.id === "clarify" || n.id === "verify")
+                        }
                         onClick={(e) => e.stopPropagation()}
                         onChange={(e) => {
                           e.stopPropagation();
@@ -611,6 +640,17 @@ export default function App() {
           )}
 
           <EventFeed events={events} nodeId={selectedNode} />
+
+          {state && selectedNode && state.prompts?.[selectedNode] && (
+            <Paper variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="caption" color="text.secondary">
+                NODE INPUT — what {selectedNode} received
+              </Typography>
+              <Box component="pre" sx={{ m: 0, mt: 1, fontSize: 12, whiteSpace: "pre-wrap", maxHeight: 260, overflowY: "auto" }}>
+                {state.prompts[selectedNode]}
+              </Box>
+            </Paper>
+          )}
 
           {state?.artifacts && Object.keys(state.artifacts).length > 0 && (
             <Paper variant="outlined" sx={{ p: 2 }}>

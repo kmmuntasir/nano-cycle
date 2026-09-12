@@ -16,7 +16,7 @@ export interface RunState {
   task: string;
   tier: string;
   project: string;
-  status: "running" | "awaiting-gate" | "awaiting-answers" | "completed" | "failed" | "cancelled";
+  status: "running" | "awaiting-gate" | "awaiting-answers" | "completed" | "failed" | "cancelled" | "interrupted";
   createdAt: string;
   finishedAt: number | null;
   gateWaitMs: number;
@@ -39,6 +39,7 @@ export interface RunState {
   error: string | null;
   nodes: NodeState[];
   nodeModels?: Record<string, string>;
+  prompts?: Record<string, string>;
   artifacts: Record<string, unknown>;
 }
 

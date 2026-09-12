@@ -41,6 +41,23 @@ const webTools = {
 
 fs.mkdirSync(SANDBOX_DIR, { recursive: true });
 fs.mkdirSync(runsDir(), { recursive: true });
+
+// Orphan sweep: runs that a restart killed mid-flight must never linger as
+// "running" — mark them so the GUI and the registry tell the truth.
+for (const entry of fs.readdirSync(runsDir())) {
+  const f = path.join(runsDir(), entry, "state.json");
+  if (!fs.existsSync(f)) continue;
+  try {
+    const s = JSON.parse(fs.readFileSync(f, "utf8"));
+    if (["running", "awaiting-gate", "awaiting-answers"].includes(s.status)) {
+      s.status = "interrupted";
+      s.error = s.error ?? "interrupted by server restart";
+      fs.writeFileSync(f, JSON.stringify(s, null, 2));
+    }
+  } catch {
+    /* skip corrupt */
+  }
+}
 // The sandbox is a subfolder of nano-cycle (type: module) — pin it CommonJS so
 // generated .js modules behave like normal Node files regardless of the parent.
 const sandboxPkg = path.join(SANDBOX_DIR, "package.json");
@@ -62,8 +79,9 @@ const emit = {
     broadcast({ type: "state", runId: run.id, state: run.state });
   },
   event(runId, nodeId, ev) {
-    appendEvent(runId, nodeId, ev);
-    broadcast({ type: "event", runId, nodeId, ev });
+    const ts = Date.now();
+    appendEvent(runId, nodeId, ev, ts);
+    broadcast({ type: "event", runId, nodeId, ev: { ...ev, ts } });
   },
 };
 function broadcast(msg) {

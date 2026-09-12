@@ -110,7 +110,28 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
     settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 } }),
   });
 
+  // Stall watchdog: a provider connection can hang mid-stream with no events.
+  // If nothing arrives for stallMs, abort the attempt — execNode retries it.
+  const stallMs = Number(process.env.NANO_STALL_TIMEOUT_MS ?? 300_000);
+  let lastActivity = Date.now();
+  let stalled = false;
+  const touch = () => (lastActivity = Date.now());
+  const stallTimer =
+    stallMs > 0
+      ? setInterval(() => {
+          if (Date.now() - lastActivity >= stallMs) {
+            stalled = true;
+            onEvent(nodeId, {
+              t: "notice",
+              s: `stalled: no activity for ${Math.round(stallMs / 1000)}s — aborting attempt`,
+            });
+            session.abort().catch(() => {});
+          }
+        }, 5_000)
+      : null;
+
   const unsubscribe = session.subscribe((evt) => {
+    touch();
     switch (evt.type) {
       case "message_update": {
         const e = evt.assistantMessageEvent;
@@ -166,7 +187,11 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
       }
     }
   } finally {
+    if (stallTimer) clearInterval(stallTimer);
     unsubscribe();
+  }
+  if (stalled && store.artifacts.length === 0) {
+    throw new Error(`stalled: no activity for ${Math.round(stallMs / 1000)}s`);
   }
 
   if (requireArtifact && store.artifacts.length === 0) {

@@ -165,6 +165,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           },
         });
         run.state.artifacts[id] = artifact;
+        run.state.prompts[id] = prompt;
         endNode(run, id);
         return artifact;
       } catch (err) {
@@ -770,6 +771,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           error: null,
         })),
         artifacts: {},
+        prompts: {},
         nodeModels: {},
       };
       const run = {
