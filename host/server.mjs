@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createPipeline } from "./pipeline.mjs";
-import { DEFAULT_TIER, TIERS } from "./config.mjs";
+import { DEFAULT_TIER, MODEL_ROLES, TIERS } from "./config.mjs";
 import { addProject, loadProjects, resolveProject, SANDBOX_DIR } from "./projects.mjs";
 import { newRunId, runsDir, saveState, appendEvent, listRuns, loadRun } from "./state.mjs";
 
@@ -32,6 +32,19 @@ const modelRuntime = await ModelRuntime.create();
 
 fs.mkdirSync(SANDBOX_DIR, { recursive: true });
 fs.mkdirSync(runsDir(), { recursive: true });
+// The sandbox is a subfolder of nano-cycle (type: module) — pin it CommonJS so
+// generated .js modules behave like normal Node files regardless of the parent.
+const sandboxPkg = path.join(SANDBOX_DIR, "package.json");
+if (!fs.existsSync(sandboxPkg)) {
+  fs.writeFileSync(
+    sandboxPkg,
+    JSON.stringify(
+      { name: "nano-cycle-sandbox", private: true, version: "0.0.0", type: "commonjs" },
+      null,
+      2,
+    ),
+  );
+}
 
 const wsClients = new Set();
 const emit = {
@@ -96,6 +109,10 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, tiers);
     }
 
+    if (url.pathname === "/api/roles" && req.method === "GET") {
+      return json(res, 200, MODEL_ROLES);
+    }
+
     if (url.pathname === "/api/projects") {
       if (req.method === "GET") return json(res, 200, loadProjects());
       if (req.method === "POST") {
@@ -124,7 +141,9 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: String(e?.message ?? e) });
       }
       const models = {};
-      for (const n of TIERS[tier]) models[n.id] = String(body.models?.[n.id] ?? "auto");
+      for (const role of Object.keys(MODEL_ROLES)) {
+        models[role] = String(body.models?.[role] ?? "auto");
+      }
       const id = newRunId();
       const state = pipeline.start({ id, task, tier, project, models });
       return json(res, 201, state);

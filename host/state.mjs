@@ -19,8 +19,8 @@ export function runDir(runId) {
 
 export function newRunId() {
   const t = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}`;
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}${p(t.getMilliseconds(), 3)}`;
 }
 
 export function saveState(runId, state) {

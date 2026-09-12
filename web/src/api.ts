@@ -58,6 +58,7 @@ async function jfetch<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   models: () => jfetch<ModelInfo[]>("/api/models"),
   tiers: () => jfetch<Record<string, string[]>>("/api/tiers"),
+  roles: () => jfetch<Record<string, string>>("/api/roles"),
   projects: () => jfetch<Project[]>("/api/projects"),
   addProject: (name: string, path: string) =>
     jfetch<Project[]>("/api/projects", {

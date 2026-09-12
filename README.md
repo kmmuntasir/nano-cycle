@@ -28,15 +28,26 @@ npm start          # http://127.0.0.1:4177
 ## Tiers
 
 ```txt
-demo  plan → implement → verify                     (+1 fix round, divergence gate after plan)
-S     implement → verify                            (no planning)
-M     plan → implement-be ∥ implement-fe → verify   (parallel lanes when disjoint)
+demo  plan → implement → verify                                (+1 fix round, divergence gate)
+S     implement → verify                                       (no planning)
+M     plan → implement-be ∥ implement-fe → verify              (one slice, two parallel lanes)
+L     plan → [cap₁-be ∥ cap₁-fe] → [cap₂ …] → verify           (dynamic work graph)
 ```
 
-The **M** tier is the counterpart rule as code: the plan splits work into backend/frontend
-halves; when their file lists are disjoint the two implement nodes run as concurrent pi
-sessions in the project tree — overlapping lists fall back to sequential automatically.
+**L is graph-shaped.** The plan decomposes the task into 2–6 *capabilities* with
+capability-level dependencies; the engine compiles each into backend/frontend coder
+nodes — any number of parallel coders per side — and schedules waves greedily: nodes
+whose file lists overlap serialize within a lane, disjoint nodes run concurrently.
+A dependency between capabilities (shared module before its consumers) is respected
+by the DAG.
+
+The **counterpart rule is a compiler check**: a capability with only one side must
+declare why it legally has no counterpart (`plumbing` / `devops` / `qa` /
+`no-counterpart`) or the plan is rejected and the planner retries with the reason.
 Verify is an independent gate that must run the code before it may accept.
+
+Model selection is **role-based** — `plan`, `backend`, `frontend`, `verify` — so a
+dynamic graph with any number of coder nodes inherits the right model per role.
 
 ## How nodes are constrained
 

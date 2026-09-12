@@ -30,6 +30,9 @@ const STATUS_COLOR: Record<string, "default" | "primary" | "success" | "warning"
 
 const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
+const roleOf = (id: string) =>
+  id === "plan" ? "plan" : id === "verify" ? "verify" : id.endsWith("-fe") ? "frontend" : "backend";
+
 function EventFeed({ events, nodeId }: { events: RunEvent[]; nodeId: string | null }) {
   const feedRef = useRef<HTMLDivElement>(null);
   const shown = useMemo(
@@ -137,6 +140,7 @@ function AddProjectDialog({ open, onClose, onAdded }: { open: boolean; onClose: 
 export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [tiers, setTiers] = useState<Record<string, string[]>>({});
+  const [roles, setRoles] = useState<Record<string, string>>({});
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState("sandbox");
   const [addOpen, setAddOpen] = useState(false);
@@ -161,6 +165,7 @@ export default function App() {
       setTiers(t);
       setTier((cur) => (t[cur] ? cur : Object.keys(t)[0]));
     }).catch(() => {});
+    api.roles().then(setRoles).catch(() => {});
     api.projects().then((p) => {
       setProjects(p);
       if (!p.some((x) => x.name === "sandbox")) setProject(p[0]?.name ?? "sandbox");
@@ -283,17 +288,17 @@ export default function App() {
                 ))}
               </Select>
               {nodeIds.length === 0 &&
-                (tiers[tier] ?? []).map((n) => (
-                  <Stack key={n} direction="row" spacing={1} alignItems="center">
+                Object.entries(roles).map(([role, label]) => (
+                  <Stack key={role} direction="row" spacing={1} alignItems="center">
                     <Typography variant="caption" sx={{ width: 96 }}>
-                      {n} model
+                      {label}
                     </Typography>
                     <Select
                       size="small"
-                      value={modelPick[n] ?? "auto"}
+                      value={modelPick[role] ?? "auto"}
                       displayEmpty
                       fullWidth
-                      onChange={(e) => setModelPick((m) => ({ ...m, [n]: e.target.value }))}
+                      onChange={(e) => setModelPick((m) => ({ ...m, [role]: e.target.value }))}
                     >
                       <MenuItem value="auto">
                         <em>auto (provider default)</em>
@@ -381,7 +386,7 @@ export default function App() {
                     <Chip label={n.status} size="small" color={STATUS_COLOR[n.status] ?? "default"} />
                   </Stack>
                   <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                    {state.models[n.id] ?? "auto"}
+                    {state.models[roleOf(n.id)] ?? "auto"}
                   </Typography>
                   <Typography variant="caption" sx={{ display: "block" }}>
                     ▲{fmtTokens(n.usage.input)} ▼{fmtTokens(n.usage.output)}

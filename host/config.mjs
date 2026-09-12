@@ -1,9 +1,14 @@
 // Node profiles + tier graphs — the deterministic "who exists and what may it do".
-// The counterpart rule lives here as structure: M-tier plans split into backend /
-// frontend halves with disjoint file lists, so the lanes can run in parallel.
+//
+// Tiers demo/S/M have static graphs. Tier L is dynamic: the plan decomposes the
+// task into CAPABILITIES, and the engine compiles each capability into backend /
+// frontend coder nodes — N parallel coders per side when the plan calls for it —
+// with capability-level dependencies. The counterpart rule is enforced at
+// compile time: a capability with only one side must declare a legal class.
 import { Type } from "typebox";
 
 export const ARTIFACT_SCHEMAS = {
+  // static plan (demo/S/M): one slice split into two halves
   plan: Type.Object({
     task_summary: Type.String({ description: "One-paragraph restatement of the task" }),
     backend: Type.Array(
@@ -15,6 +20,38 @@ export const ARTIFACT_SCHEMAS = {
       { description: "Frontend files to create/modify (empty if none)" },
     ),
     acceptance_criteria: Type.Array(Type.String(), { description: "Verifiable checks" }),
+    divergence: Type.Optional(
+      Type.String({ description: "ONLY if the task is not doable as specified — explain why and stop" }),
+    ),
+  }),
+  // capability plan (L): a graph of capabilities the engine compiles into coder nodes
+  plan_caps: Type.Object({
+    task_summary: Type.String({ description: "One-paragraph restatement of the task" }),
+    capabilities: Type.Array(
+      Type.Object({
+        id: Type.String({ description: "Short slug, unique, e.g. customer-crud" }),
+        title: Type.String({ description: "What this capability delivers" }),
+        backend: Type.Array(
+          Type.Object({ path: Type.String(), purpose: Type.String() }),
+          { description: "Backend files (empty if none)" },
+        ),
+        frontend: Type.Array(
+          Type.Object({ path: Type.String(), purpose: Type.String() }),
+          { description: "Frontend files (empty if none)" },
+        ),
+        dependsOn: Type.Array(Type.String(), {
+          description: "Capability ids that must finish before this one starts",
+        }),
+        single_side_class: Type.Optional(
+          Type.Union(
+            ["plumbing", "devops", "qa", "no-counterpart"].map((c) => Type.Literal(c)),
+            { description: "REQUIRED when exactly one side is empty: why this capability legally has no counterpart" },
+          ),
+        ),
+      }),
+      { description: "2–6 capabilities; each independently implementable; a file belongs to exactly one capability-side" },
+    ),
+    acceptance_criteria: Type.Array(Type.String(), { description: "Verifiable checks for the WHOLE task" }),
     divergence: Type.Optional(
       Type.String({ description: "ONLY if the task is not doable as specified — explain why and stop" }),
     ),
@@ -38,6 +75,7 @@ const CODING_RULES = `
 Rules (binding):
 - TypeScript strict where applicable; no \`any\`; no TODOs or placeholder logic.
 - Keep it minimal — implement exactly the task, nothing extra.
+- Stay inside your assigned files — sibling coder nodes are working on other files concurrently.
 - If a command needs something unavailable, surface it instead of pretending success.
 `.trim();
 
@@ -47,40 +85,47 @@ export const NODE_PROFILES = {
     tools: ["read", "grep", "find", "ls", "report_artifact"],
     thinking: "low",
     schema: ARTIFACT_SCHEMAS.plan,
-    artifact: "plan",
+    role: "plan",
   },
   implement: {
     title: "Implement",
     tools: ["read", "write", "edit", "bash", "report_artifact"],
     thinking: "low",
     schema: ARTIFACT_SCHEMAS.implement,
-    artifact: "implement",
+    role: "backend",
     rules: CODING_RULES,
-  },
-  "implement-be": {
-    title: "Implement (backend)",
-    lane: "backend",
-    tools: ["read", "write", "edit", "bash", "report_artifact"],
-    thinking: "low",
-    schema: ARTIFACT_SCHEMAS.implement,
-    artifact: "implement-be",
-  },
-  "implement-fe": {
-    title: "Implement (frontend)",
-    lane: "frontend",
-    tools: ["read", "write", "edit", "bash", "report_artifact"],
-    thinking: "low",
-    schema: ARTIFACT_SCHEMAS.implement,
-    artifact: "implement-fe",
   },
   verify: {
     title: "Verify",
     tools: ["read", "bash", "report_artifact"],
     thinking: "low",
     schema: ARTIFACT_SCHEMAS.verify,
-    artifact: "verify",
+    role: "verify",
     rules: CODING_RULES,
   },
+};
+
+// Role = which model/config slot a node uses. Capability-derived coder nodes
+// (impl-<cap>-be / impl-<cap>-fe) resolve to the backend/frontend roles, so a
+// single run can drive N parallel backend coders and M parallel frontend coders.
+export function profileFor(nodeId) {
+  if (nodeId === "plan") return NODE_PROFILES.plan;
+  if (nodeId === "verify") return NODE_PROFILES.verify;
+  if (nodeId === "implement") return NODE_PROFILES.implement;
+  if (nodeId.endsWith("-be")) return { ...NODE_PROFILES.implement, lane: "backend" };
+  if (nodeId.endsWith("-fe")) return { ...NODE_PROFILES.implement, lane: "frontend" };
+  throw new Error(`unknown node: ${nodeId}`);
+}
+
+export function roleOf(nodeId) {
+  return profileFor(nodeId).role;
+}
+
+export const MODEL_ROLES = {
+  plan: "Plan",
+  backend: "Backend coder",
+  frontend: "Frontend coder",
+  verify: "Verify",
 };
 
 export const TIERS = {
@@ -95,15 +140,19 @@ export const TIERS = {
     { id: "implement", dependsOn: [] },
     { id: "verify", dependsOn: ["implement"] },
   ],
-  // M: full-stack slice — plan splits into BE/FE halves; the lanes run in
-  // parallel when their file lists are disjoint (the counterpart rule).
+  // M: one slice — plan splits into BE/FE halves; parallel when disjoint
   M: [
     { id: "plan", dependsOn: [] },
     { id: "implement-be", dependsOn: ["plan"] },
     { id: "implement-fe", dependsOn: ["plan"] },
     { id: "verify", dependsOn: ["implement-be", "implement-fe"] },
   ],
+  // L: DYNAMIC — the plan decomposes into capabilities; the engine compiles each
+  // into backend/frontend coder nodes with capability-level dependencies. The
+  // resulting graph can have any number of parallel coders per side.
+  L: [{ id: "plan", dependsOn: [] }],
 };
 
 export const MAX_FIX_ROUNDS = 1;
 export const DEFAULT_TIER = "demo";
+export const LEGAL_SINGLE_SIDES = ["plumbing", "devops", "qa", "no-counterpart"];
