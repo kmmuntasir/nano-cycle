@@ -15,10 +15,16 @@ export interface RunState {
   task: string;
   tier: string;
   project: string;
-  status: "running" | "awaiting-gate" | "completed" | "failed" | "cancelled";
+  status: "running" | "awaiting-gate" | "awaiting-answers" | "completed" | "failed" | "cancelled";
   createdAt: string;
   models: Record<string, string>;
-  gate: { nodeId: string; divergence: string } | null;
+  gate: {
+    type?: "divergence" | "answers";
+    nodeId: string;
+    divergence?: string;
+    questions?: { id: string; question: string; why?: string; suggested?: string }[];
+    round?: number;
+  } | null;
   error: string | null;
   nodes: NodeState[];
   artifacts: Record<string, unknown>;
@@ -71,17 +77,29 @@ export const api = {
       "/api/runs",
     ),
   getRun: (id: string) => jfetch<{ state: RunState; events: RunEvent[] }>(`/api/runs/${id}`),
-  start: (task: string, tier: string, project: string, models: Record<string, string>) =>
+  start: (
+    task: string,
+    tier: string,
+    project: string,
+    models: Record<string, string>,
+    opts?: { clarify?: boolean; maxFixRounds?: number },
+  ) =>
     jfetch<RunState>("/api/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ task, tier, project, models }),
+      body: JSON.stringify({ task, tier, project, models, ...opts }),
     }),
   gate: (id: string, action: "approve" | "cancel") =>
     jfetch<{ ok: boolean }>(`/api/runs/${id}/gate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action }),
+    }),
+  answers: (id: string, answers: Record<string, string>) =>
+    jfetch<{ ok: boolean }>(`/api/runs/${id}/answers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answers }),
     }),
   cancel: (id: string) => jfetch<{ ok: boolean }>(`/api/runs/${id}/cancel`, { method: "POST" }),
 };

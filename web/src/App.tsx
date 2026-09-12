@@ -24,6 +24,7 @@ const STATUS_COLOR: Record<string, "default" | "primary" | "success" | "warning"
   done: "success",
   completed: "success",
   "awaiting-gate": "warning",
+  "awaiting-answers": "warning",
   failed: "error",
   cancelled: "default",
 };
@@ -152,6 +153,9 @@ export default function App() {
   const [task, setTask] = useState("Create fizzbuzz.js that prints fizzbuzz for 1..15, one per line (divisible by 3 → Fizz, by 5 → Buzz, both → FizzBuzz).");
   const [tier, setTier] = useState("demo");
   const [modelPick, setModelPick] = useState<Record<string, string>>({});
+  const [clarify, setClarify] = useState(false);
+  const [maxFixRounds, setMaxFixRounds] = useState(2);
+  const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [starting, setStarting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -194,10 +198,19 @@ export default function App() {
     setSelectedNode(s.nodes[0]?.id ?? null);
   }, []);
 
+  // Seed answer drafts with each question's suggested default when a gate opens.
+  useEffect(() => {
+    if (state?.gate?.type === "answers") {
+      const seed: Record<string, string> = {};
+      for (const q of state.gate.questions ?? []) if (q.suggested) seed[q.id] = q.suggested;
+      setAnswerDrafts((d) => ({ ...seed, ...d }));
+    }
+  }, [state?.gate?.type, state?.gate?.round]);
+
   const start = async () => {
     setStarting(true);
     try {
-      const s = await api.start(task, tier, project, modelPick);
+      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds });
       await loadRun(s.id);
       refreshRuns();
     } catch (e) {
@@ -314,9 +327,33 @@ export default function App() {
               <Button variant="contained" disabled={starting || !task.trim()} onClick={start}>
                 {starting ? "Starting…" : "Start run"}
               </Button>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Button
+                  size="small"
+                  variant={clarify ? "contained" : "outlined"}
+                  onClick={() => setClarify((c) => !c)}
+                >
+                  {clarify ? "✓ Clarify first" : "Clarify first"}
+                </Button>
+                <Typography variant="caption" color="text.secondary">
+                  fix rounds
+                </Typography>
+                <Select
+                  size="small"
+                  value={maxFixRounds}
+                  onChange={(e) => setMaxFixRounds(Number(e.target.value))}
+                  sx={{ minWidth: 64 }}
+                >
+                  {[0, 1, 2, 3].map((n) => (
+                    <MenuItem key={n} value={n}>
+                      {n}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </Stack>
               <Typography variant="caption" color="text.secondary">
-                {tier}: {(tiers[tier] ?? []).join(" → ")} (+1 fix round on gaps). Runs in the
-                selected project's folder.
+                {tier}: {(tiers[tier] ?? []).join(" → ")} · {clarify ? "clarify loop first · " : ""}
+                {maxFixRounds} fix round(s) on gaps. Runs in the selected project's folder.
               </Typography>
             </Stack>
           </Paper>
@@ -348,7 +385,54 @@ export default function App() {
 
         {/* Right: run view */}
         <Stack spacing={2} sx={{ flexGrow: 1, minWidth: 0 }}>
-          {state?.gate && (
+          {state?.gate?.type === "answers" && state.gate.questions && (
+            <Paper variant="outlined" sx={{ p: 2, borderColor: "warning.main" }}>
+              <Typography variant="subtitle2" color="warning.main">
+                Clarification round {state.gate.round ?? 1} — the pipeline needs your answers
+              </Typography>
+              <Stack spacing={2} sx={{ mt: 1.5 }}>
+                {state.gate.questions.map((q, i) => (
+                  <Box key={q.id}>
+                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                      {i + 1}. {q.question}
+                    </Typography>
+                    {q.why && (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+                        why: {q.why}
+                      </Typography>
+                    )}
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label={q.suggested ? `suggested: ${q.suggested}` : "your answer"}
+                      value={answerDrafts[q.id] ?? q.suggested ?? ""}
+                      onChange={(e) => setAnswerDrafts((d) => ({ ...d, [q.id]: e.target.value }))}
+                    />
+                  </Box>
+                ))}
+              </Stack>
+              <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+                <Button
+                  variant="contained"
+                  onClick={() => {
+                    const answers: Record<string, string> = {};
+                    for (const q of state.gate?.questions ?? []) {
+                      answers[q.id] = answerDrafts[q.id] ?? q.suggested ?? "(no answer)";
+                    }
+                    api.answers(state.id, answers);
+                    setAnswerDrafts({});
+                  }}
+                >
+                  Submit answers
+                </Button>
+                <Button color="error" onClick={() => api.cancel(state.id)}>
+                  Cancel run
+                </Button>
+              </Stack>
+            </Paper>
+          )}
+
+          {state?.gate?.type === "divergence" && (
             <Paper variant="outlined" sx={{ p: 2, borderColor: "warning.main" }}>
               <Typography variant="subtitle2" color="warning.main">
                 Divergence gate — {state.gate.nodeId}

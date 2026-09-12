@@ -2,8 +2,20 @@
 // Policy is code: readiness from dependsOn, N parallel coder lanes packed by
 // file-disjointness, divergence gates, bounded fix rounds, counterpart-rule
 // validation at compile time, per-node context injection from the project.
+import fs from "node:fs";
 import path from "node:path";
-import { ARTIFACT_SCHEMAS, TIERS, MAX_FIX_ROUNDS, profileFor, roleOf, LEGAL_SINGLE_SIDES } from "./config.mjs";
+import { Type } from "typebox";
+import { defineTool } from "@earendil-works/pi-coding-agent";
+import {
+  ARTIFACT_SCHEMAS,
+  TIERS,
+  MAX_FIX_ROUNDS,
+  CLARIFY_MAX_ROUNDS,
+  CLARIFY_PROFILE,
+  profileFor,
+  roleOf,
+  LEGAL_SINGLE_SIDES,
+} from "./config.mjs";
 import { loadContext } from "./rules.mjs";
 import {
   planSystem,
@@ -14,8 +26,10 @@ import {
   implementPrompt,
   verifySystem,
   verifyPrompt,
+  clarifySystem,
+  clarifyPrompt,
 } from "./prompts.mjs";
-import { runNode, addUsage } from "./runner.mjs";
+import { runNode, makeTool, addUsage } from "./runner.mjs";
 
 const SYSTEM_FOR = {
   plan: planSystem,
@@ -27,7 +41,39 @@ const SYSTEM_FOR = {
 const pathKey = (p) => path.normalize(p).toLowerCase();
 const disjoint = (a, b) => !a.some((x) => b.includes(x));
 
-export function createPipeline({ modelRuntime, emit }) {
+// Requirements are durable: the finalized spec lands inside the project it describes.
+function writeSpecFile(run, emit) {
+  try {
+    const spec = run.spec;
+    const dir = path.join(run.projectPath, ".nano-cycle");
+    fs.mkdirSync(dir, { recursive: true });
+    const md = [
+      `# Spec — ${run.task}`,
+      "",
+      `Run: ${run.id} · Tier: ${run.tier} · Date: ${run.state.createdAt}`,
+      "",
+      "## Summary",
+      "",
+      spec.summary,
+      "",
+      "## Locked decisions",
+      "",
+      ...((spec.decisions ?? []).map((d) => `- **${d.topic}**: ${d.decision}`) || ["- (none)"]),
+      "",
+      "## Acceptance criteria",
+      "",
+      ...((spec.acceptance_criteria ?? []).map((c) => `- [ ] ${c}`) || ["- (none)"]),
+      ...(spec.out_of_scope?.length ? ["", "## Out of scope", "", ...spec.out_of_scope.map((o) => `- ${o}`)] : []),
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(dir, `spec-${run.id}.md`), md);
+    emit.event(run.id, "clarify", { t: "notice", s: `spec written: .nano-cycle/spec-${run.id}.md` });
+  } catch (e) {
+    emit.event(run.id, "clarify", { t: "notice", s: `spec file write failed: ${e.message}` });
+  }
+}
+
+export function createPipeline({ modelRuntime, emit, webTools }) {
   const runs = new Map(); // runId -> controller
 
   const nodeState = (run, id) => run.state.nodes.find((n) => n.id === id);
@@ -74,9 +120,21 @@ export function createPipeline({ modelRuntime, emit }) {
     let lastErr = null;
     for (let attempt = 0; attempt <= 1; attempt++) {
       try {
+        const store = { artifacts: [] };
+        const reportTool = makeTool({
+          name: "report_artifact",
+          label: "Report artifact",
+          description:
+            "Report the structured result of this pipeline node. Call it EXACTLY ONCE when your work is done.",
+          schema: profile.schema,
+          onCall: (p) => store.artifacts.push(p),
+        });
         const artifact = await runNode({
           nodeId: id,
-          profile,
+          tools: profile.tools,
+          customTools: [reportTool],
+          artifactStore: store,
+          thinking: profile.thinking,
           systemPrompt,
           prompt,
           cwd: run.projectPath,
@@ -190,8 +248,10 @@ export function createPipeline({ modelRuntime, emit }) {
 
   async function planPhase(run, tier) {
     const dynamic = tier === "L";
-    const prompt = dynamic ? planCapsPrompt(run.task, run.projectPath) : planPrompt(run.task, run.projectPath);
-    const schemaName = dynamic ? "plan_caps" : "plan";
+    const spec = run.spec;
+    const prompt =
+      (dynamic ? planCapsPrompt(run.task, run.projectPath) : planPrompt(run.task, run.projectPath)) +
+      (spec ? `\n\n${specIntoPrompt(spec)}\n\nYour plan's acceptance_criteria MUST include every spec acceptance criterion verbatim (you may add more precise implementation-level criteria).` : "");
     let lastRejection = null;
     for (let attempt = 0; attempt <= 1; attempt++) {
       const extra = lastRejection
@@ -200,10 +260,28 @@ export function createPipeline({ modelRuntime, emit }) {
       const plan = await execNode(run, "plan", prompt + extra);
       try {
         if (plan?.divergence) {
-          run.state.gate = { nodeId: "plan", divergence: plan.divergence };
+          run.state.gate = { type: "divergence", nodeId: "plan", divergence: plan.divergence };
           emit.event(run.id, "plan", { t: "notice", s: `divergence: ${plan.divergence}` });
           await waitGate(run); // throws if cancelled at the gate
           continue; // user approved despite divergence — accept the plan as-is
+        }
+        if (spec) {
+          // spec contract check — the owner's criteria must survive planning
+          const planCrit = (plan.acceptance_criteria ?? []).map((c) => c.toLowerCase().trim());
+          const missing = (spec.acceptance_criteria ?? []).filter(
+            (c) => !planCrit.some((p) => p.includes(c.toLowerCase().trim()) || c.toLowerCase().trim().includes(p)),
+          );
+          if (missing.length) {
+            emit.event(run.id, "plan", {
+              t: "notice",
+              s: `spec contract warning: ${missing.length} spec criteria not carried verbatim into the plan — the verifier still gates on the spec`,
+            });
+          } else {
+            emit.event(run.id, "plan", {
+              t: "notice",
+              s: `spec contract ok: all ${(spec.acceptance_criteria ?? []).length} spec criteria carried into the plan`,
+            });
+          }
         }
         if (dynamic) {
           validateCapabilities(plan);
@@ -225,10 +303,189 @@ export function createPipeline({ modelRuntime, emit }) {
       } catch (err) {
         lastRejection = String(err?.message ?? err);
         emit.event(run.id, "plan", { t: "notice", s: `plan rejected: ${lastRejection}` });
+        emit.event(run.id, "plan", { t: "notice", s: (err.stack ?? "").split("\n").slice(0, 5).join(" | ") });
         delete run.state.artifacts.plan;
       }
     }
     throw new Error(`plan rejected after retry: ${lastRejection}`);
+  }
+
+  // --- clarify (PM) phase — Step 1: ask → answers → repeat → spec ----------------
+
+  function specIntoPrompt(spec) {
+    return [
+      "REQUIREMENTS SPEC (owner-locked — honor exactly):",
+      `Summary: ${spec.summary}`,
+      ...(spec.decisions?.length
+        ? [`Locked decisions:\n${spec.decisions.map((d) => `- ${d.topic}: ${d.decision}`).join("\n")}`]
+        : []),
+      ...(spec.acceptance_criteria?.length
+        ? [`Acceptance criteria (THE contract — the verifier gates on these):\n${spec.acceptance_criteria.map((c) => `- ${c}`).join("\n")}`]
+        : []),
+      ...(spec.out_of_scope?.length ? [`Out of scope: ${spec.out_of_scope.join("; ")}`] : []),
+    ].join("\n");
+  }
+
+  async function clarifyPhase(run) {
+    const rounds = [];
+    for (let round = 1; round <= CLARIFY_MAX_ROUNDS; round++) {
+      const forcedFinalize = round === CLARIFY_MAX_ROUNDS;
+      const history = rounds.map((r, i) => ({
+        round: i + 1,
+        qna: r.questions.map((q) => ({ question: q.question, answer: r.answers[q.id] ?? "(no answer)" })),
+      }));
+      const prompt = clarifyPrompt(run.task, history, run.projectPath, forcedFinalize);
+      const result = await clarifyNode(run, prompt, forcedFinalize);
+
+      if (result.type === "spec") {
+        emit.event(run.id, "clarify", {
+          t: "notice",
+          s: `spec finalized after ${rounds.length} clarification round(s): ${result.spec.acceptance_criteria?.length ?? 0} acceptance criteria`,
+        });
+        return result.spec;
+      }
+
+      // questions → human answers gate
+      run.state.gate = { type: "answers", nodeId: "clarify", round, questions: result.questions };
+      run.state.status = "awaiting-answers";
+      emit.state(run);
+      emit.event(run.id, "clarify", {
+        t: "notice",
+        s: `asking ${result.questions.length} question(s): ${result.questions.map((q) => q.id).join(", ")}`,
+      });
+      const answers = await new Promise((resolve) => {
+        run.answersResolver = resolve;
+      });
+      run.answersResolver = null;
+      if (answers === "cancel") throw new Error("cancelled at answers gate");
+      rounds.push({ questions: result.questions, answers });
+      run.state.gate = null;
+      run.state.status = "running";
+      emit.state(run);
+    }
+    throw new Error("clarification rounds exhausted without a spec");
+  }
+
+  // PM-side analyst: the model decides WHEN to investigate; the driver owns the
+  // spawned read-only session. Capped per clarify phase to bound cost.
+  function makeInvestigateTool(run) {
+    let calls = 0;
+    return defineTool({
+      name: "investigate",
+      label: "Investigate",
+      description:
+        "Spawn a read-only analyst session to research a question about this project (code, " +
+        "structure, conventions, data). Returns a concise evidence-backed digest with file paths.",
+      parameters: Type.Object({
+        question: Type.String({ description: "What the analyst should investigate and report on" }),
+      }),
+      execute: async (_toolCallId, params) => {
+        if (calls >= 3) {
+          return {
+            content: [{ type: "text", text: "Investigate limit reached (3 per clarify phase). Decide with what you have." }],
+            details: {},
+          };
+        }
+        calls += 1;
+        emit.event(run.id, "clarify", { t: "notice", s: `analyst dispatched: ${String(params.question).slice(0, 80)}` });
+        let digest = "";
+        const usage = { input: 0, output: 0, cacheRead: 0 };
+        await runNode({
+          nodeId: "analyst",
+          tools: ["read", "grep", "find", "ls"],
+          customTools: [],
+          requireArtifact: false,
+          thinking: "low",
+          systemPrompt:
+            "You are a read-only ANALYST. Investigate the project and answer with a concise, " +
+            "evidence-backed digest citing file paths. You have no write tools.",
+          prompt: String(params.question),
+          cwd: run.projectPath,
+          modelSpec: run.models.plan ?? "auto",
+          modelRuntime,
+          signal: run.current.get("clarify")?.signal,
+          onEvent: (_id, ev) => {
+            if (ev.t === "text") digest += ev.s;
+            if (ev.t === "usage") addUsage(usage, ev.usage);
+            emit.event(run.id, "analyst", ev);
+          },
+        });
+        const cs = nodeState(run, "clarify");
+        if (cs) addUsage(cs.usage, usage);
+        return { content: [{ type: "text", text: digest.trim() || "(analyst returned nothing)" }], details: {} };
+      },
+    });
+  }
+
+  async function clarifyNode(run, prompt, forcedFinalize) {
+    const node = nodeState(run, "clarify");
+    beginNode(run, "clarify");
+    const store = { result: null };
+    const tools = [];
+    if (!forcedFinalize) {
+      tools.push(
+        makeTool({
+          name: "ask_questions",
+          label: "Ask questions",
+          description:
+            "Ask the owner up to 5 high-leverage clarification questions. Call this when essential decisions are still unknown.",
+          schema: ARTIFACT_SCHEMAS.questions,
+          onCall: (p) => store.result = { type: "questions", questions: p.questions ?? [] },
+        }),
+      );
+    }
+    tools.push(
+      makeTool({
+        name: "finalize_spec",
+        label: "Finalize spec",
+        description:
+          "Finalize the requirements spec. Call this when nothing essential remains unknown" +
+          (forcedFinalize ? " — the clarification round limit has been reached, so finalize with what you know." : "."),
+        schema: ARTIFACT_SCHEMAS.spec,
+        onCall: (p) => store.result = { type: "spec", spec: p },
+      }),
+    );
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    byName.investigate = makeInvestigateTool(run);
+    if (webTools?.search) byName.web_search = webTools.search;
+    if (webTools?.reader) byName.web_reader = webTools.reader;
+    const available = Object.keys(byName);
+    emit.event(run.id, "clarify", { t: "notice", s: `tools available: ${available.join(", ")}` });
+    let lastErr = null;
+    for (let attempt = 0; attempt <= 1; attempt++) {
+      try {
+        await runNode({
+          nodeId: "clarify",
+          tools: available,
+          customTools: available.map((n) => byName[n]),
+          artifactStore: { artifacts: [] },
+          requireArtifact: false, // clarify decides via ask/finalize tools, not report_artifact
+          thinking: CLARIFY_PROFILE.thinking,
+          systemPrompt: clarifySystem(),
+          prompt: attempt === 0 ? prompt : prompt + "\n\nIMPORTANT: respond ONLY by calling the ask_questions tool or the finalize_spec tool — do not write your answer as text.",
+          cwd: run.projectPath,
+          modelSpec: run.models.plan ?? "auto",
+          modelRuntime,
+          signal: run.current.get("clarify")?.signal,
+          onEvent: (nodeId, ev) => {
+            if (ev.t === "usage") addUsage(node.usage, ev.usage);
+            emit.event(run.id, nodeId, ev);
+          },
+        });
+        if (store.result) {
+          endNode(run, "clarify");
+          return store.result;
+        }
+        throw new Error("clarify node finished without calling ask_questions or finalize_spec");
+      } catch (err) {
+        lastErr = err;
+        if (run.cancelRequested) break;
+        node.retries += 1;
+        emit.event(run.id, "clarify", { t: "notice", s: `attempt failed: ${err.message}` });
+      }
+    }
+    endNode(run, "clarify", { status: run.cancelRequested ? "cancelled" : "failed", error: String(lastErr?.message ?? lastErr) });
+    throw lastErr ?? new Error("clarify failed");
   }
 
   // --- scheduling ---------------------------------------------------------------
@@ -248,6 +505,7 @@ export function createPipeline({ modelRuntime, emit }) {
         plan: run.state.artifacts.plan,
         implementReports: implementReports(run),
         workspace: run.projectPath,
+        spec: run.spec,
       });
     }
     const work = run.nodeWork[n.id];
@@ -259,6 +517,7 @@ export function createPipeline({ modelRuntime, emit }) {
         lane: work.lane,
         title: work.title,
         files: work.files,
+        spec: run.spec,
       });
     }
     return implementPrompt({
@@ -266,6 +525,7 @@ export function createPipeline({ modelRuntime, emit }) {
       workspace: run.projectPath,
       feedback: run.feedback,
       planJson: run.state.artifacts.plan,
+      spec: run.spec,
     });
   }
 
@@ -290,9 +550,11 @@ export function createPipeline({ modelRuntime, emit }) {
   }
 
   async function runDag(run) {
-    const graph = run.tier === "L" ? (run.dynamicGraph ?? TIERS.L) : TIERS[run.tier];
     const done = (id) => nodeState(run, id)?.status === "done";
     while (!run.cancelRequested) {
+      // Resolved per-iteration: for L the compile happens mid-round (right after
+      // plan), and the running loop must pick the graph up immediately.
+      const graph = run.tier === "L" ? (run.dynamicGraph ?? TIERS.L) : TIERS[run.tier];
       const ready = graph.filter(
         (n) => nodeState(run, n.id)?.status === "queued" && n.dependsOn.every(done),
       );
@@ -337,12 +599,21 @@ export function createPipeline({ modelRuntime, emit }) {
 
   async function execute(run) {
     try {
+      // Step 1 — clarify (PM loop): ask → answers → repeat → spec.
+      if (run.clarify) {
+        const spec = await clarifyPhase(run);
+        run.spec = spec;
+        run.state.artifacts.spec = spec;
+        writeSpecFile(run, emit);
+      }
+
+      // Step 2 — build: plan → parallel coders → verify, verdict-gated.
       let verdict = null;
-      for (let round = 0; round <= MAX_FIX_ROUNDS; round++) {
+      for (let round = 0; round <= run.maxFixRounds; round++) {
         if (round > 0) {
           // Requeue coder + verify nodes; the plan (and compiled graph) stands.
           for (const n of run.state.nodes) {
-            if (n.id !== "plan" && n.id.startsWith("impl")) {
+            if (n.id !== "plan" && n.id !== "clarify" && n.id.startsWith("impl")) {
               n.status = "queued";
               n.startedAt = null;
               n.endedAt = null;
@@ -358,7 +629,7 @@ export function createPipeline({ modelRuntime, emit }) {
           .filter((c) => !c.pass)
           .map((c) => `- ${c.criterion}: ${c.evidence ?? ""}`)
           .join("\n");
-        if (round < MAX_FIX_ROUNDS) {
+        if (round < run.maxFixRounds) {
           emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1}` });
         }
       }
@@ -377,7 +648,7 @@ export function createPipeline({ modelRuntime, emit }) {
   }
 
   return {
-    start({ id, task, tier, project, models }) {
+    start({ id, task, tier, project, models, clarify, maxFixRounds }) {
       const tierGraph = TIERS[tier];
       if (!tierGraph) throw new Error(`unknown tier ${tier}`);
       const state = {
@@ -390,7 +661,10 @@ export function createPipeline({ modelRuntime, emit }) {
         models,
         gate: null,
         error: null,
-        nodes: tierGraph.map((n) => ({
+        nodes: [
+          ...(clarify ? [{ id: "clarify", dependsOn: [] }] : []),
+          ...tierGraph.map((n) => ({ ...n })),
+        ].map((n) => ({
           id: n.id,
           status: "queued",
           usage: { input: 0, output: 0, cacheRead: 0 },
@@ -407,9 +681,13 @@ export function createPipeline({ modelRuntime, emit }) {
         tier,
         projectPath: project.path,
         models,
+        clarify: !!clarify,
+        maxFixRounds: Number.isFinite(maxFixRounds) ? Math.min(Math.max(maxFixRounds, 0), 5) : MAX_FIX_ROUNDS,
+        spec: null,
         state,
         current: new Map(),
         gateResolver: null,
+        answersResolver: null,
         cancelRequested: false,
         feedback: null,
         nodeWork: {}, // nodeId → {lane, title, files}
@@ -420,6 +698,15 @@ export function createPipeline({ modelRuntime, emit }) {
       emit.state(run);
       execute(run).catch(() => {}); // execute() never throws — it finalizes state
       return state;
+    },
+
+    answer(id, answers) {
+      const run = runs.get(id);
+      if (!run?.answersResolver) return false;
+      const r = run.answersResolver;
+      run.answersResolver = null;
+      r(answers ?? {});
+      return true;
     },
 
     gate(id, action) {
@@ -440,6 +727,11 @@ export function createPipeline({ modelRuntime, emit }) {
       if (run.gateResolver) {
         const r = run.gateResolver;
         run.gateResolver = null;
+        r("cancel");
+      }
+      if (run.answersResolver) {
+        const r = run.answersResolver;
+        run.answersResolver = null;
         r("cancel");
       }
       return true;

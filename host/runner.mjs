@@ -32,6 +32,20 @@ function makeReportTool(schema, store) {
   });
 }
 
+/** Generic structured-output tool factory (clarify phase uses ask/finalize tools). */
+export function makeTool({ name, label, description, schema, onCall }) {
+  return defineTool({
+    name,
+    label,
+    description,
+    parameters: schema,
+    execute: async (_toolCallId, params) => {
+      onCall(params ?? {});
+      return { content: [{ type: "text", text: "Recorded. Nothing else to do." }], details: {} };
+    },
+  });
+}
+
 function normUsage(u) {
   if (!u) return null;
   const g = (...keys) => {
@@ -64,10 +78,12 @@ const preview = (v, max = 160) => {
 /**
  * Run one node to completion. Returns the reported artifact.
  * onEvent(nodeId, ev) receives normalized UI events.
+ * tools = allowlist strings; customTools = tool definitions (their names must
+ * appear in `tools` to be reachable).
  */
-export async function runNode({ nodeId, profile, systemPrompt, prompt, cwd, modelSpec, modelRuntime, onEvent, signal }) {
-  const store = { artifacts: [], schema: profile.schema };
-  const { model, thinking } = resolveModel(modelSpec, modelRuntime);
+export async function runNode({ nodeId, tools, customTools = [], artifactStore, requireArtifact = true, systemPrompt, prompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking }) {
+  const store = artifactStore ?? { artifacts: [] };
+  const { model, thinking: lvl } = resolveModel(modelSpec, modelRuntime);
   if (modelSpec && modelSpec !== "auto" && !model) {
     throw new Error(`model "${modelSpec}" did not resolve`);
   }
@@ -86,9 +102,9 @@ export async function runNode({ nodeId, profile, systemPrompt, prompt, cwd, mode
     cwd,
     modelRuntime,
     ...(model ? { model } : {}),
-    ...(thinking ?? profile.thinking ? { thinkingLevel: thinking ?? profile.thinking } : {}),
-    tools: profile.tools, // includes "report_artifact" — allowlist is the enforcement
-    customTools: [makeReportTool(profile.schema, store)],
+    ...(lvl ?? thinking ? { thinkingLevel: lvl ?? thinking } : {}),
+    tools, // allowlist is the enforcement
+    customTools,
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
     settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 } }),
@@ -139,7 +155,7 @@ export async function runNode({ nodeId, profile, systemPrompt, prompt, cwd, mode
     if (last?.stopReason === "error") {
       throw new Error(last.errorMessage ?? "provider call failed");
     }
-    if (store.artifacts.length === 0) {
+    if (requireArtifact && store.artifacts.length === 0) {
       onEvent(nodeId, { t: "notice", s: "no report_artifact call — retrying once" });
       await session.prompt(
         "You finished without calling the report_artifact tool. Call it now, EXACTLY ONCE, with the structured result of your work.",
@@ -153,7 +169,9 @@ export async function runNode({ nodeId, profile, systemPrompt, prompt, cwd, mode
     unsubscribe();
   }
 
-  if (store.artifacts.length === 0) throw new Error(`${nodeId}: completed without report_artifact`);
+  if (requireArtifact && store.artifacts.length === 0) {
+    throw new Error(`${nodeId}: completed without report_artifact`);
+  }
   return store.artifacts[store.artifacts.length - 1];
 }
 

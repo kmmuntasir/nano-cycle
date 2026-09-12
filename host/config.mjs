@@ -60,6 +60,29 @@ export const ARTIFACT_SCHEMAS = {
     summary: Type.String(),
     files_written: Type.Array(Type.String()),
   }),
+  // clarify-phase tools: the PM loop
+  questions: Type.Object({
+    questions: Type.Array(
+      Type.Object({
+        id: Type.String({ description: "Short stable slug, e.g. auth-strategy" }),
+        question: Type.String({ description: "The question for the owner" }),
+        why: Type.Optional(Type.String({ description: "What changes in the build depending on the answer" })),
+        suggested: Type.Optional(Type.String({ description: "Suggested default answer, if any" })),
+      }),
+      { description: "1–5 high-leverage questions. NEVER ask what the project files already answer." },
+    ),
+  }),
+  spec: Type.Object({
+    summary: Type.String({ description: "The refined task, fully decided" }),
+    decisions: Type.Array(
+      Type.Object({ topic: Type.String(), decision: Type.String() }),
+      { description: "Locked decisions (incl. the outcomes of clarification rounds)" },
+    ),
+    acceptance_criteria: Type.Array(Type.String(), {
+      description: "THE contract — runnable/checkable criteria the verifier will gate on",
+    }),
+    out_of_scope: Type.Optional(Type.Array(Type.String())),
+  }),
   verify: Type.Object({
     verdict: Type.Union([Type.Literal("accepted"), Type.Literal("gaps-found")]),
     checks: Type.Array(
@@ -153,6 +176,15 @@ export const TIERS = {
   L: [{ id: "plan", dependsOn: [] }],
 };
 
-export const MAX_FIX_ROUNDS = 1;
+export const MAX_FIX_ROUNDS = 2;
 export const DEFAULT_TIER = "demo";
 export const LEGAL_SINGLE_SIDES = ["plumbing", "devops", "qa", "no-counterpart"];
+
+// Clarify (PM) phase — Step 1 of the two-step flow: ask → answers → repeat
+// until the node finalizes a spec. Capped for safety; the node decides when
+// nothing essential remains unknown.
+export const CLARIFY_MAX_ROUNDS = 6;
+export const CLARIFY_PROFILE = {
+  tools: ["read", "grep", "find", "ls", "ask_questions", "finalize_spec"],
+  thinking: "low",
+};

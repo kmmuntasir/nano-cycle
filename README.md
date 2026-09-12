@@ -4,9 +4,32 @@ A deterministic agent pipeline with a live monitoring GUI. The script owns seque
 spawning, context, tool allowlists, and structured outputs — the model only makes
 judgment calls inside a node. Built on the [pi SDK](https://pi.dev/docs/latest/sdk).
 
-```txt
-plan → implement-be ∥ implement-fe → verify     (M tier — parallel lanes)
+## The two-step flow
+
+**Step 1 — Clarify (PM loop).** Toggle *Clarify first* on a run. The clarify node
+inspects the project (read-only + `investigate` analyst sessions + optional web tools),
+asks the owner high-leverage questions in batches (answered in the GUI), and repeats
+until it locks a **spec**: refined summary, decisions, and acceptance criteria. The spec
+is written to `<project>/.nano-cycle/spec-<runid>.md` and is THE contract.
+
+**Step 2 — Build.** plan → parallel coders → verify, fully autonomous. The spec's
+acceptance criteria flow verbatim into the plan and the verifier gates on them.
+Verify rejects → coder nodes re-run with the failing checks as feedback
+(`maxFixRounds`, default 2) → accepted or honestly `failed`.
+
+## Web research (optional)
+
+Clarify nodes can use `web_search` (SearXNG) and `web_reader` (obscura) when available:
+
+```bash
+docker run -d -p 8888:8080 searxng/searxng   # then:
+NANO_SEARXNG_URL=http://127.0.0.1:8888 npm start
 ```
+
+`web_reader` needs `obscura` on PATH. Without these, clarify runs fine on project
+context alone.
+
+## Run
 
 Works on **any local project, any language**: register a folder, pick a tier and
 per-node models, watch every node stream live.
@@ -28,7 +51,7 @@ npm start          # http://127.0.0.1:4177
 ## Tiers
 
 ```txt
-demo  plan → implement → verify                                (+1 fix round, divergence gate)
+demo  plan → implement → verify                                (+fix rounds, divergence gate)
 S     implement → verify                                       (no planning)
 M     plan → implement-be ∥ implement-fe → verify              (one slice, two parallel lanes)
 L     plan → [cap₁-be ∥ cap₁-fe] → [cap₂ …] → verify           (dynamic work graph)

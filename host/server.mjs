@@ -9,6 +9,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createPipeline } from "./pipeline.mjs";
 import { DEFAULT_TIER, MODEL_ROLES, TIERS } from "./config.mjs";
 import { addProject, loadProjects, resolveProject, SANDBOX_DIR } from "./projects.mjs";
+import { detectWebCapabilities, makeWebReaderTool, makeWebSearchTool } from "./webtools.mjs";
 import { newRunId, runsDir, saveState, appendEvent, listRuns, loadRun } from "./state.mjs";
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,14 @@ const MIME = {
 
 console.log("[nano-cycle] initializing ModelRuntime…");
 const modelRuntime = await ModelRuntime.create();
+
+// Optional research capabilities for clarify/plan nodes.
+const searxngUrl = process.env.NANO_SEARXNG_URL;
+const webCaps = detectWebCapabilities(searxngUrl);
+const webTools = {
+  search: webCaps.search ? makeWebSearchTool(searxngUrl) : null,
+  reader: webCaps.reader ? makeWebReaderTool() : null,
+};
 
 fs.mkdirSync(SANDBOX_DIR, { recursive: true });
 fs.mkdirSync(runsDir(), { recursive: true });
@@ -64,7 +73,7 @@ function broadcast(msg) {
   }
 }
 
-const pipeline = createPipeline({ modelRuntime, emit });
+const pipeline = createPipeline({ modelRuntime, emit, webTools });
 
 // --- http ---------------------------------------------------------------------
 
@@ -145,11 +154,19 @@ const server = http.createServer(async (req, res) => {
         models[role] = String(body.models?.[role] ?? "auto");
       }
       const id = newRunId();
-      const state = pipeline.start({ id, task, tier, project, models });
+      const state = pipeline.start({
+        id,
+        task,
+        tier,
+        project,
+        models,
+        clarify: !!body.clarify,
+        maxFixRounds: Number(body.maxFixRounds),
+      });
       return json(res, 201, state);
     }
 
-    const runMatch = url.pathname.match(/^\/api\/runs\/([\w-]+)(\/(gate|cancel))?$/);
+    const runMatch = url.pathname.match(/^\/api\/runs\/([\w-]+)(\/(gate|cancel|answers))?$/);
     if (runMatch) {
       const [, id, , action] = runMatch;
       if (req.method === "GET" && !action) {
@@ -162,6 +179,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === "POST" && action === "gate") {
         const body = await readBody(req);
         const ok = pipeline.gate(id, body.action === "cancel" ? "cancel" : "approve");
+        return json(res, ok ? 200 : 409, { ok });
+      }
+      if (req.method === "POST" && action === "answers") {
+        const body = await readBody(req);
+        const ok = pipeline.answer(id, body.answers ?? {});
         return json(res, ok ? 200 : 409, { ok });
       }
       if (req.method === "POST" && action === "cancel") {
