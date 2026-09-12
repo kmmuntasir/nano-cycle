@@ -64,12 +64,30 @@ export const ARTIFACT_SCHEMAS = {
   questions: Type.Object({
     questions: Type.Array(
       Type.Object({
-        id: Type.String({ description: "Short stable slug, e.g. auth-strategy" }),
-        question: Type.String({ description: "The question for the owner" }),
-        why: Type.Optional(Type.String({ description: "What changes in the build depending on the answer" })),
-        suggested: Type.Optional(Type.String({ description: "Suggested default answer, if any" })),
+        id: Type.String({ description: "Short stable slug, e.g. delete-policy" }),
+        question: Type.String({ description: "The product decision the owner must make" }),
+        type: Type.Union(
+          [Type.Literal("multiple-choice"), Type.Literal("boolean"), Type.Literal("text")],
+          { description: "Question format" },
+        ),
+        options: Type.Optional(
+          Type.Array(
+            Type.Object({
+              label: Type.String(),
+              recommended: Type.Optional(Type.Boolean()),
+              tradeoff: Type.Optional(Type.String()),
+            }),
+            { description: "For multiple-choice: 2–3 options, mark the recommended one" },
+          ),
+        ),
+        why: Type.Optional(Type.String({ description: "One line: what changes in the build depending on the answer" })),
+        suggested: Type.Optional(Type.String({ description: "Suggested answer if the owner just accepts defaults" })),
       }),
-      { description: "1–5 high-leverage questions. NEVER ask what the project files already answer." },
+      {
+        description:
+          "1–5 questions, OWNER-ONLY product decisions (behavior policy, deletion semantics, naming/IA, migration, roles, scope deferrals). " +
+          "NEVER ask what the project files answer; NEVER ask trivial questions with safe defaults — lock those as flagged assumptions instead.",
+      },
     ),
   }),
   spec: Type.Object({
@@ -145,6 +163,7 @@ export function roleOf(nodeId) {
 }
 
 export const MODEL_ROLES = {
+  clarify: "PM (clarify)",
   plan: "Plan",
   backend: "Backend coder",
   frontend: "Frontend coder",
@@ -180,11 +199,10 @@ export const MAX_FIX_ROUNDS = 2;
 export const DEFAULT_TIER = "demo";
 export const LEGAL_SINGLE_SIDES = ["plumbing", "devops", "qa", "no-counterpart"];
 
-// Clarify (PM) phase — Step 1 of the two-step flow: ask → answers → repeat
-// until the node finalizes a spec. Capped for safety; the node decides when
-// nothing essential remains unknown.
-export const CLARIFY_MAX_ROUNDS = 6;
+// Clarify (PM) phase — Step 1 of the two-step flow: ask → answers → repeat.
+// UNCAPPED by design: the PM decides when nothing essential remains unknown.
+// The owner can always cancel from the GUI.
 export const CLARIFY_PROFILE = {
-  tools: ["read", "grep", "find", "ls", "ask_questions", "finalize_spec"],
+  tools: ["read", "grep", "find", "ls", "investigate", "ask_questions", "finalize_spec"],
   thinking: "low",
 };

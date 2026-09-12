@@ -161,6 +161,7 @@ const server = http.createServer(async (req, res) => {
         project,
         models,
         clarify: !!body.clarify,
+        requireQuestions: body.requireQuestions === true,
         maxFixRounds: Number(body.maxFixRounds),
       });
       return json(res, 201, state);

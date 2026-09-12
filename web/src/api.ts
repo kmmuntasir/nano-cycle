@@ -22,7 +22,14 @@ export interface RunState {
     type?: "divergence" | "answers";
     nodeId: string;
     divergence?: string;
-    questions?: { id: string; question: string; why?: string; suggested?: string }[];
+    questions?: {
+      id: string;
+      question: string;
+      type?: "multiple-choice" | "boolean" | "text";
+      options?: { label: string; recommended?: boolean; tradeoff?: string }[];
+      why?: string;
+      suggested?: string;
+    }[];
     round?: number;
   } | null;
   error: string | null;

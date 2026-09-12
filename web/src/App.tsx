@@ -395,12 +395,32 @@ export default function App() {
                   <Box key={q.id}>
                     <Typography variant="body2" sx={{ mb: 0.5 }}>
                       {i + 1}. {q.question}
+                      {q.type && (
+                        <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                          ({q.type})
+                        </Typography>
+                      )}
                     </Typography>
                     {q.why && (
                       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
                         why: {q.why}
                       </Typography>
                     )}
+                    {q.options && q.options.length > 0 ? (
+                      <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 0.5, mb: 0.5 }}>
+                        {q.options.map((o) => (
+                          <Chip
+                            key={o.label}
+                            label={o.label + (o.recommended ? " ★" : "")}
+                            size="small"
+                            clickable
+                            color={answerDrafts[q.id] === o.label ? "primary" : "default"}
+                            variant={answerDrafts[q.id] === o.label ? "filled" : "outlined"}
+                            onClick={() => setAnswerDrafts((d) => ({ ...d, [q.id]: o.label }))}
+                          />
+                        ))}
+                      </Stack>
+                    ) : null}
                     <TextField
                       fullWidth
                       size="small"

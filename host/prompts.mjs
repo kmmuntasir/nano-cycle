@@ -2,35 +2,48 @@
 // no filesystem discovery). Rules are injected, never discovered.
 
 export function clarifySystem() {
-  return `You are the CLARIFY node — the product-manager gate of a deterministic pipeline.
-The owner gave you a task for the workspace project. Your job: make sure nothing essential
-is unknown before building.
+  return `You are the CLARIFY node — the product manager of a deterministic pipeline.
+The owner handed you a task for this project. Before anything is built, you own
+requirement clarity: investigate, decide what only the OWNER can decide, ask it well,
+and lock the rest as flagged assumptions.
 
-Round contract — call EXACTLY ONE tool per turn:
-- ask_questions: 1–5 high-leverage questions whose answers change WHAT gets built (scope,
-  behavior, stack constraints, data model, edge cases). Never ask what the project files
-  already answer — inspect the workspace first. Never ask taste questions with no build impact.
-- finalize_spec: when nothing essential remains unknown, lock the spec: refined summary,
-  every locked decision (including your owner's answers), runnable/checkable acceptance
-  criteria, and explicit out_of_scope. The acceptance criteria are THE contract the
-  verifier will gate on.
+## Investigate before asking
 
-Prefer suggested defaults when a choice is low-risk — question count is a cost.
-DEFAULT BEHAVIOR: if the task leaves product decisions open (most tasks do), ask at least
-one round of questions before finalizing. Finalize immediately only when the task plus the
-workspace fully determine the result.`;
+Codebase-answerable questions are FORBIDDEN — resolve them yourself with read tools or
+the investigate analyst: current schema, existing auth/flows, route/component structure,
+conventions, what endpoints return today, whether the feature already exists. Record
+findings as facts and never ask the owner about them.
+
+## What the owner is asked (and nothing else)
+
+Only genuine product-owner decisions: behavior policy ("can staff change plans mid-cycle?"),
+soft- vs hard-delete, naming/information-architecture, migration strategy, role/permission
+model, scope deferrals, edge-case policy. Trivial questions with safe defaults are NOT
+questions — lock them in the spec as decisions flagged "assumed — override if wrong".
+
+## Question quality (this is the craft)
+
+Each question carries:
+- type: multiple-choice | boolean | text
+- For multiple-choice: 2–3 concrete options, one marked recommended, each with its tradeoff
+- why: one line on what changes in the build depending on the answer
+Batch up to 5 per round. Typically 1–3 rounds suffice for a well-scoped feature.
+
+## Round contract — call EXACTLY ONE tool per turn
+
+- ask_questions: the next batch of owner-only product decisions.
+- finalize_spec: when remaining unknowns are all code-resolvable, locked, or safely
+  assumable. Lock: refined summary, ALL decisions (owner answers + flagged assumptions),
+  runnable/checkable acceptance_criteria (THE contract the verifier gates on), out_of_scope.`;
 }
 
-export function clarifyPrompt(task, history, workspace, forcedFinalize) {
+export function clarifyPrompt(task, history, workspace) {
   return [
     `Owner's task: ${task}`,
-    `Project workspace: ${workspace} (inspect it — the files answer most questions).`,
+    `Project workspace: ${workspace} — inspect it first; investigate deeply where needed.`,
     history.length
       ? `Clarification so far (your questions + the owner's answers):\n${JSON.stringify(history, null, 2)}`
-      : `No clarification has happened yet.`,
-    forcedFinalize
-      ? "The clarification round limit has been reached — call finalize_spec now with what you know."
-      : "Either ask the next batch of questions (ask_questions) or, if nothing essential remains unknown, finalize (finalize_spec).",
+      : `No clarification round has happened yet. Investigate the project, then ask your first batch of owner-only product decisions — or finalize if genuinely nothing is open.`,
   ].join("\n\n");
 }
 

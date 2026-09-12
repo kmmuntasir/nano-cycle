@@ -10,7 +10,6 @@ import {
   ARTIFACT_SCHEMAS,
   TIERS,
   MAX_FIX_ROUNDS,
-  CLARIFY_MAX_ROUNDS,
   CLARIFY_PROFILE,
   profileFor,
   roleOf,
@@ -328,14 +327,24 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
 
   async function clarifyPhase(run) {
     const rounds = [];
-    for (let round = 1; round <= CLARIFY_MAX_ROUNDS; round++) {
-      const forcedFinalize = round === CLARIFY_MAX_ROUNDS;
+    let emptyRounds = 0;
+    let round = 0;
+    // UNCAPPED: the PM decides when nothing essential remains unknown. The
+    // owner can cancel from the GUI at any point.
+    while (true) {
+      round += 1;
       const history = rounds.map((r, i) => ({
         round: i + 1,
         qna: r.questions.map((q) => ({ question: q.question, answer: r.answers[q.id] ?? "(no answer)" })),
       }));
-      const prompt = clarifyPrompt(run.task, history, run.projectPath, forcedFinalize);
-      const result = await clarifyNode(run, prompt, forcedFinalize);
+      let prompt = clarifyPrompt(run.task, history, run.projectPath);
+      if (emptyRounds > 0) {
+        prompt += `\n\nYou have called ask_questions with no questions ${emptyRounds} time(s). Do NOT do that again — either ask real questions via ask_questions, or finalize via finalize_spec.`;
+      }
+      // Owner policy: at least one question round before the spec may be locked
+      // (structural — the finalize tool is withheld until questions were asked).
+      const mode = run.requireQuestions && rounds.length === 0 ? "questions-only" : "both";
+      const result = await clarifyNode(run, prompt, mode);
 
       if (result.type === "spec") {
         emit.event(run.id, "clarify", {
@@ -345,25 +354,32 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         return result.spec;
       }
 
+      const qs = result.questions ?? [];
+      if (qs.length === 0) {
+        emptyRounds += 1;
+        if (emptyRounds >= 3) throw new Error("clarify kept returning empty question sets");
+        continue;
+      }
+      emptyRounds = 0;
+
       // questions → human answers gate
-      run.state.gate = { type: "answers", nodeId: "clarify", round, questions: result.questions };
+      run.state.gate = { type: "answers", nodeId: "clarify", round, questions: qs };
       run.state.status = "awaiting-answers";
       emit.state(run);
       emit.event(run.id, "clarify", {
         t: "notice",
-        s: `asking ${result.questions.length} question(s): ${result.questions.map((q) => q.id).join(", ")}`,
+        s: `asking ${qs.length} question(s): ${qs.map((q) => q.id).join(", ")}`,
       });
       const answers = await new Promise((resolve) => {
         run.answersResolver = resolve;
       });
       run.answersResolver = null;
       if (answers === "cancel") throw new Error("cancelled at answers gate");
-      rounds.push({ questions: result.questions, answers });
+      rounds.push({ questions: qs, answers });
       run.state.gate = null;
       run.state.status = "running";
       emit.state(run);
     }
-    throw new Error("clarification rounds exhausted without a spec");
   }
 
   // PM-side analyst: the model decides WHEN to investigate; the driver owns the
@@ -401,7 +417,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
             "evidence-backed digest citing file paths. You have no write tools.",
           prompt: String(params.question),
           cwd: run.projectPath,
-          modelSpec: run.models.plan ?? "auto",
+          modelSpec: run.models.clarify ?? run.models.plan ?? "auto",
           modelRuntime,
           signal: run.current.get("clarify")?.signal,
           onEvent: (_id, ev) => {
@@ -417,12 +433,17 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     });
   }
 
-  async function clarifyNode(run, prompt, forcedFinalize) {
+  async function clarifyNode(run, prompt, mode) {
     const node = nodeState(run, "clarify");
     beginNode(run, "clarify");
     const store = { result: null };
+    // Asking questions is a HARD pause: the ask tool aborts the model's turn so
+    // it can never self-answer and finalize in the same breath.
+    const ctrl = new AbortController();
+    const cancelSignal = run.current.get("clarify")?.signal;
+    if (cancelSignal) cancelSignal.addEventListener("abort", () => ctrl.abort(), { once: true });
     const tools = [];
-    if (!forcedFinalize) {
+    if (mode !== "finalize-only") {
       tools.push(
         makeTool({
           name: "ask_questions",
@@ -430,7 +451,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           description:
             "Ask the owner up to 5 high-leverage clarification questions. Call this when essential decisions are still unknown.",
           schema: ARTIFACT_SCHEMAS.questions,
-          onCall: (p) => store.result = { type: "questions", questions: p.questions ?? [] },
+          onCall: (p) => {
+            store.result = { type: "questions", questions: p.questions ?? [] };
+            ctrl.abort(); // hard pause — the owner answers in the GUI
+          },
         }),
       );
     }
@@ -439,8 +463,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         name: "finalize_spec",
         label: "Finalize spec",
         description:
-          "Finalize the requirements spec. Call this when nothing essential remains unknown" +
-          (forcedFinalize ? " — the clarification round limit has been reached, so finalize with what you know." : "."),
+          "Finalize the requirements spec. Call this when nothing essential remains unknown.",
         schema: ARTIFACT_SCHEMAS.spec,
         onCall: (p) => store.result = { type: "spec", spec: p },
       }),
@@ -464,9 +487,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           systemPrompt: clarifySystem(),
           prompt: attempt === 0 ? prompt : prompt + "\n\nIMPORTANT: respond ONLY by calling the ask_questions tool or the finalize_spec tool — do not write your answer as text.",
           cwd: run.projectPath,
-          modelSpec: run.models.plan ?? "auto",
+          modelSpec: run.models.clarify ?? run.models.plan ?? "auto",
           modelRuntime,
-          signal: run.current.get("clarify")?.signal,
+          signal: ctrl.signal,
           onEvent: (nodeId, ev) => {
             if (ev.t === "usage") addUsage(node.usage, ev.usage);
             emit.event(run.id, nodeId, ev);
@@ -478,6 +501,11 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         }
         throw new Error("clarify node finished without calling ask_questions or finalize_spec");
       } catch (err) {
+        if (store.result) {
+          // the abort we issued to pause for the owner — not a failure
+          endNode(run, "clarify");
+          return store.result;
+        }
         lastErr = err;
         if (run.cancelRequested) break;
         node.retries += 1;
@@ -648,7 +676,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   }
 
   return {
-    start({ id, task, tier, project, models, clarify, maxFixRounds }) {
+    start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds }) {
       const tierGraph = TIERS[tier];
       if (!tierGraph) throw new Error(`unknown tier ${tier}`);
       const state = {
@@ -682,6 +710,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         projectPath: project.path,
         models,
         clarify: !!clarify,
+        // Optional owner policy: force >=1 question round (finalize tool
+        // withheld on round 1). Default off — prompt quality drives asking.
+        requireQuestions: clarify && requireQuestions === true,
         maxFixRounds: Number.isFinite(maxFixRounds) ? Math.min(Math.max(maxFixRounds, 0), 5) : MAX_FIX_ROUNDS,
         spec: null,
         state,
