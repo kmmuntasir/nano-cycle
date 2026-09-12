@@ -259,6 +259,29 @@ export default function RunMonitor({
         })}
       </Stack>
 
+      {selectedNode && (
+        <Paper variant="outlined" sx={{ p: 2 }}>
+          <Typography variant="caption" color="text.secondary">
+            NODE INPUT — the prompt {selectedNode} received
+          </Typography>
+          <Box
+            component="pre"
+            sx={{
+              m: 0,
+              mt: 1,
+              fontSize: 12,
+              whiteSpace: "pre-wrap",
+              maxHeight: 260,
+              overflowY: "auto",
+              color: state.prompts?.[selectedNode] ? "text.primary" : "text.secondary",
+            }}
+          >
+            {state.prompts?.[selectedNode] ??
+              "(not captured — this run predates prompt capture, or the node has not run yet)"}
+          </Box>
+        </Paper>
+      )}
+
       <EventFeed events={events} nodeId={selectedNode} height="42vh" />
 
       {state.artifacts && Object.keys(state.artifacts).length > 0 && (
@@ -280,20 +303,6 @@ export default function RunMonitor({
               </Box>
             </Box>
           ))}
-        </Paper>
-      )}
-
-      {state.prompts && selectedNode && state.prompts[selectedNode] && (
-        <Paper variant="outlined" sx={{ p: 2 }}>
-          <Typography variant="caption" color="text.secondary">
-            NODE INPUT — what {selectedNode} received
-          </Typography>
-          <Box
-            component="pre"
-            sx={{ m: 0, mt: 1, fontSize: 12, whiteSpace: "pre-wrap", maxHeight: 260, overflowY: "auto" }}
-          >
-            {state.prompts[selectedNode]}
-          </Box>
         </Paper>
       )}
 
