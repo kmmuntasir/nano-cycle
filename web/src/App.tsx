@@ -1,32 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
-import AppBar from "@mui/material/AppBar";
-import Box from "@mui/material/Box";
-import Button from "@mui/material/Button";
-import Dialog from "@mui/material/Dialog";
-import DialogActions from "@mui/material/DialogActions";
-import DialogContent from "@mui/material/DialogContent";
-import DialogTitle from "@mui/material/DialogTitle";
-import TextField from "@mui/material/TextField";
-import MenuItem from "@mui/material/MenuItem";
-import Paper from "@mui/material/Paper";
-import Select from "@mui/material/Select";
-import Stack from "@mui/material/Stack";
-import Tab from "@mui/material/Tab";
-import Tabs from "@mui/material/Tabs";
-import Toolbar from "@mui/material/Toolbar";
-import Typography from "@mui/material/Typography";
-import { useMediaQuery, useTheme } from "@mui/material";
-import RunList from "./components/RunList";
-import RunMonitor from "./components/RunMonitor";
-import StartPanel from "./components/StartPanel";
+import { Box, Button, Flex, Stack, Text } from "@chakra-ui/react";
+import Console from "./components/Console";
+import GatePanel from "./components/GatePanel";
+import PipelineStrip from "./components/PipelineStrip";
+import StartForm from "./components/StartForm";
+import StatsStrip from "./components/StatsStrip";
+import Workbench from "./components/Workbench";
+import { SelectEl, selectStyle, selectStyleMini } from "./ui/controls";
 import { api, openWs } from "./api";
 import type { ModelInfo, Project, RunEvent, RunState, RunSummary } from "./api";
-
-const TAB_MONITOR = 0;
-const TAB_NEW = 1;
-const TAB_HISTORY = 2;
-
-type RunSummaryRow = RunSummary;
+import { fmtDuration } from "./lib/format";
 
 /** Ticks every second while a run is live so elapsed timers advance. */
 function useNow(active: boolean): number {
@@ -39,84 +22,33 @@ function useNow(active: boolean): number {
   return now;
 }
 
-function AddProjectDialog({
-  open,
-  onClose,
-  onAdded,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onAdded: (projects: Project[]) => void;
-}) {
-  const [name, setName] = useState("");
-  const [path, setPath] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const add = async () => {
-    setError(null);
-    try {
-      const updated = await api.addProject(name, path);
-      onAdded(updated);
-      setName("");
-      setPath("");
-      onClose();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Add project</DialogTitle>
-      <DialogContent>
-        <Stack spacing={2} sx={{ mt: 1 }}>
-          <TextField
-            label="Name"
-            size="small"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            helperText="Shown in the project switcher"
-          />
-          <TextField
-            label="Local folder path (absolute)"
-            size="small"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            placeholder="/home/you/projects/my-app"
-            helperText="Runs execute with this directory as the node workspace"
-            error={!!error}
-          />
-          {error && (
-            <Typography variant="caption" color="error">
-              {error}
-            </Typography>
-          )}
-        </Stack>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={!name.trim() || !path.trim()} onClick={add}>
-          Add
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
+const statusDot = (status: string): string =>
+  status === "completed"
+    ? "good"
+    : status === "running"
+      ? "accent"
+      : status === "failed" || status === "interrupted"
+        ? "bad"
+        : status.startsWith("awaiting")
+          ? "warn"
+          : "muted";
 
 export default function App() {
-  const theme = useTheme();
-  const isMobile = useMediaQuery(theme.breakpoints.down("md"));
-
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [tiers, setTiers] = useState<Record<string, string[]>>({});
   const [roles, setRoles] = useState<Record<string, string>>({});
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState("sandbox");
-  const [addOpen, setAddOpen] = useState(false);
-  const [runs, setRuns] = useState<RunSummaryRow[]>([]);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newPath, setNewPath] = useState("");
+  const [addErr, setAddErr] = useState<string | null>(null);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [state, setState] = useState<RunState | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
-  const [tab, setTab] = useState(TAB_MONITOR);
+  const [mobileTab, setMobileTab] = useState<"monitor" | "new" | "history">("monitor");
   const [task, setTask] = useState("");
   const [tier, setTier] = useState("demo");
   const [modelPick, setModelPick] = useState<Record<string, string>>(() => {
@@ -147,7 +79,7 @@ export default function App() {
     setState(s);
     setEvents(evs);
     setSelectedNode(s.nodes[0]?.id ?? null);
-    setTab(TAB_MONITOR);
+    setMobileTab("monitor");
   }, []);
 
   useEffect(() => {
@@ -183,7 +115,7 @@ export default function App() {
     try {
       const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds, git: useGit });
       await loadRun(s.id);
-      setTab(TAB_MONITOR);
+      setMobileTab("monitor");
       refreshRuns();
     } catch (e) {
       alert(String(e));
@@ -192,21 +124,26 @@ export default function App() {
     }
   };
 
+  const addProject = async () => {
+    setAddErr(null);
+    try {
+      const updated = await api.addProject(newName, newPath);
+      setProjects(updated);
+      setProject(newName.trim());
+      setShowAdd(false);
+      setNewName("");
+      setNewPath("");
+    } catch (e) {
+      setAddErr(String(e));
+    }
+  };
+
   // A new answers gate opening always pulls the owner to the monitor.
   const gateRound = state?.gate?.round;
   const gateType = state?.gate?.type;
   useEffect(() => {
-    if (gateType === "answers") setTab(TAB_MONITOR);
+    if (gateType === "answers") setMobileTab("monitor");
   }, [gateType, gateRound]);
-
-  // Seed answer drafts with each question's suggested default when a gate opens.
-  useEffect(() => {
-    if (state?.gate?.type === "answers") {
-      const seed: Record<string, string> = {};
-      for (const q of state.gate.questions ?? []) if (q.suggested) seed[q.id] = q.suggested;
-      setAnswerDrafts((d) => ({ ...seed, ...d }));
-    }
-  }, [state?.gate?.type, state?.gate?.round]);
 
   const submitAnswers = (answers: Record<string, string>) => {
     setAnswerDrafts({});
@@ -216,30 +153,34 @@ export default function App() {
   const live = !!state && ["running", "awaiting-gate", "awaiting-answers"].includes(state.status);
   const now = useNow(live);
   const projectPath = projects.find((p) => p.name === project)?.path ?? "";
+  const wall = state ? Math.max(0, (state.finishedAt ?? now) - (Date.parse(state.createdAt) || 0)) : 0;
+  const gateMs = state
+    ? (state.gateWaitMs ?? 0) + (state.gateSince && live ? Math.max(0, now - state.gateSince) : 0)
+    : 0;
+  const work = Math.max(0, wall - gateMs);
 
-  const monitor = state ? (
-    <RunMonitor
-      state={state}
-      events={events}
-      models={models}
-      now={now}
-      selectedNode={selectedNode}
-      setSelectedNode={setSelectedNode}
-      answerDrafts={answerDrafts}
-      setAnswerDrafts={setAnswerDrafts}
-      onAnswers={(a) => runId && api.answers(runId, a)}
-      onGate={(action) => runId && api.gate(runId, action)}
-      onNodeModel={(node, model) => runId && api.setNodeModel(runId, node, model)}
-      onCancel={() => runId && api.cancel(runId)}
-    />
-  ) : (
-    <Typography variant="body2" color="text.secondary">
-      Start a run or pick one from the history.
-    </Typography>
+  const addProjectForm = (
+    <Stack gap={2}>
+      <input placeholder="name" value={newName} onChange={(e) => setNewName(e.target.value)} style={miniInput} />
+      <input
+        placeholder="/absolute/path"
+        value={newPath}
+        onChange={(e) => setNewPath(e.target.value)}
+        style={miniInput}
+      />
+      <Button size="xs" onClick={addProject}>
+        Add
+      </Button>
+      {addErr && (
+        <Text fontSize="10px" color="bad">
+          {addErr}
+        </Text>
+      )}
+    </Stack>
   );
 
-  const startPanel = (
-    <StartPanel
+  const startForm = (
+    <StartForm
       task={task}
       setTask={setTask}
       tier={tier}
@@ -251,11 +192,11 @@ export default function App() {
       setModelPick={setModelPick}
       clarify={clarify}
       setClarify={setClarify}
+      maxFixRounds={maxFixRounds}
+      setMaxFixRounds={setMaxFixRounds}
       git={useGit}
       setGit={setUseGit}
       gitAvailable={project !== "sandbox"}
-      maxFixRounds={maxFixRounds}
-      setMaxFixRounds={setMaxFixRounds}
       starting={starting}
       onStart={start}
       project={project}
@@ -263,82 +204,230 @@ export default function App() {
     />
   );
 
+  const runList = (
+    <Stack gap={1}>
+      {runs.length === 0 && (
+        <Text fontSize="11px" color="muted">
+          none yet
+        </Text>
+      )}
+      {runs.map((r) => (
+        <Flex
+          key={r.id}
+          align="center"
+          gap={2}
+          px={2}
+          py={1}
+          borderRadius="md"
+          cursor="pointer"
+          bg={runId === r.id ? "surface2" : "transparent"}
+          onClick={() => loadRun(r.id)}
+          _hover={{ bg: "surface2" }}
+        >
+          <Box w="7px" h="7px" borderRadius="full" flexShrink={0} bg={statusDot(r.status)} />
+          <Text fontSize="11px" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap" flex="1" minW={0}>
+            {r.id} · {r.task.slice(0, 24)}
+            {r.task.length > 24 ? "…" : ""}
+          </Text>
+          <Text fontSize="10px" color="muted">
+            {r.project}
+          </Text>
+        </Flex>
+      ))}
+    </Stack>
+  );
+
+  const monitor = state ? (
+    <Stack gap={3}>
+      <StatsStrip state={state} wall={wall} work={work} gateMs={gateMs} />
+      <Box border="1px solid" borderColor="line" borderRadius="md" p={3} bg="surface">
+        <Text fontSize="10px" color="muted" mb={1}>
+          ORIGINAL TASK
+        </Text>
+        <Text fontSize="13px">{state.task}</Text>
+      </Box>
+      <GatePanel
+        state={state}
+        answerDrafts={answerDrafts}
+        setAnswerDrafts={setAnswerDrafts}
+        onAnswers={submitAnswers}
+        onGate={(action) => runId && api.gate(runId, action)}
+      />
+      <Box>
+        <Text fontSize="10px" color="muted" mb={1}>
+          pipeline
+        </Text>
+        <PipelineStrip
+          state={state}
+          models={models}
+          now={now}
+          selectedNode={selectedNode}
+          setSelectedNode={setSelectedNode}
+          onNodeModel={(node, model) => runId && api.setNodeModel(runId, node, model)}
+        />
+      </Box>
+      <Box>
+        <Text fontSize="10px" color="muted" mb={1}>
+          console — {selectedNode ?? "select a node"}
+        </Text>
+        <Console events={events} nodeId={selectedNode} />
+      </Box>
+      <Workbench state={state} />
+      {live && (
+        <Button
+          size="xs"
+          variant="outline"
+          colorPalette="red"
+          onClick={() => runId && api.cancel(runId)}
+          alignSelf="flex-start"
+        >
+          Cancel run
+        </Button>
+      )}
+    </Stack>
+  ) : (
+    <Stack gap={3} alignItems="flex-start">
+      <Text color="muted">No run selected — start one, or open the last run below.</Text>
+      {runs[0] && (
+        <Button size="sm" onClick={() => loadRun(runs[0].id)}>
+          Open {runs[0].id}
+        </Button>
+      )}
+    </Stack>
+  );
+
   return (
-    <Box sx={{ minHeight: "100dvh", display: "flex", flexDirection: "column" }}>
-      <AppBar position="static" color="default" elevation={0}>
-        <Toolbar sx={{ gap: 1.5, flexWrap: { xs: "wrap", md: "nowrap" } }}>
-          <Typography variant="h6" sx={{ mr: 1 }}>
-            nano-cycle
-          </Typography>
-          <Select
-            size="small"
+    <Flex minH="100dvh">
+      {/* left rail — desktop */}
+      <Flex
+        display={{ base: "none", lg: "flex" }}
+        direction="column"
+        w="300px"
+        flexShrink={0}
+        borderRight="1px solid"
+        borderColor="line"
+        bg="surface"
+        p={4}
+        gap={4}
+      >
+        <Text fontSize="lg" fontWeight="bold">
+          nano-cycle
+        </Text>
+        <Box>
+          <Text fontSize="10px" color="muted" mb={1}>
+            project
+          </Text>
+          <SelectEl
+            css={selectStyleMini}
             value={project}
-            onChange={(e) => setProject(e.target.value)}
-            sx={{ minWidth: 130, flexGrow: { xs: 1, md: 0 } }}
+            onChange={(e) => setProject((e.target as HTMLSelectElement).value)}
           >
             {projects.map((p) => (
-              <MenuItem key={p.name} value={p.name}>
+              <option key={p.name} value={p.name}>
                 {p.name}
-              </MenuItem>
+              </option>
             ))}
-          </Select>
-          <Button size="small" onClick={() => setAddOpen(true)}>
-            Add project
-          </Button>
-        </Toolbar>
-      </AppBar>
-
-      {isMobile && (
-        <Box sx={{ borderBottom: 1, borderColor: "divider" }}>
-          <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth">
-            <Tab label="Monitor" />
-            <Tab label="New run" />
-            <Tab label="History" />
-          </Tabs>
+          </SelectEl>
+          {!showAdd ? (
+            <Button size="xs" variant="ghost" mt={1} onClick={() => setShowAdd(true)}>
+              + add project
+            </Button>
+          ) : (
+            addProjectForm
+          )}
         </Box>
-      )}
+        {startForm}
+        <Box>
+          <Text fontSize="10px" color="muted" mb={1}>
+            runs
+          </Text>
+          {runList}
+        </Box>
+      </Flex>
 
-      <Box sx={{ p: { xs: 1.5, md: 3 }, flexGrow: 1 }}>
-        {isMobile ? (
-          <Stack spacing={2}>
-            {tab === TAB_MONITOR && monitor}
-            {tab === TAB_NEW && (
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                {startPanel}
-              </Paper>
-            )}
-            {tab === TAB_HISTORY && (
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                <RunList runs={runs} activeId={runId} onLoadRun={(id) => loadRun(id)} />
-              </Paper>
-            )}
-          </Stack>
-        ) : (
-          <Stack direction="row" spacing={3} sx={{ alignItems: "flex-start" }}>
-            <Stack spacing={2} sx={{ width: 360, flexShrink: 0 }}>
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                <Typography variant="subtitle2" gutterBottom>
-                  New run
-                </Typography>
-                {startPanel}
-              </Paper>
-              <Paper variant="outlined" sx={{ p: 2 }}>
-                <Typography variant="subtitle2" gutterBottom>
-                  Runs
-                </Typography>
-                <RunList runs={runs} activeId={runId} onLoadRun={(id) => loadRun(id)} />
-              </Paper>
-            </Stack>
-            <Box sx={{ flexGrow: 1, minWidth: 0 }}>{monitor}</Box>
-          </Stack>
-        )}
+      {/* main */}
+      <Box flex="1" minW={0}>
+        {/* mobile top bar */}
+        <Flex
+          display={{ base: "flex", lg: "none" }}
+          p={3}
+          gap={2}
+          borderBottom="1px solid"
+          borderColor="line"
+          bg="surface"
+          alignItems="center"
+          flexWrap="wrap"
+        >
+          <Text fontWeight="bold" mr={1}>
+            nano-cycle
+          </Text>
+          <SelectEl
+            css={{ ...selectStyleMini, width: "auto", flexGrow: 1 }}
+            value={project}
+            onChange={(e) => setProject((e.target as HTMLSelectElement).value)}
+          >
+            {projects.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+          </SelectEl>
+          <Button size="xs" variant="outline" onClick={() => setShowAdd((v) => !v)}>
+            + project
+          </Button>
+          {showAdd && addProjectForm}
+          {runs.length > 0 && (
+            <SelectEl
+              css={{ ...selectStyleMini, width: "100%" }}
+              value={runId ?? ""}
+              onChange={(e) => loadRun((e.target as HTMLSelectElement).value)}
+            >
+              <option value="">— runs —</option>
+              {runs.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.id} · {r.status}
+                </option>
+              ))}
+            </SelectEl>
+          )}
+        </Flex>
+
+        <Box p={{ base: 3, md: 5 }}>
+          {/* mobile: new-run form toggle */}
+          <Button
+            size="xs"
+            colorPalette="blue"
+            mb={3}
+            display={{ base: "inline-flex", lg: "none" }}
+            onClick={() => setMobileTab((v) => (v === "new" ? "monitor" : "new"))}
+          >
+            {mobileTab === "new" ? "close form" : "＋ new run"}
+          </Button>
+          {mobileTab === "new" && (
+            <Box mb={4} border="1px solid" borderColor="line" borderRadius="md" p={3} bg="surface">
+              {startForm}
+            </Box>
+          )}
+
+          <Flex align="center" gap={2} mb={3}>
+            <Text fontSize="lg" fontWeight="bold">
+              runs
+            </Text>
+          </Flex>
+          {runList}
+          {monitor}
+        </Box>
       </Box>
-
-      <AddProjectDialog
-        open={addOpen}
-        onClose={() => setAddOpen(false)}
-        onAdded={(ps) => setProjects(ps)}
-      />
-    </Box>
+    </Flex>
   );
 }
+
+const miniInput: React.CSSProperties = {
+  width: "100%",
+  fontSize: "12px",
+  background: "#1b1f2b",
+  color: "#e4e4e7",
+  border: "1px solid #2a2f3a",
+  borderRadius: "6px",
+  padding: "6px 8px",
+};
