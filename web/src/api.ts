@@ -22,6 +22,14 @@ export interface RunState {
   gateWaitMs: number;
   gateSince: number | null;
   models: Record<string, string>;
+  git?: {
+    enabled: boolean;
+    baseBranch: string;
+    runBranch: string;
+    commits: { node: string; hash: string; files: string[] }[];
+    merged: boolean;
+    mergeError: string | null;
+  };
   gate: {
     type?: "divergence" | "answers";
     nodeId: string;
@@ -101,7 +109,7 @@ export const api = {
     tier: string,
     project: string,
     models: Record<string, string>,
-    opts?: { clarify?: boolean; maxFixRounds?: number },
+    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean },
   ) =>
     jfetch<RunState>("/api/runs", {
       method: "POST",

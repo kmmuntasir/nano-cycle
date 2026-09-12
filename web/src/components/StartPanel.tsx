@@ -19,6 +19,9 @@ export default function StartPanel({
   setModelPick,
   clarify,
   setClarify,
+  git,
+  setGit,
+  gitAvailable,
   maxFixRounds,
   setMaxFixRounds,
   starting,
@@ -37,6 +40,9 @@ export default function StartPanel({
   setModelPick: (m: Record<string, string>) => void;
   clarify: boolean;
   setClarify: (v: boolean) => void;
+  git: boolean;
+  setGit: (v: boolean) => void;
+  gitAvailable: boolean;
   maxFixRounds: number;
   setMaxFixRounds: (n: number) => void;
   starting: boolean;
@@ -97,6 +103,15 @@ export default function StartPanel({
           onClick={() => setClarify(!clarify)}
         >
           {clarify ? "✓ Clarify first" : "Clarify first"}
+        </Button>
+        <Button
+          size="small"
+          variant={git ? "contained" : "outlined"}
+          disabled={!gitAvailable}
+          title={gitAvailable ? "Branch per run, commits per coder, ff-merge on acceptance" : "The sandbox project is not version-controlled"}
+          onClick={() => setGit(!git)}
+        >
+          {git ? "✓ Git" : "Git"}
         </Button>
         <Typography variant="caption" color="text.secondary">
           fix rounds
@@ -159,6 +174,7 @@ export default function StartPanel({
       </Button>
       <Typography variant="caption" color="text.secondary">
         {clarify ? "Clarify loop first (PM asks, you answer) · " : ""}
+        {git ? "git branch + commits + auto-merge · " : ""}
         {maxFixRounds} fix round(s) on gaps. Runs in the selected project's folder.
       </Typography>
     </Stack>

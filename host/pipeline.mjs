@@ -29,6 +29,7 @@ import {
   clarifyPrompt,
 } from "./prompts.mjs";
 import { runNode, makeTool, addUsage } from "./runner.mjs";
+import * as git from "./git.mjs";
 
 const SYSTEM_FOR = {
   plan: planSystem,
@@ -368,6 +369,75 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     throw new Error(`plan rejected after retry: ${lastRejection}`);
   }
 
+  // Git: commit one coder node's files on the run branch. Serialized through
+  // the run's commit chain so parallel lanes never race the index.
+  function commitCoderOutput(run, nodeId, artifact) {
+    if (!run.git?.enabled) return Promise.resolve();
+    const files = (artifact?.files_written ?? [])
+      .map((f) => path.resolve(run.projectPath, f))
+      .filter((abs) => abs.startsWith(run.projectPath));
+    if (files.length === 0) return Promise.resolve();
+    const next = run.commitChain.then(async () => {
+      try {
+        for (const abs of files) {
+          await git.stagePath(run.projectPath, path.relative(run.projectPath, abs));
+        }
+        if (!(await git.hasStaged(run.projectPath))) {
+          emit.event(run.id, nodeId, { t: "notice", s: "git: nothing staged to commit" });
+          return;
+        }
+        const title = run.nodeWork[nodeId]?.title ?? nodeId;
+        const hash = await git.commit(run.projectPath, `feat: ${title} (nano ${run.id})`);
+        run.state.git.commits.push({ node: nodeId, hash, files });
+        emit.event(run.id, nodeId, {
+          t: "notice",
+          s: `git: committed ${files.length} file(s) (${hash.slice(0, 7)}) on ${run.git.runBranch}`,
+        });
+        emit.state(run);
+      } catch (e) {
+        emit.event(run.id, nodeId, { t: "notice", s: `git commit failed: ${e.message}` });
+      }
+    });
+    run.commitChain = next.catch(() => {});
+    return next;
+  }
+
+  // Verdict-gated integration: ff-merge the run branch into the base branch and
+  // delete it. A rejected verdict keeps the branch (with its commits) around.
+  async function integrate(run, accepted) {
+    const g = run.git;
+    if (!g?.enabled) return;
+    try {
+      await git.checkout(run.projectPath, g.baseBranch);
+    } catch (e) {
+      emit.event(run.id, "_run", { t: "notice", s: `git: checkout ${g.baseBranch} failed: ${e.message}` });
+      return;
+    }
+    if (!accepted) {
+      run.state.git.mergeError = "verdict not accepted — branch kept unmerged";
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `git: verdict not accepted — branch ${g.runBranch} kept with its commits for inspection`,
+      });
+      return;
+    }
+    try {
+      await git.ffMerge(run.projectPath, g.runBranch);
+      await git.deleteBranch(run.projectPath, g.runBranch);
+      run.state.git.merged = true;
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `git: ff-merged ${g.runBranch} into ${g.baseBranch} and deleted the branch — ready to push`,
+      });
+    } catch (e) {
+      run.state.git.mergeError = String(e?.message ?? e);
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `git: ff-merge failed (${run.state.git.mergeError}) — branch ${g.runBranch} kept`,
+      });
+    }
+  }
+
   // --- clarify (PM) phase — Step 1: ask → answers → repeat → spec ----------------
 
   function specIntoPrompt(spec) {
@@ -654,8 +724,14 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         continue;
       }
 
+      const execCoder = async (n) => {
+        const artifact = await execNode(run, n.id, promptFor(run, n));
+        if (n.id.startsWith("impl")) await commitCoderOutput(run, n.id, artifact);
+        return artifact;
+      };
+
       if (ready.length === 1) {
-        await execNode(run, ready[0].id, promptFor(run, ready[0]));
+        await execCoder(ready[0]);
         continue;
       }
       const lanes = packParallel(run, ready);
@@ -666,7 +742,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       });
       await Promise.all(
         lanes.map(async (lane) => {
-          for (const n of lane) await execNode(run, n.id, promptFor(run, n));
+          for (const n of lane) await execCoder(run, n);
         }),
       );
     }
@@ -725,8 +801,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         }
       }
       run.state.status = verdict === "accepted" ? "completed" : "failed";
+      await integrate(run, verdict === "accepted");
     } catch (err) {
       gateClose(run);
+      await integrate(run, false);
       if (run.cancelRequested) {
         run.state.status = "cancelled";
       } else {
@@ -736,14 +814,51 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       }
     }
     run.state.finishedAt = Date.now();
+    run.done.promiseSettled = true;
     emit.state(run);
+    run.done.box.promiseSettled = true;
     run.done.resolve(run.state.status);
   }
 
   return {
-    start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds }) {
+    activeRunFor(projectName) {
+      for (const run of runs.values()) {
+        if (run.state.project === projectName && !run.done.promiseSettled) return run.id;
+      }
+      return null;
+    },
+
+    async start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds, git: gitRequested }) {
       const tierGraph = TIERS[tier];
       if (!tierGraph) throw new Error(`unknown tier ${tier}`);
+      // One working tree per project: a second concurrent run on the same
+      // project would trample the first run's branch checkout and commits.
+      for (const other of runs.values()) {
+        if (other.projectPath === project.path && !other.done.promiseSettled) {
+          throw new Error(
+            `a run is already active on project "${project.name}" (${other.id}) — wait for it to finish or cancel it`,
+          );
+        }
+      }
+
+      // Git integration: fresh branch per run, commits per coder node, ff-merge
+      // back on an accepted verdict. Requires a clean tree at start.
+      let gitInfo = null;
+      if (gitRequested) {
+        if (!(await git.isRepo(project.path))) {
+          throw new Error("git is enabled but the project folder is not a git repository");
+        }
+        await git.assertClean(project.path);
+        gitInfo = {
+          enabled: true,
+          baseBranch: await git.currentBranch(project.path),
+          runBranch: `nano-cycle/${id}`,
+          commits: [],
+          merged: false,
+          mergeError: null,
+        };
+        await git.createBranch(project.path, gitInfo.runBranch, gitInfo.baseBranch);
+      }
       const state = {
         id,
         task,
@@ -754,6 +869,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         finishedAt: null,
         gateWaitMs: 0,
         gateSince: null,
+        git: gitInfo
+          ? { ...gitInfo, commits: [] }
+          : null,
         models,
         gate: null,
         error: null,
@@ -784,6 +902,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         // Optional owner policy: force >=1 question round (finalize tool
         // withheld on round 1). Default off — prompt quality drives asking.
         requireQuestions: clarify && requireQuestions === true,
+        git: gitInfo,
+        commitChain: Promise.resolve(),
         nodeModels: {},
         modelRestart: new Set(),
         maxFixRounds: Number.isFinite(maxFixRounds) ? Math.min(Math.max(maxFixRounds, 0), 5) : MAX_FIX_ROUNDS,
@@ -796,10 +916,16 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         feedback: null,
         nodeWork: {}, // nodeId → {lane, title, files}
         dynamicGraph: null,
-        done: promiseExternals(),
+        done: (() => { const d = promiseExternals(); d.promiseSettled = false; return d; })(),
       };
       runs.set(id, run);
       emit.state(run);
+      if (gitInfo) {
+        emit.event(id, "_run", {
+          t: "notice",
+          s: `git: branch ${gitInfo.runBranch} created from ${gitInfo.baseBranch} — commits per coder node, ff-merge on accepted verdict`,
+        });
+      }
       execute(run).catch(() => {}); // execute() never throws — it finalizes state
       return state;
     },
@@ -863,9 +989,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
 }
 
 function promiseExternals() {
-  let resolve;
+  const box = { promiseSettled: false };
   const promise = new Promise((r) => {
-    resolve = r;
+    box.resolve = r;
   });
-  return { promise, resolve };
+  return { promise: box.promise, resolve: box.resolve, box };
 }

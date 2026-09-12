@@ -172,7 +172,7 @@ const server = http.createServer(async (req, res) => {
         models[role] = String(body.models?.[role] ?? "auto");
       }
       const id = newRunId();
-      const state = pipeline.start({
+      const state = await pipeline.start({
         id,
         task,
         tier,
@@ -181,6 +181,7 @@ const server = http.createServer(async (req, res) => {
         clarify: !!body.clarify,
         requireQuestions: body.requireQuestions === true,
         maxFixRounds: Number(body.maxFixRounds),
+        git: body.git === true && project.path !== SANDBOX_DIR,
       });
       return json(res, 201, state);
     }

@@ -89,6 +89,14 @@ export default function RunMonitor({
         <Chip size="small" label={`⏱ total ${fmtDuration(wall)}`} />
         <Chip size="small" variant="outlined" label={`working ${fmtDuration(work)}`} />
         {gateMs > 0 && <Chip size="small" variant="outlined" label={`waited ${fmtDuration(gateMs)}`} />}
+        {state.git?.enabled && (
+          <Chip
+            size="small"
+            variant="outlined"
+            color={state.git.merged ? "success" : "default"}
+            label={`\u23a7 ${state.git.runBranch} \u2192 ${state.git.baseBranch}${state.git.merged ? " (merged)" : ` \u00b7 ${state.git.commits.length} commit(s)`}`}
+          />
+        )}
         <Chip
           size="small"
           variant="outlined"
