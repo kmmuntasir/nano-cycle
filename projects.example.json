@@ -1,0 +1,6 @@
+{
+  "projects": [
+    { "name": "sandbox", "path": "/absolute/path/to/nano-cycle/sandbox" },
+    { "name": "my-app", "path": "/absolute/path/to/my-app" }
+  ]
+}
