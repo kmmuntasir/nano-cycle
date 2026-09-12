@@ -1,58 +1,34 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import AppBar from "@mui/material/AppBar";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import Chip from "@mui/material/Chip";
 import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
-import Divider from "@mui/material/Divider";
+import TextField from "@mui/material/TextField";
 import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
 import Select from "@mui/material/Select";
 import Stack from "@mui/material/Stack";
-import TextField from "@mui/material/TextField";
+import Tab from "@mui/material/Tab";
+import Tabs from "@mui/material/Tabs";
 import Toolbar from "@mui/material/Toolbar";
 import Typography from "@mui/material/Typography";
+import { useMediaQuery, useTheme } from "@mui/material";
+import RunList from "./components/RunList";
+import RunMonitor from "./components/RunMonitor";
+import StartPanel from "./components/StartPanel";
 import { api, openWs } from "./api";
-import type { ModelInfo, Project, RunEvent, RunState } from "./api";
+import type { ModelInfo, Project, RunEvent, RunState, RunSummary } from "./api";
 
-const STATUS_COLOR: Record<string, "default" | "primary" | "success" | "warning" | "error"> = {
-  queued: "default",
-  running: "primary",
-  done: "success",
-  completed: "success",
-  "awaiting-gate": "warning",
-  "awaiting-answers": "warning",
-  failed: "error",
-  cancelled: "default",
-  interrupted: "error",
-};
+const TAB_MONITOR = 0;
+const TAB_NEW = 1;
+const TAB_HISTORY = 2;
 
-const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+type RunSummaryRow = RunSummary;
 
-const fmtTimestamp = (ms: number): string => {
-  const d = new Date(ms || Date.now());
-  const p = (v: number) => String(v).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-};
-
-function fmtDuration(ms: number): string {
-  if (!ms || ms < 0) return "0s";
-  const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
-  if (m > 0) return `${m}m ${String(sec).padStart(2, "0")}s`;
-  return `${sec}s`;
-}
-
-const roleOf = (id: string) =>
-  id === "plan" ? "plan" : id === "verify" ? "verify" : id.endsWith("-fe") ? "frontend" : "backend";
-
-/** Ticks every second while the run is live so elapsed timers advance. */
+/** Ticks every second while a run is live so elapsed timers advance. */
 function useNow(active: boolean): number {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -63,74 +39,23 @@ function useNow(active: boolean): number {
   return now;
 }
 
-function EventFeed({ events, nodeId }: { events: RunEvent[]; nodeId: string | null }) {
-  const feedRef = useRef<HTMLDivElement>(null);
-  const shown = useMemo(
-    () => (nodeId ? events.filter((e) => e.nodeId === nodeId) : events),
-    [events, nodeId],
-  );
-  useEffect(() => {
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [shown.length]);
-  return (
-    <Paper
-      ref={feedRef}
-      variant="outlined"
-      sx={{ p: 1.5, height: "48vh", overflowY: "auto", bgcolor: "#0d0d0d", fontFamily: "monospace", fontSize: 13 }}
-    >
-      {shown.length === 0 && (
-        <Typography variant="body2" color="text.secondary">
-          {nodeId ? "No events yet for this node." : "Select a node."}
-        </Typography>
-      )}
-      {shown.map((e, i) => {
-        const ev = e.ev;
-        const stamp = `[${fmtTimestamp(e.ts ?? (ev as { ts?: number }).ts ?? 0)}] `;
-        if (ev.t === "text") {
-          const burstStart = i === 0 || shown[i - 1].ev.t !== "text";
-          return (
-            <span key={i}>
-              {burstStart && <span style={{ color: "#6aa84f" }}>{stamp}</span>}
-              {ev.s}
-            </span>
-          );
-        }
-        if (ev.t === "think") return <span key={i} style={{ color: "#777", fontStyle: "italic" }}>{ev.s}</span>;
-        if (ev.t === "tool")
-          return (
-            <div key={i} style={{ color: "#90caf9", margin: "4px 0" }}>
-              {stamp}▸ {ev.name} {ev.args}
-            </div>
-          );
-        if (ev.t === "tool_end")
-          return (
-            <div key={i} style={{ color: ev.ok ? "#66bb6a" : "#ef5350" }}>
-              {stamp}✔ {ev.name} {ev.ok ? "" : "(error)"}
-            </div>
-          );
-        if (ev.t === "usage")
-          return (
-            <div key={i} style={{ color: "#888" }}>
-              {stamp}⏱ tokens in {ev.usage?.input} / out {ev.usage?.output}
-            </div>
-          );
-        if (ev.t === "notice")
-          return <div key={i} style={{ color: "#ffa726", margin: "4px 0" }}>{stamp}⚠ {ev.s}</div>;
-        return null;
-      })}
-    </Paper>
-  );
-}
-
-function AddProjectDialog({ open, onClose, onAdded }: { open: boolean; onClose: () => void; onAdded: (projects: Project[], name: string) => void }) {
+function AddProjectDialog({
+  open,
+  onClose,
+  onAdded,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAdded: (projects: Project[]) => void;
+}) {
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [error, setError] = useState<string | null>(null);
   const add = async () => {
     setError(null);
     try {
-      const projects = await api.addProject(name, path);
-      onAdded(projects, name.trim());
+      const updated = await api.addProject(name, path);
+      onAdded(updated);
       setName("");
       setPath("");
       onClose();
@@ -177,18 +102,22 @@ function AddProjectDialog({ open, onClose, onAdded }: { open: boolean; onClose: 
 }
 
 export default function App() {
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down("md"));
+
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [tiers, setTiers] = useState<Record<string, string[]>>({});
   const [roles, setRoles] = useState<Record<string, string>>({});
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState("sandbox");
   const [addOpen, setAddOpen] = useState(false);
-  const [runs, setRuns] = useState<{ id: string; task: string; tier: string; project: string; status: string }[]>([]);
+  const [runs, setRuns] = useState<RunSummaryRow[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [state, setState] = useState<RunState | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
-  const [task, setTask] = useState("Create fizzbuzz.js that prints fizzbuzz for 1..15, one per line (divisible by 3 → Fizz, by 5 → Buzz, both → FizzBuzz).");
+  const [tab, setTab] = useState(TAB_MONITOR);
+  const [task, setTask] = useState("");
   const [tier, setTier] = useState("demo");
   const [modelPick, setModelPick] = useState<Record<string, string>>(() => {
     try {
@@ -197,7 +126,6 @@ export default function App() {
       return {};
     }
   });
-  const [masterModel, setMasterModel] = useState<string>("");
   const [clarify, setClarify] = useState(false);
   const [maxFixRounds, setMaxFixRounds] = useState(2);
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
@@ -207,10 +135,19 @@ export default function App() {
     api.listRuns().then(setRuns).catch(() => {});
   }, []);
 
-  // Model picks persist across sessions until the owner changes them.
+  // Model picks persist in this browser until the owner changes them.
   useEffect(() => {
     localStorage.setItem("nano-cycle-models", JSON.stringify(modelPick));
   }, [modelPick]);
+
+  const loadRun = useCallback(async (id: string) => {
+    const { state: s, events: evs } = await api.getRun(id);
+    setRunId(id);
+    setState(s);
+    setEvents(evs);
+    setSelectedNode(s.nodes[0]?.id ?? null);
+    setTab(TAB_MONITOR);
+  }, []);
 
   useEffect(() => {
     api.models().then(setModels).catch(() => {});
@@ -229,22 +166,37 @@ export default function App() {
     const ws = openWs((msg) => {
       if (msg.type === "state" && msg.runId === runId && msg.state) {
         setState(msg.state);
-        if (msg.state.status !== "running" && msg.state.status !== "awaiting-gate") refreshRuns();
+        if (msg.state.status !== "running" && msg.state.status !== "awaiting-gate" && msg.state.status !== "awaiting-answers") {
+          refreshRuns();
+        }
       } else if (msg.type === "event" && msg.runId === runId && msg.nodeId && msg.ev) {
-        const ev: RunEvent = { ts: Date.now(), nodeId: msg.nodeId, ev: msg.ev };
+        const ev: RunEvent = { ts: (msg.ev as { ts?: number }).ts ?? Date.now(), nodeId: msg.nodeId, ev: msg.ev };
         setEvents((prev) => [...prev.slice(-3000), ev]);
       }
     });
     return () => ws.close();
-  }, [runId, refreshRuns]);
+  }, [runId, refreshRuns, loadRun]);
 
-  const loadRun = useCallback(async (id: string) => {
-    const { state: s, events: evs } = await api.getRun(id);
-    setRunId(id);
-    setState(s);
-    setEvents(evs);
-    setSelectedNode(s.nodes[0]?.id ?? null);
-  }, []);
+  const start = async () => {
+    setStarting(true);
+    try {
+      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds });
+      await loadRun(s.id);
+      setTab(TAB_MONITOR);
+      refreshRuns();
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  // A new answers gate opening always pulls the owner to the monitor.
+  const gateRound = state?.gate?.round;
+  const gateType = state?.gate?.type;
+  useEffect(() => {
+    if (gateType === "answers") setTab(TAB_MONITOR);
+  }, [gateType, gateRound]);
 
   // Seed answer drafts with each question's suggested default when a gate opens.
   useEffect(() => {
@@ -255,57 +207,70 @@ export default function App() {
     }
   }, [state?.gate?.type, state?.gate?.round]);
 
-  const start = async () => {
-    setStarting(true);
-    try {
-      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds });
-      await loadRun(s.id);
-      refreshRuns();
-    } catch (e) {
-      alert(String(e));
-    } finally {
-      setStarting(false);
-    }
+  const submitAnswers = (answers: Record<string, string>) => {
+    setAnswerDrafts({});
+    if (runId) api.answers(runId, answers);
   };
 
-  const nodeIds = useMemo(() => state?.nodes.map((n) => n.id) ?? [], [state]);
-  const live = state?.status === "running" || state?.status === "awaiting-gate" || state?.status === "awaiting-answers";
-  const now = useNow(!!live);
-  const totalUsage = useMemo(
-    () =>
-      (state?.nodes ?? []).reduce(
-        (acc, n) => ({
-          input: acc.input + n.usage.input,
-          output: acc.output + n.usage.output,
-        }),
-        { input: 0, output: 0 },
-      ),
-    [state],
-  );
-  const timing = useMemo(() => {
-    if (!state) return null;
-    const start = Date.parse(state.createdAt) || 0;
-    const end = state.finishedAt ?? (live ? now : Date.parse(state.finishedAt ?? "") || now);
-    const wall = Math.max(0, end - start);
-    const gateMs =
-      (state.gateWaitMs ?? 0) +
-      (state.gateSince && live ? Math.max(0, now - state.gateSince) : 0);
-    const work = Math.max(0, wall - gateMs);
-    return { wall, work, gateMs, waitingNow: !!state.gateSince };
-  }, [state, live, now]);
-  const running = state?.status === "running" || state?.status === "awaiting-gate" || state?.status === "awaiting-answers";
+  const live = !!state && ["running", "awaiting-gate", "awaiting-answers"].includes(state.status);
+  const now = useNow(live);
   const projectPath = projects.find((p) => p.name === project)?.path ?? "";
 
+  const monitor = state ? (
+    <RunMonitor
+      state={state}
+      events={events}
+      models={models}
+      now={now}
+      selectedNode={selectedNode}
+      setSelectedNode={setSelectedNode}
+      answerDrafts={answerDrafts}
+      setAnswerDrafts={setAnswerDrafts}
+      onAnswers={(a) => runId && api.answers(runId, a)}
+      onGate={(action) => runId && api.gate(runId, action)}
+      onNodeModel={(node, model) => runId && api.setNodeModel(runId, node, model)}
+      onCancel={() => runId && api.cancel(runId)}
+    />
+  ) : (
+    <Typography variant="body2" color="text.secondary">
+      Start a run or pick one from the history.
+    </Typography>
+  );
+
+  const startPanel = (
+    <StartPanel
+      task={task}
+      setTask={setTask}
+      tier={tier}
+      setTier={setTier}
+      tiers={tiers}
+      roles={roles}
+      models={models}
+      modelPick={modelPick}
+      setModelPick={setModelPick}
+      clarify={clarify}
+      setClarify={setClarify}
+      maxFixRounds={maxFixRounds}
+      setMaxFixRounds={setMaxFixRounds}
+      starting={starting}
+      onStart={start}
+      project={project}
+      projectPath={projectPath}
+    />
+  );
+
   return (
-    <Box>
+    <Box sx={{ minHeight: "100dvh", display: "flex", flexDirection: "column" }}>
       <AppBar position="static" color="default" elevation={0}>
-        <Toolbar sx={{ gap: 2 }}>
-          <Typography variant="h6">nano-cycle</Typography>
+        <Toolbar sx={{ gap: 1.5, flexWrap: { xs: "wrap", md: "nowrap" } }}>
+          <Typography variant="h6" sx={{ mr: 1 }}>
+            nano-cycle
+          </Typography>
           <Select
             size="small"
             value={project}
-            sx={{ minWidth: 160 }}
             onChange={(e) => setProject(e.target.value)}
+            sx={{ minWidth: 130, flexGrow: { xs: 1, md: 0 } }}
           >
             {projects.map((p) => (
               <MenuItem key={p.name} value={p.name}>
@@ -316,370 +281,59 @@ export default function App() {
           <Button size="small" onClick={() => setAddOpen(true)}>
             Add project
           </Button>
-          <Box sx={{ flexGrow: 1 }} />
-          {state && timing && (
-            <>
-              <Chip label={`run ${state.id}`} size="small" />
-              <Chip label={state.status} size="small" color={STATUS_COLOR[state.status] ?? "default"} />
-              <Chip size="small" label={`⏱ ${fmtDuration(timing.wall)}`} />
-              <Chip
-                size="small"
-                variant="outlined"
-                label={`working ${fmtDuration(timing.work)}${timing.gateMs > 0 ? ` · waited ${fmtDuration(timing.gateMs)}` : ""}`}
-              />
-              <Chip size="small" label={`tokens ▲${fmtTokens(totalUsage.input)} ▼${fmtTokens(totalUsage.output)}`} />
-              {running && (
-                <Button size="small" color="error" onClick={() => api.cancel(state.id)}>
-                  Cancel
-                </Button>
-              )}
-            </>
-          )}
         </Toolbar>
       </AppBar>
 
-      <Stack direction="row" sx={{ p: 2, gap: 2, alignItems: "flex-start" }}>
-        {/* Left: start + runs */}
-        <Stack spacing={2} sx={{ width: 340, flexShrink: 0 }}>
-          <Paper variant="outlined" sx={{ p: 2 }}>
-            <Typography variant="subtitle2" gutterBottom>
-              New run
-            </Typography>
-            <Stack spacing={1.5}>
-              <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                project: {project} {projectPath && `— ${projectPath}`}
-              </Typography>
-              <TextField
-                label="Task"
-                multiline
-                minRows={3}
-                value={task}
-                onChange={(e) => setTask(e.target.value)}
-                size="small"
-              />
-              <Select size="small" value={tier} onChange={(e) => setTier(e.target.value)}>
-                {Object.keys(tiers).map((t) => (
-                  <MenuItem key={t} value={t}>
-                    tier {t}
-                    <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                      {tiers[t]?.join(" → ")}
-                    </Typography>
-                  </MenuItem>
-                ))}
-              </Select>
-              {nodeIds.length === 0 && (
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Typography variant="caption" sx={{ width: 96 }}>
-                    All roles
-                  </Typography>
-                  <Select
-                    size="small"
-                    value={masterModel}
-                    displayEmpty
-                    fullWidth
-                    onChange={(e) => {
-                      const m = e.target.value;
-                      setMasterModel(m);
-                      if (m) setModelPick(Object.fromEntries(Object.keys(roles).map((r) => [r, m])));
-                    }}
-                  >
-                    <MenuItem value="">
-                      <em>choose to fill all…</em>
-                    </MenuItem>
-                    {models.map((m) => (
-                      <MenuItem key={m.label} value={m.label}>
-                        {m.label}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </Stack>
-              )}
-              {nodeIds.length === 0 &&
-                Object.entries(roles).map(([role, label]) => (
-                  <Stack key={role} direction="row" spacing={1} alignItems="center">
-                    <Typography variant="caption" sx={{ width: 96 }}>
-                      {label}
-                    </Typography>
-                    <Select
-                      size="small"
-                      value={modelPick[role] ?? "auto"}
-                      displayEmpty
-                      fullWidth
-                      onChange={(e) => setModelPick((m) => ({ ...m, [role]: e.target.value }))}
-                    >
-                      <MenuItem value="auto">
-                        <em>auto (provider default)</em>
-                      </MenuItem>
-                      {models.map((m) => (
-                        <MenuItem key={m.label} value={m.label}>
-                          {m.label}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </Stack>
-                ))}
-              <Button variant="contained" disabled={starting || !task.trim()} onClick={start}>
-                {starting ? "Starting…" : "Start run"}
-              </Button>
-              <Stack direction="row" spacing={1} alignItems="center">
-                <Button
-                  size="small"
-                  variant={clarify ? "contained" : "outlined"}
-                  onClick={() => setClarify((c) => !c)}
-                >
-                  {clarify ? "✓ Clarify first" : "Clarify first"}
-                </Button>
-                <Typography variant="caption" color="text.secondary">
-                  fix rounds
+      {isMobile && (
+        <Box sx={{ borderBottom: 1, borderColor: "divider" }}>
+          <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth">
+            <Tab label="Monitor" />
+            <Tab label="New run" />
+            <Tab label="History" />
+          </Tabs>
+        </Box>
+      )}
+
+      <Box sx={{ p: { xs: 1.5, md: 3 }, flexGrow: 1 }}>
+        {isMobile ? (
+          <Stack spacing={2}>
+            {tab === TAB_MONITOR && monitor}
+            {tab === TAB_NEW && (
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                {startPanel}
+              </Paper>
+            )}
+            {tab === TAB_HISTORY && (
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <RunList runs={runs} activeId={runId} onLoadRun={(id) => loadRun(id)} />
+              </Paper>
+            )}
+          </Stack>
+        ) : (
+          <Stack direction="row" spacing={3} sx={{ alignItems: "flex-start" }}>
+            <Stack spacing={2} sx={{ width: 360, flexShrink: 0 }}>
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Typography variant="subtitle2" gutterBottom>
+                  New run
                 </Typography>
-                <Select
-                  size="small"
-                  value={maxFixRounds}
-                  onChange={(e) => setMaxFixRounds(Number(e.target.value))}
-                  sx={{ minWidth: 64 }}
-                >
-                  {[0, 1, 2, 3].map((n) => (
-                    <MenuItem key={n} value={n}>
-                      {n}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </Stack>
-              <Typography variant="caption" color="text.secondary">
-                {tier}: {(tiers[tier] ?? []).join(" → ")} · {clarify ? "clarify loop first · " : ""}
-                {maxFixRounds} fix round(s) on gaps. Runs in the selected project's folder.
-              </Typography>
-            </Stack>
-          </Paper>
-
-          <Paper variant="outlined" sx={{ p: 2 }}>
-            <Typography variant="subtitle2" gutterBottom>
-              Runs
-            </Typography>
-            <Stack spacing={0.5}>
-              {runs.length === 0 && (
-                <Typography variant="caption" color="text.secondary">
-                  none yet
+                {startPanel}
+              </Paper>
+              <Paper variant="outlined" sx={{ p: 2 }}>
+                <Typography variant="subtitle2" gutterBottom>
+                  Runs
                 </Typography>
-              )}
-              {runs.map((r) => (
-                <Stack key={r.id} direction="row" spacing={1} alignItems="center">
-                  <Button size="small" sx={{ justifyContent: "flex-start", flexGrow: 1, minWidth: 0 }} onClick={() => loadRun(r.id)}>
-                    {r.id}
-                  </Button>
-                  <Typography variant="caption" color="text.secondary">
-                    {r.project}
-                  </Typography>
-                  <Chip label={r.status} size="small" color={STATUS_COLOR[r.status] ?? "default"} />
-                </Stack>
-              ))}
+                <RunList runs={runs} activeId={runId} onLoadRun={(id) => loadRun(id)} />
+              </Paper>
             </Stack>
-          </Paper>
-        </Stack>
-
-        {/* Right: run view */}
-        <Stack spacing={2} sx={{ flexGrow: 1, minWidth: 0 }}>
-          {state && (
-            <Paper variant="outlined" sx={{ p: 2 }}>
-              <Typography variant="caption" color="text.secondary">
-                ORIGINAL TASK
-              </Typography>
-              <Typography variant="body2">{state.task}</Typography>
-            </Paper>
-          )}
-
-          {state?.gate?.type === "answers" && state.gate.questions && (
-            <Paper variant="outlined" sx={{ p: 2, borderColor: "warning.main" }}>
-              <Typography variant="subtitle2" color="warning.main">
-                Clarification round {state.gate.round ?? 1} — the pipeline needs your answers
-              </Typography>
-              <Stack spacing={2} sx={{ mt: 1.5 }}>
-                {state.gate.questions.map((q, i) => (
-                  <Box key={q.id}>
-                    <Typography variant="body2" sx={{ mb: 0.5 }}>
-                      {i + 1}. {q.question}
-                      {q.type && (
-                        <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                          ({q.type})
-                        </Typography>
-                      )}
-                    </Typography>
-                    {q.why && (
-                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-                        why: {q.why}
-                      </Typography>
-                    )}
-                    {q.options && q.options.length > 0 ? (
-                      <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 0.5, mb: 0.5 }}>
-                        {q.options.map((o) => (
-                          <Chip
-                            key={o.label}
-                            label={o.label + (o.recommended ? " ★" : "")}
-                            size="small"
-                            clickable
-                            color={answerDrafts[q.id] === o.label ? "primary" : "default"}
-                            variant={answerDrafts[q.id] === o.label ? "filled" : "outlined"}
-                            onClick={() => setAnswerDrafts((d) => ({ ...d, [q.id]: o.label }))}
-                          />
-                        ))}
-                      </Stack>
-                    ) : null}
-                    <TextField
-                      fullWidth
-                      size="small"
-                      label={q.suggested ? `suggested: ${q.suggested}` : "your answer"}
-                      value={answerDrafts[q.id] ?? q.suggested ?? ""}
-                      onChange={(e) => setAnswerDrafts((d) => ({ ...d, [q.id]: e.target.value }))}
-                    />
-                  </Box>
-                ))}
-              </Stack>
-              <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-                <Button
-                  variant="contained"
-                  onClick={() => {
-                    const answers: Record<string, string> = {};
-                    for (const q of state.gate?.questions ?? []) {
-                      answers[q.id] = answerDrafts[q.id] ?? q.suggested ?? "(no answer)";
-                    }
-                    api.answers(state.id, answers);
-                    setAnswerDrafts({});
-                  }}
-                >
-                  Submit answers
-                </Button>
-                <Button color="error" onClick={() => api.cancel(state.id)}>
-                  Cancel run
-                </Button>
-              </Stack>
-            </Paper>
-          )}
-
-          {state?.gate?.type === "divergence" && (
-            <Paper variant="outlined" sx={{ p: 2, borderColor: "warning.main" }}>
-              <Typography variant="subtitle2" color="warning.main">
-                Divergence gate — {state.gate.nodeId}
-              </Typography>
-              <Typography variant="body2" sx={{ my: 1 }}>
-                {state.gate.divergence}
-              </Typography>
-              <Stack direction="row" spacing={1}>
-                <Button variant="contained" onClick={() => api.gate(state.id, "approve")}>
-                  Approve & continue
-                </Button>
-                <Button color="error" onClick={() => api.gate(state.id, "cancel")}>
-                  Cancel run
-                </Button>
-              </Stack>
-            </Paper>
-          )}
-
-          {state && (
-            <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
-              {state.nodes.map((n) => {
-                const effective = state.nodeModels?.[n.id] ?? state.models[roleOf(n.id)] ?? "auto";
-                return (
-                  <Paper
-                    key={n.id}
-                    variant="outlined"
-                    onClick={() => setSelectedNode(n.id)}
-                    sx={{
-                      p: 1.5,
-                      cursor: "pointer",
-                      minWidth: 190,
-                      borderColor: selectedNode === n.id ? "primary.main" : undefined,
-                    }}
-                  >
-                    <Stack direction="row" spacing={1} alignItems="center">
-                      <Typography variant="subtitle2">{n.id}</Typography>
-                      <Chip label={n.status} size="small" color={STATUS_COLOR[n.status] ?? "default"} />
-                    </Stack>
-                    {live ? (
-                      <Select
-                        size="small"
-                        value={effective}
-                        fullWidth
-                        sx={{ my: 0.5, fontSize: 12 }}
-                        disabled={
-                          n.status === "done" &&
-                          (n.id === "plan" || n.id === "clarify" || n.id === "verify")
-                        }
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => {
-                          e.stopPropagation();
-                          api.setNodeModel(state.id, n.id, e.target.value);
-                        }}
-                      >
-                        {models.map((m) => (
-                          <MenuItem key={m.label} value={m.label}>
-                            {m.label}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    ) : (
-                      <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                        {effective}
-                      </Typography>
-                    )}
-                    <Typography variant="caption" sx={{ display: "block" }}>
-                      {n.status === "running" && n.startedAt
-                        ? `⏱ ${fmtDuration(now - n.startedAt)}`
-                        : `took ${fmtDuration(n.durationMs)}`}
-                      {n.retries > 0 ? ` · ${n.retries} retr${n.retries === 1 ? "y" : "ies"}` : ""}
-                    </Typography>
-                  </Paper>
-                );
-              })}
-            </Stack>
-          )}
-
-          {state?.error && (
-            <Typography variant="body2" color="error">
-              {state.error}
-            </Typography>
-          )}
-
-          <EventFeed events={events} nodeId={selectedNode} />
-
-          {state && selectedNode && state.prompts?.[selectedNode] && (
-            <Paper variant="outlined" sx={{ p: 2 }}>
-              <Typography variant="caption" color="text.secondary">
-                NODE INPUT — what {selectedNode} received
-              </Typography>
-              <Box component="pre" sx={{ m: 0, mt: 1, fontSize: 12, whiteSpace: "pre-wrap", maxHeight: 260, overflowY: "auto" }}>
-                {state.prompts[selectedNode]}
-              </Box>
-            </Paper>
-          )}
-
-          {state?.artifacts && Object.keys(state.artifacts).length > 0 && (
-            <Paper variant="outlined" sx={{ p: 2 }}>
-              <Typography variant="subtitle2" gutterBottom>
-                Artifacts
-              </Typography>
-              {Object.entries(state.artifacts).map(([k, v]) => (
-                <Box key={k}>
-                  <Divider sx={{ my: 1 }} />
-                  <Typography variant="caption" color="primary">
-                    {k}
-                  </Typography>
-                  <Box component="pre" sx={{ m: 0, fontSize: 12, whiteSpace: "pre-wrap" }}>
-                    {JSON.stringify(v, null, 2)}
-                  </Box>
-                </Box>
-              ))}
-            </Paper>
-          )}
-        </Stack>
-      </Stack>
+            <Box sx={{ flexGrow: 1, minWidth: 0 }}>{monitor}</Box>
+          </Stack>
+        )}
+      </Box>
 
       <AddProjectDialog
         open={addOpen}
         onClose={() => setAddOpen(false)}
-        onAdded={(ps, name) => {
-          setProjects(ps);
-          setProject(name);
-        }}
+        onAdded={(ps) => setProjects(ps)}
       />
     </Box>
   );

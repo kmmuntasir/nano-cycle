@@ -96,7 +96,7 @@ const pipeline = createPipeline({ modelRuntime, emit, webTools });
 // --- http ---------------------------------------------------------------------
 
 function json(res, code, body) {
-  res.writeHead(code, { "content-type": "application/json" });
+  res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" });
   res.end(JSON.stringify(body));
 }
 

@@ -49,6 +49,15 @@ export interface RunEvent {
   ev: { t: string; s?: string; name?: string; args?: string; ok?: boolean; usage?: Record<string, number> };
 }
 
+export interface RunSummary {
+  id: string;
+  task: string;
+  tier: string;
+  project: string;
+  status: string;
+  createdAt: string;
+}
+
 export interface ModelInfo {
   provider: string;
   id: string;
@@ -75,20 +84,17 @@ async function jfetch<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  models: () => jfetch<ModelInfo[]>("/api/models"),
-  tiers: () => jfetch<Record<string, string[]>>("/api/tiers"),
-  roles: () => jfetch<Record<string, string>>("/api/roles"),
-  projects: () => jfetch<Project[]>("/api/projects"),
+  models: () => jfetch<ModelInfo[]>(`/api/models?_=${Date.now()}`),
+  tiers: () => jfetch<Record<string, string[]>>(`/api/tiers?_=${Date.now()}`),
+  roles: () => jfetch<Record<string, string>>(`/api/roles?_=${Date.now()}`),
+  projects: () => jfetch<Project[]>(`/api/projects?_=${Date.now()}`),
   addProject: (name: string, path: string) =>
     jfetch<Project[]>("/api/projects", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name, path }),
     }),
-  listRuns: () =>
-    jfetch<{ id: string; task: string; tier: string; project: string; status: string; createdAt: string }[]>(
-      "/api/runs",
-    ),
+  listRuns: () => jfetch<RunSummary[]>(`/api/runs?_=${Date.now()}`),
   getRun: (id: string) => jfetch<{ state: RunState; events: RunEvent[] }>(`/api/runs/${id}`),
   start: (
     task: string,
