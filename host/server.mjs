@@ -182,6 +182,7 @@ const server = http.createServer(async (req, res) => {
         requireQuestions: body.requireQuestions === true,
         maxFixRounds: Number(body.maxFixRounds),
         git: body.git === true && project.path !== SANDBOX_DIR,
+        audit: body.audit !== false,
       });
       return json(res, 201, state);
     }

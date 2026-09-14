@@ -56,6 +56,7 @@ export default function App() {
   });
   const [clarify, setClarify] = useState(false);
   const [useGit, setUseGit] = useState(true);
+  const [useAudit, setUseAudit] = useState(true);
   const [maxFixRounds, setMaxFixRounds] = useState(2);
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [starting, setStarting] = useState(false);
@@ -133,7 +134,7 @@ export default function App() {
   const start = async () => {
     setStarting(true);
     try {
-      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds, git: useGit });
+      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds, git: useGit, audit: useAudit });
       setShowNew(false);
       setTask("");
       await loadRun(s.id);
@@ -227,6 +228,8 @@ export default function App() {
       git={useGit}
       setGit={setUseGit}
       gitAvailable={project !== "sandbox"}
+      audit={useAudit}
+      setAudit={setUseAudit}
       starting={starting}
       onStart={start}
       project={project}

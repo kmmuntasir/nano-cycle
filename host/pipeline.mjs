@@ -25,6 +25,8 @@ import {
   implementPrompt,
   verifySystem,
   verifyPrompt,
+  auditSystem,
+  auditPrompt,
   clarifySystem,
   clarifyPrompt,
 } from "./prompts.mjs";
@@ -38,6 +40,7 @@ const SYSTEM_FOR = {
   planCaps: planCapsSystem,
   implement: implementSystem,
   verify: verifySystem,
+  audit: auditSystem,
 };
 
 const pathKey = (p) => path.normalize(p).toLowerCase();
@@ -157,6 +160,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
 
   function systemFor(run, id) {
     if (id === "verify") return SYSTEM_FOR.verify();
+    if (id === "audit") return SYSTEM_FOR.audit();
     if (id === "plan") return run.tier === "L" ? SYSTEM_FOR.planCaps() : SYSTEM_FOR.plan();
     return SYSTEM_FOR.implement(profileFor(id).lane);
   }
@@ -717,7 +721,19 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     return reports;
   }
 
+  function auditPromptFor(run) {
+    return auditPrompt({
+      task: run.task,
+      workspace: run.projectPath,
+      spec: run.spec,
+      plan: run.state.artifacts.plan,
+      implementReports: implementReports(run),
+      verifyArtifact: run.state.artifacts.verify,
+    });
+  }
+
   function promptFor(run, n) {
+    if (n.id === "audit") return auditPromptFor(run);
     if (n.id === "verify") {
       return verifyPrompt({
         task: run.task,
@@ -774,8 +790,13 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       // Resolved per-iteration: for M/L the compile happens mid-round (right
       // after plan), and the running loop must pick the graph up immediately.
       const graph = run.dynamicGraph ?? TIERS[run.tier];
+      // The audit gate runs explicitly in execute() after verify accepts — it
+      // never joins the DAG waves, so a failing verify can't drag audit along.
       const ready = graph.filter(
-        (n) => nodeState(run, n.id)?.status === "queued" && n.dependsOn.every(done),
+        (n) =>
+          n.id !== "audit" &&
+          nodeState(run, n.id)?.status === "queued" &&
+          n.dependsOn.every(done),
       );
       if (ready.length === 0) break;
 
@@ -838,11 +859,11 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         writeSpecFile(run, emit);
       }
 
-      // Step 2 — build: plan → parallel coders → verify, verdict-gated.
+      // Step 2 — build: plan → parallel coders → verify → audit, verdict-gated.
       let verdict = null;
       for (let round = 0; round <= run.maxFixRounds; round++) {
         if (round > 0) {
-          // Requeue coder + verify nodes; the plan (and compiled graph) stands.
+          // Requeue coder + verify + audit nodes; the plan (and compiled graph) stands.
           for (const n of run.state.nodes) {
             if (n.id !== "plan" && n.id !== "clarify" && n.id.startsWith("impl")) {
               n.status = "queued";
@@ -851,18 +872,46 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
             }
           }
           if (nodeState(run, "verify")) nodeState(run, "verify").status = "queued";
+          if (run.audit && nodeState(run, "audit")) nodeState(run, "audit").status = "queued";
           emit.state(run);
         }
         await runDag(run);
+        if (run.cancelRequested) break;
         verdict = run.state.artifacts.verify?.verdict ?? "gaps-found";
-        if (verdict === "accepted" || run.cancelRequested) break;
-        run.feedback = (run.state.artifacts.verify?.checks ?? [])
-          .filter((c) => !c.pass)
-          .map((c) => `- ${c.criterion}: ${c.evidence ?? ""}`)
-          .join("\n");
-        if (round < run.maxFixRounds) {
-          emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1}` });
+        if (verdict !== "accepted") {
+          run.feedback = (run.state.artifacts.verify?.checks ?? [])
+            .filter((c) => !c.pass)
+            .map((c) => `- ${c.criterion}: ${c.evidence ?? ""}`)
+            .join("\n");
+          if (round < run.maxFixRounds) {
+            emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1}` });
+          }
+          continue;
         }
+        // Verify accepted → audit gate (conformity + quality), unless disabled.
+        if (run.audit && nodeState(run, "audit")) {
+          const auditArtifact = await execNode(run, "audit", auditPromptFor(run));
+          const auditVerdict = auditArtifact?.verdict ?? "gaps-found";
+          const blocking = (auditArtifact?.findings ?? []).filter((f) => f.blocking);
+          if (auditVerdict === "accepted") {
+            verdict = "accepted";
+            break;
+          }
+          verdict = "gaps-found";
+          const src = blocking.length ? blocking : (auditArtifact?.findings ?? []);
+          run.feedback = src
+            .map((f) => `- [${f.category}]${f.file ? ` ${f.file}:` : ""} ${f.issue}${f.fix ? ` (fix: ${f.fix})` : ""}`)
+            .join("\n");
+          if (round < run.maxFixRounds) {
+            emit.event(run.id, "audit", {
+              t: "notice",
+              s: `audit: ${blocking.length} blocking finding(s) — fix round ${round + 1}`,
+            });
+          }
+          continue;
+        }
+        verdict = "accepted";
+        break;
       }
       run.state.status = verdict === "accepted" ? "completed" : "failed";
       await integrate(run, verdict === "accepted");
@@ -904,7 +953,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       return null;
     },
 
-    async start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds, git: gitRequested }) {
+    async start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds, git: gitRequested, audit: auditRequested }) {
       const tierGraph = TIERS[tier];
       if (!tierGraph) throw new Error(`unknown tier ${tier}`);
       // One working tree per project: a second concurrent run on the same
@@ -954,6 +1003,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         nodes: [
           ...(clarify ? [{ id: "clarify", dependsOn: [] }] : []),
           ...tierGraph.map((n) => ({ ...n })),
+          // The audit gate runs explicitly after verify accepts — never in DAG waves.
+          { id: "audit", dependsOn: ["verify"] },
         ].map((n) => ({
           id: n.id,
           status: "queued",
@@ -968,6 +1019,16 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         prompts: {},
         nodeModels: {},
       };
+      // Audit gate (conformity + quality) runs after verify accepts. On by
+      // default; the owner can switch it off per run from the GUI.
+      const auditEnabled = auditRequested !== false;
+      if (!auditEnabled) {
+        const a = state.nodes.find((n) => n.id === "audit");
+        if (a) {
+          a.status = "cancelled";
+          a.error = "audit step disabled for this run";
+        }
+      }
       const run = {
         id,
         task,
@@ -975,6 +1036,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         projectPath: project.path,
         models,
         clarify: !!clarify,
+        audit: auditEnabled,
         // Optional owner policy: force >=1 question round (finalize tool
         // withheld on round 1). Default off — prompt quality drives asking.
         requireQuestions: clarify && requireQuestions === true,

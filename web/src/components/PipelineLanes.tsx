@@ -116,10 +116,11 @@ export default function PipelineLanes({
   const coders = state.nodes.filter((n) => n.id.startsWith("impl"));
   const be = coders.filter((n) => roleOf(n.id) !== "frontend");
   const fe = coders.filter((n) => roleOf(n.id) === "frontend");
-  const solo = state.nodes.filter((n) => !["clarify", "plan", "verify"].includes(n.id) && !n.id.startsWith("impl"));
+  const solo = state.nodes.filter((n) => !["clarify", "plan", "verify", "audit"].includes(n.id) && !n.id.startsWith("impl"));
   const clarify = pick("clarify");
   const plan = pick("plan");
   const verify = pick("verify");
+  const audit = pick("audit");
   const modelValue = (id: string) => state.nodeModels?.[id] ?? "auto";
 
   const laneTitle = (t: string, count: number) => (
@@ -191,6 +192,12 @@ export default function PipelineLanes({
         <Box>
           {laneTitle("Verify (Gate)", 1)}
           {renderRow([verify], "")}
+        </Box>
+      )}
+      {audit && (
+        <Box>
+          {laneTitle("Audit (Conformity)", 1)}
+          {renderRow([audit], "")}
         </Box>
       )}
       {selectedNode && byId.get(selectedNode) && (

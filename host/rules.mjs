@@ -16,10 +16,37 @@ import path from "node:path";
 const STACK_RULES = {
   "implement-be": ["backend-development-rules.md", "security-rules.md"],
   "implement-fe": ["frontend-development-rules.md"],
-  verify: ["testing-rules.md"],
+  // Verify and audit check BOTH sides against the repo's locked decisions —
+  // they receive every rule file, not just the testing rules.
+  verify: [
+    "testing-rules.md",
+    "backend-development-rules.md",
+    "security-rules.md",
+    "frontend-development-rules.md",
+  ],
+  audit: [
+    "testing-rules.md",
+    "backend-development-rules.md",
+    "security-rules.md",
+    "frontend-development-rules.md",
+  ],
 };
 
 const PER_FILE_CAP = 20_000;
+
+/** Rule files for a node — matched by lane suffix so capability-derived coder
+ *  nodes (impl-<cap>-be / impl-<cap>-fe) get their side's rules too. */
+export function stackRulesFor(nodeId) {
+  if (nodeId === "verify" || nodeId === "audit") return [...STACK_RULES.verify];
+  const out = [];
+  if (nodeId === "implement" || nodeId.endsWith("-be")) {
+    out.push("backend-development-rules.md", "security-rules.md");
+  }
+  if (nodeId === "implement" || nodeId.endsWith("-fe")) {
+    out.push("frontend-development-rules.md");
+  }
+  return out;
+}
 
 /** Resolve the context files for one node in one project (existing files only). */
 export function nodeContextFiles(projectPath, nodeId) {
@@ -31,7 +58,7 @@ export function nodeContextFiles(projectPath, nodeId) {
       break; // first match wins — they are conventions for the same thing
     }
   }
-  for (const f of STACK_RULES[nodeId] ?? []) {
+  for (const f of stackRulesFor(nodeId)) {
     const p = path.join(projectPath, ".claude", "rules", f);
     if (fs.existsSync(p)) out.push({ name: f, path: p });
   }

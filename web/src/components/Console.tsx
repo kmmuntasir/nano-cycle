@@ -2,14 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Flex, Input, Text } from "@chakra-ui/react";
 import { SelectEl } from "../ui/controls";
 import { GhostButton, OutlineButton } from "../ui/buttons";
+import { fmtTimestamp } from "../lib/format";
 import type { RunEvent, RunState } from "../api";
-
-function rel(ts: number, start: number): string {
-  const d = Math.max(0, ts - start);
-  const s = Math.floor(d / 1000);
-  if (s < 60) return `+${s}s`;
-  return `+${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
-}
 
 const titleCase = (s: string) =>
   s
@@ -44,6 +38,9 @@ export default function Console({
   const [typeFilter, setTypeFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [paused, setPaused] = useState(false);
+  // Follow mode: stick to the bottom only while the user is already there.
+  // Scrolling up pins the view; scrolling back to the bottom resumes follow.
+  const [stick, setStick] = useState(true);
 
   const countOf = (id: string) => events.filter((e) => e.nodeId === id).length;
 
@@ -61,8 +58,23 @@ export default function Console({
   }, [events, nodeId, typeFilter, query]);
 
   useEffect(() => {
-    if (!paused) feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [shown.length, paused]);
+    if (!paused && stick) feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
+  }, [shown.length, paused, stick]);
+
+  const onScroll = () => {
+    const el = feedRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    setStick(atBottom);
+    // Scrolling back to the bottom resumes a paused feed — standard log-follow.
+    if (atBottom) setPaused(false);
+  };
+
+  const jumpToBottom = () => {
+    setPaused(false);
+    setStick(true);
+    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
+  };
 
   const copyAll = () => {
     const txt = shown.map((e) => `[${e.nodeId}] ${e.ev.s ?? e.ev.name ?? e.ev.t} ${e.ev.args ?? ""}`).join("\n");
@@ -164,8 +176,8 @@ export default function Console({
             color="ink"
             _placeholder={{ color: "#8b91a0" }}
           />
-          <OutlineButton size="xs" active={paused} onClick={() => setPaused((v) => !v)}>
-            {paused ? "▶ Resume" : "⏸ Pause"}
+          <OutlineButton size="xs" active={paused || !stick} onClick={() => { if (paused || !stick) jumpToBottom(); else setPaused(true); }}>
+            {paused || !stick ? "▶ Follow" : "⏸ Pause"}
           </OutlineButton>
           <GhostButton onClick={copyAll}>
             Copy
@@ -174,8 +186,10 @@ export default function Console({
             {nodeId ?? "All Nodes"} · {shown.length} / {events.length}
           </Text>
         </Flex>
+        <Box position="relative">
         <Box
           ref={feedRef}
+          onScroll={onScroll}
           h={`calc(${height} - 52px)`}
           minH="160px"
           overflowY="auto"
@@ -197,7 +211,7 @@ export default function Console({
                 <span key={i}>
                   {burst && (
                     <span style={{ color: "#4fd6a8" }}>
-                      [{rel(e.ts, runStart)} {nodeId ? "" : `${e.nodeId} `}]
+                      [{fmtTimestamp(e.ts)} {nodeId ? "" : `${e.nodeId} `}]
                     </span>
                   )}
                   {ev.s}
@@ -213,30 +227,51 @@ export default function Console({
             if (ev.t === "tool")
               return (
                 <div key={i} style={{ color: "#7aa2f7", margin: "3px 0", wordBreak: "break-word" }}>
-                  <span style={{ color: "#4b5563" }}>{rel(e.ts, runStart)}</span> ▸ [{e.nodeId}] {ev.name}{" "}
+                  <span style={{ color: "#4b5563" }}>{fmtTimestamp(e.ts)}</span> ▸ [{e.nodeId}] {ev.name}{" "}
                   <span style={{ color: "#9ca3af" }}>{(ev.args ?? "").slice(0, 300)}</span>
                 </div>
               );
             if (ev.t === "tool_end")
               return (
                 <div key={i} style={{ color: ev.ok ? "#4fd6a8" : "#f16a6a", borderLeft: ev.ok ? undefined : "2px solid #f16a6a", paddingLeft: ev.ok ? 0 : 6 }}>
-                  <span style={{ color: "#4b5563" }}>{rel(e.ts, runStart)}</span> {ev.ok ? "✔" : "✘"} [{e.nodeId}] {ev.name} {ev.ok ? "" : "(error)"}
+                  <span style={{ color: "#4b5563" }}>{fmtTimestamp(e.ts)}</span> {ev.ok ? "✔" : "✘"} [{e.nodeId}] {ev.name} {ev.ok ? "" : "(error)"}
                 </div>
               );
             if (ev.t === "usage")
               return (
                 <div key={i} style={{ color: "#8b91a0" }}>
-                  {rel(e.ts, runStart)} [{e.nodeId}] tokens ▲{ev.usage?.input} ▼{ev.usage?.output}
+                  {fmtTimestamp(e.ts)} [{e.nodeId}] tokens ▲{ev.usage?.input} ▼{ev.usage?.output}
                 </div>
               );
             if (ev.t === "notice")
               return (
                 <div key={i} style={{ color: "#f0b429", margin: "3px 0" }}>
-                  {rel(e.ts, runStart)} [{e.nodeId}] ⚠ {ev.s}
+                  {fmtTimestamp(e.ts)} [{e.nodeId}] ⚠ {ev.s}
                 </div>
               );
             return null;
           })}
+        </Box>
+        {(!stick || paused) && shown.length > 0 && (
+          <Box
+            as="button"
+            position="absolute"
+            bottom={2}
+            left="50%"
+            transform="translateX(-50%)"
+            bg="#2f6fed"
+            color="white"
+            fontSize="11px"
+            fontFamily="system-ui, sans-serif"
+            px={3}
+            py={1}
+            borderRadius="full"
+            onClick={jumpToBottom}
+            boxShadow="0 4px 16px rgba(0,0,0,0.5)"
+          >
+            ↓ Latest
+          </Box>
+        )}
         </Box>
       </Box>
     </Flex>

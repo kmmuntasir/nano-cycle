@@ -109,7 +109,7 @@ export const api = {
     tier: string,
     project: string,
     models: Record<string, string>,
-    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean },
+    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean },
   ) =>
     jfetch<RunState>("/api/runs", {
       method: "POST",

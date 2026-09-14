@@ -108,6 +108,30 @@ export const ARTIFACT_SCHEMAS = {
     ),
     notes: Type.Optional(Type.String()),
   }),
+  audit: Type.Object({
+    verdict: Type.Union([Type.Literal("accepted"), Type.Literal("gaps-found")]),
+    findings: Type.Array(
+      Type.Object({
+        category: Type.Union(
+          [
+            Type.Literal("requirement-conformity"),
+            Type.Literal("locked-decision"),
+            Type.Literal("quality"),
+            Type.Literal("practice"),
+          ],
+          { description: "What kind of finding this is" },
+        ),
+        blocking: Type.Boolean({
+          description: "True ONLY for spec/locked-decision violations, broken behavior, or security problems — these force another fix round",
+        }),
+        file: Type.Optional(Type.String({ description: "Offending file, ideally with :line" })),
+        issue: Type.String({ description: "What is wrong, quoting the violated criterion/decision where applicable" }),
+        fix: Type.Optional(Type.String({ description: "How to fix it" })),
+      }),
+      { description: "Empty when the implementation is right and clean" },
+    ),
+    notes: Type.Optional(Type.String()),
+  }),
 };
 
 // Built-in minimal rules — always present; project context files (AGENTS.md /
@@ -144,6 +168,14 @@ export const NODE_PROFILES = {
     role: "verify",
     rules: CODING_RULES,
   },
+  audit: {
+    title: "Audit",
+    tools: ["read", "bash", "report_artifact"],
+    thinking: "high",
+    schema: ARTIFACT_SCHEMAS.audit,
+    role: "audit",
+    rules: CODING_RULES,
+  },
 };
 
 // Role = which model/config slot a node uses. Capability-derived coder nodes
@@ -152,6 +184,7 @@ export const NODE_PROFILES = {
 export function profileFor(nodeId) {
   if (nodeId === "plan") return NODE_PROFILES.plan;
   if (nodeId === "verify") return NODE_PROFILES.verify;
+  if (nodeId === "audit") return NODE_PROFILES.audit;
   if (nodeId === "implement") return NODE_PROFILES.implement;
   if (nodeId.endsWith("-be")) return { ...NODE_PROFILES.implement, lane: "backend" };
   if (nodeId.endsWith("-fe")) return { ...NODE_PROFILES.implement, lane: "frontend" };
@@ -168,6 +201,7 @@ export const MODEL_ROLES = {
   backend: "Backend coder",
   frontend: "Frontend coder",
   verify: "Verify",
+  audit: "Audit",
 };
 
 export const TIERS = {

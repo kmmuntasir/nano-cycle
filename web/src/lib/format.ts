@@ -18,7 +18,7 @@ export const fmtTimestamp = (ms: number): string => {
 };
 
 export const roleOf = (id: string) =>
-  id === "plan" ? "plan" : id === "verify" ? "verify" : id.endsWith("-fe") ? "frontend" : "backend";
+  id === "plan" ? "plan" : id === "verify" ? "verify" : id === "audit" ? "audit" : id.endsWith("-fe") ? "frontend" : "backend";
 
 export function pretty(v: unknown): string {
   try {

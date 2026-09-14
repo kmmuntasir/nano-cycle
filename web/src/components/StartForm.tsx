@@ -28,6 +28,8 @@ export default function StartForm({
   git,
   setGit,
   gitAvailable,
+  audit,
+  setAudit,
   starting,
   onStart,
   project,
@@ -49,6 +51,8 @@ export default function StartForm({
   git: boolean;
   setGit: (v: boolean) => void;
   gitAvailable: boolean;
+  audit: boolean;
+  setAudit: (v: boolean) => void;
   starting: boolean;
   onStart: () => void;
   project: string;
@@ -150,6 +154,13 @@ export default function StartForm({
               onClick={() => setGit(!git)}
             >
               {git ? "✓ Git" : "Git Off"}
+            </OutlineButton>
+            <OutlineButton
+              active={audit}
+              title="Second gate after verify: conformity to the spec and repo rules, code quality, best practices."
+              onClick={() => setAudit(!audit)}
+            >
+              {audit ? "✓ Audit" : "Audit Off"}
             </OutlineButton>
             <Flex alignItems="center" gap={1}>
               <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">Fix Rounds:</Text>
