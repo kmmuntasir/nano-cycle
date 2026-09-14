@@ -57,23 +57,65 @@ export default function Console({
     return list;
   }, [events, nodeId, typeFilter, query]);
 
+  // Timestamp of the last programmatic scroll — its scroll event arrives late,
+  // often after new output has already grown the feed again. Without this guard
+  // that late event computes "not at bottom" and wrongly kills follow mode.
+  const programmaticUntil = useRef(0);
+
+  const scrollToBottom = () => {
+    const el = feedRef.current;
+    if (!el) return;
+    programmaticUntil.current = Date.now() + 250;
+    el.scrollTop = el.scrollHeight;
+    // Streaming text lands in bursts: correct again after layout settles, so a
+    // line that arrived between DOM commit and paint can't leave a gap.
+    requestAnimationFrame(() => {
+      const el2 = feedRef.current;
+      if (!el2) return;
+      programmaticUntil.current = Date.now() + 250;
+      el2.scrollTop = el2.scrollHeight;
+    });
+  };
+
+  // NOTE: depend on the last event's identity, not just the list length — the
+  // client caps the buffer at ~3000 entries, after which length never changes
+  // and a length-only dep silently stops follow mode mid-run.
+  const lastEv = shown.length ? shown[shown.length - 1] : null;
   useEffect(() => {
-    if (!paused && stick) feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
-  }, [shown.length, paused, stick]);
+    if (!paused && stick) scrollToBottom();
+  }, [shown.length, lastEv, paused, stick]);
 
   const onScroll = () => {
     const el = feedRef.current;
     if (!el) return;
+    if (Date.now() < programmaticUntil.current) {
+      // Echo of our own scrollTo — re-assert follow instead of measuring.
+      setStick(true);
+      return;
+    }
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     setStick(atBottom);
     // Scrolling back to the bottom resumes a paused feed — standard log-follow.
     if (atBottom) setPaused(false);
   };
 
+  // Upward wheel / touch drag is always the user grabbing control — never
+  // programmatic. (Downward wheel is ignored: the scroll event confirms bottom.)
+  const onWheel = (e: React.WheelEvent) => {
+    if (e.deltaY < 0) {
+      programmaticUntil.current = 0;
+      setStick(false);
+    }
+  };
+  const onTouchMove = () => {
+    programmaticUntil.current = 0;
+    setStick(false);
+  };
+
   const jumpToBottom = () => {
     setPaused(false);
     setStick(true);
-    feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight });
+    scrollToBottom();
   };
 
   const copyAll = () => {
@@ -190,6 +232,8 @@ export default function Console({
         <Box
           ref={feedRef}
           onScroll={onScroll}
+          onWheel={onWheel}
+          onTouchMove={onTouchMove}
           h={`calc(${height} - 52px)`}
           minH="160px"
           overflowY="auto"

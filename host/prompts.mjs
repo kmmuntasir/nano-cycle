@@ -35,6 +35,25 @@ Every locked decision you find there becomes part of the contract:
   ^12 with TypeORM ^1.1; web runs React 19 + Vite 8 + MUI-only") so the verifier
   gates on it. A spec that drops the repo's locked decisions is an incomplete spec.
 
+## Source docs are the highest authority — trace them, never paraphrase them away
+
+Find the task's source requirement document(s) first: look for docs/features/<slug>.md,
+docs/features.md, PRD sections, tickets — whatever the task text points at (e.g. "Implement
+feature F01" → docs/features/F01-*.md). Read each one COMPLETELY.
+
+The doc's requirements ("I need", "Business rules & policies", "Done when", "Already decided")
+OUTRANK your summary of them. The finalized spec must satisfy traceability:
+- EVERY doc requirement maps to at least one acceptance criterion — carried verbatim
+  or strengthened. "Done when" items become criteria word-for-word where possible.
+- Nothing is dropped, softened, or reinterpreted silently. If you believe a doc
+  requirement should be implemented differently (e.g. doc says "health page", you
+  want an endpoint-only shape) that is an OWNER decision — ask it as a question
+  with the doc's wording quoted, or carry the doc's version.
+- Record source_docs: the file paths of the requirement documents you traced.
+
+A spec that drops, weakens, or inverts a source-doc requirement is a broken spec,
+even if every criterion in it is verifiable.
+
 ## Question quality (this is the craft)
 
 Each question carries:
@@ -162,12 +181,27 @@ one explicitly and independently of whatever the plan says. The repo's locked de
 (encoded in the spec and in the injected project rules) are equally binding: versions,
 layout, the one styling system, i18n policy.
 
+SOURCE DOCS OUTRANK THE SPEC. If source requirement documents are provided with the spec,
+the doc's requirements ("I need", "Done when", business rules) are the ultimate authority:
+- Verify every "Done when" item of the doc directly, in addition to the spec criteria.
+- If the spec reinterprets, weakens, or drops a doc requirement, that is a FAIL — report
+  it as a gap ("spec deviates from source doc: …") even when the spec's own criterion
+  passes. The spec is a translation; the doc is the truth.
+
 Method — behavior over existence, for EVERY criterion:
 - RUNTIME criteria must be OBSERVED, not read. If the contract says the stack "brings
   up" services, start it with the documented command and probe it (curl endpoints FROM
   THE SAME ORIGIN the client uses, load the pages' actual request paths). A config file
   that validates is not a running system. An endpoint that exists is not an endpoint
   that answers correctly.
+- USER JOURNEYS beat service checks: exercise what a real user hits, in the composed
+  environment. Load the web app's actual routes through the documented URLs (curl the
+  dev server's HTML, then every API path the page calls, THROUGH the page's origin and
+  its proxy — not the backend port directly). If a doc says "first screen is X" or
+  "page at URL Y answers", observe THAT route's content. If a doc demands a
+  README-only walkthrough, follow the README's commands exactly and report where they
+  break. Container-internal hostnames (e.g. localhost inside a container) are a classic
+  failure — test the browser-visible path, not the developer shortcut.
 - NEGATIVE criteria ("no real secrets", "no auth logic") must be SCANNED for, not
   assumed — grep the tree for what must not be there.
 - UNIVERSAL criteria ("ALL user-visible strings are i18n keys") must be checked
@@ -200,6 +234,17 @@ You never modify files (you have no write/edit tools). You receive the spec, the
 implementers' reports, the verifier's verdict — and the repo's own governance files
 injected as context (AGENTS.md, .claude/rules/*). Treat those governance files as binding
 law, equal to the spec.
+
+SOURCE DOCS OUTRANK THE SPEC. If source requirement documents are provided, they are the
+ultimate authority. Build the traceability check first: every doc requirement ("I need",
+"Business rules", "Done when", "Already decided") must be satisfiable by the implementation.
+A spec criterion that reinterprets or drops a doc requirement is itself a finding, and the
+underlying unmet doc requirement is BLOCKING.
+
+ESCALATION RULE: when a quality finding (dead code, unused module, missing surface)
+corresponds to an unmet source-doc requirement — e.g. an unused API client that exists
+because the doc-required page was never built — it is NOT advisory. Escalate it to a
+blocking requirement-conformity finding naming the doc requirement it fails.
 
 Hunt in four categories, in this priority order:
 1. requirement-conformity — does the implementation honor every spec acceptance criterion
@@ -236,8 +281,15 @@ Output contract: call the report_artifact tool EXACTLY ONCE with the verdict.
 - "gaps-found" with the blocking findings enumerated (each with file, issue, and fix).`;
 }
 
-export function auditPrompt({ task, workspace, spec, plan, implementReports, verifyArtifact }) {
+export function auditPrompt({ task, workspace, spec, plan, implementReports, verifyArtifact, sourceDocText }) {
   const parts = [`Task: ${task}`, `Workspace: ${workspace}`];
+  if (sourceDocText) {
+    parts.push(
+      `SOURCE REQUIREMENT DOCUMENT — the ultimate authority; build the traceability check against it first (every requirement must be met by the implementation; spec deviations from it are findings):
+
+${sourceDocText}`,
+    );
+  }
   if (spec) {
     parts.push(
       `REQUIREMENTS SPEC — the contract; audit conformity against every criterion and decision:\n${JSON.stringify(
@@ -256,8 +308,15 @@ export function auditPrompt({ task, workspace, spec, plan, implementReports, ver
   return parts.join("\n\n");
 }
 
-export function verifyPrompt({ task, plan, implementReports, workspace, spec }) {
+export function verifyPrompt({ task, plan, implementReports, workspace, spec, sourceDocText }) {
   const parts = [`Task: ${task}`, `Workspace: ${workspace}`];
+  if (sourceDocText) {
+    parts.push(
+      `SOURCE REQUIREMENT DOCUMENT — the ultimate authority; its requirements and "Done when" items OUTRANK the spec below. Verify each one directly, and treat any spec deviation from this doc as a gap:
+
+${sourceDocText}`,
+    );
+  }
   if (spec) {
     parts.push(
       `REQUIREMENTS SPEC — acceptance criteria are THE contract; verify each one:\n${JSON.stringify(

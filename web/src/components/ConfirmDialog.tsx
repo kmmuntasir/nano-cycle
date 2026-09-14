@@ -6,6 +6,7 @@ export default function ConfirmDialog({
   title,
   body,
   confirmLabel,
+  cancelLabel = "Keep Running",
   onConfirm,
   onClose,
 }: {
@@ -13,6 +14,7 @@ export default function ConfirmDialog({
   title: string;
   body: string;
   confirmLabel: string;
+  cancelLabel?: string;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -47,7 +49,7 @@ export default function ConfirmDialog({
         </Text>
         <Flex gap={2} justifyContent="flex-end">
           <GhostButton onClick={onClose}>
-            Keep Running
+            {cancelLabel}
           </GhostButton>
           <DangerOutlineButton onClick={onConfirm}>
             {confirmLabel}

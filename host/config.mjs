@@ -92,6 +92,11 @@ export const ARTIFACT_SCHEMAS = {
   }),
   spec: Type.Object({
     summary: Type.String({ description: "The refined task, fully decided" }),
+    source_docs: Type.Optional(
+      Type.Array(Type.String(), {
+        description: "Paths of the source requirement documents this spec traces (docs/features/*.md, PRD sections). Their requirements OUTRANK this spec's wording",
+      }),
+    ),
     decisions: Type.Array(
       Type.Object({ topic: Type.String(), decision: Type.String() }),
       { description: "Locked decisions (incl. the outcomes of clarification rounds)" },

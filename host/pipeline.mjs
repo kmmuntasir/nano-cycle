@@ -46,6 +46,28 @@ const SYSTEM_FOR = {
 const pathKey = (p) => path.normalize(p).toLowerCase();
 const disjoint = (a, b) => !a.some((x) => b.includes(x));
 
+// Source-doc loader: the spec's source_docs paths are resolved inside the
+// project and their raw text is handed to verify/audit so the ORIGINAL
+// requirements gate the run — closing the lossy spec-translation hole.
+// Missing/unreadable files degrade to a notice, never a crash.
+function loadSourceDocs(run, emit) {
+  const docs = run.spec?.source_docs;
+  if (!Array.isArray(docs) || docs.length === 0) return null;
+  const parts = [];
+  for (const rel of docs.slice(0, 5)) {
+    const abs = path.resolve(run.projectPath, String(rel));
+    if (!abs.startsWith(path.resolve(run.projectPath))) continue; // stay in the project
+    try {
+      let content = fs.readFileSync(abs, "utf8");
+      if (content.length > 30_000) content = content.slice(0, 30_000) + "\n(truncated)";
+      parts.push(`--- ${rel} ---\n${content}`);
+    } catch {
+      emit.event(run.id, "_run", { t: "notice", s: `source doc unreadable: ${rel}` });
+    }
+  }
+  return parts.length ? parts.join("\n\n") : null;
+}
+
 // Requirements are durable: the finalized spec lands inside the project it describes.
 function writeSpecFile(run, emit) {
   try {
@@ -56,6 +78,9 @@ function writeSpecFile(run, emit) {
       `# Spec — ${run.task}`,
       "",
       `Run: ${run.id} · Tier: ${run.tier} · Date: ${run.state.createdAt}`,
+      ...(spec.source_docs?.length
+        ? [`Source docs (their requirements OUTRANK this spec): ${spec.source_docs.join(", ")}`]
+        : []),
       "",
       "## Summary",
       "",
@@ -503,6 +528,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   function specIntoPrompt(spec) {
     return [
       "REQUIREMENTS SPEC (owner-locked — honor exactly):",
+      ...(spec.source_docs?.length
+        ? [`Source docs (their requirements OUTRANK this spec): ${spec.source_docs.join(", ")} — read them if available`]
+        : []),
       `Summary: ${spec.summary}`,
       ...(spec.decisions?.length
         ? [`Locked decisions:\n${spec.decisions.map((d) => `- ${d.topic}: ${d.decision}`).join("\n")}`]
@@ -729,6 +757,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       plan: run.state.artifacts.plan,
       implementReports: implementReports(run),
       verifyArtifact: run.state.artifacts.verify,
+      sourceDocText: loadSourceDocs(run, emit),
     });
   }
 
@@ -741,6 +770,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         implementReports: implementReports(run),
         workspace: run.projectPath,
         spec: run.spec,
+        sourceDocText: loadSourceDocs(run, emit),
       });
     }
     const work = run.nodeWork[n.id];

@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { Box, Flex, HStack, Stack, Text } from "@chakra-ui/react";
 import ModelPicker from "../ui/ModelPicker";
+import ConfirmDialog from "./ConfirmDialog";
 import { fmtDuration, roleOf } from "../lib/format";
 import type { ModelInfo, NodeState, RunState } from "../api";
 
@@ -24,7 +26,7 @@ function NodeCard({
   onSelect,
   models,
   modelValue,
-  onNodeModel,
+  onModelPick,
   detail,
 }: {
   n: NodeState;
@@ -33,7 +35,7 @@ function NodeCard({
   onSelect: () => void;
   models: ModelInfo[];
   modelValue: string;
-  onNodeModel: (nodeId: string, model: string) => void;
+  onModelPick: (node: NodeState, model: string) => void;
   detail?: string;
 }) {
   const color = DOT[n.status] ?? "#8b91a0";
@@ -79,12 +81,12 @@ function NodeCard({
           {n.error.slice(0, 120)}
         </Text>
       )}
-      {(n.status === "running" || n.status === "queued") && models.length > 0 && (
+      {n.status !== "done" && models.length > 0 && (
         <Box mt="6px" onClick={(e) => e.stopPropagation()}>
           <ModelPicker
             value={modelValue}
             models={models}
-            onChange={(v) => onNodeModel(n.id, v)}
+            onChange={(v) => onModelPick(n, v)}
             compact
             ariaLabel={`model for ${n.id}`}
           />
@@ -113,6 +115,16 @@ export default function PipelineLanes({
 }) {
   const byId = new Map(state.nodes.map((n) => [n.id, n]));
   const pick = (id: string) => byId.get(id);
+  const [restartAsk, setRestartAsk] = useState<{ node: NodeState; model: string } | null>(null);
+
+  // Model picks: queued/pending nodes just take the new model; a RUNNING node
+  // aborts and restarts from scratch, so confirm before pulling that trigger.
+  const handleModelPick = (node: NodeState, model: string) => {
+    const current = state.nodeModels?.[node.id] ?? "auto";
+    if (model === current) return;
+    if (node.status === "running") setRestartAsk({ node, model });
+    else onNodeModel(node.id, model);
+  };
   const coders = state.nodes.filter((n) => n.id.startsWith("impl"));
   const be = coders.filter((n) => roleOf(n.id) !== "frontend");
   const fe = coders.filter((n) => roleOf(n.id) === "frontend");
@@ -147,7 +159,7 @@ export default function PipelineLanes({
             }}
             models={models}
             modelValue={modelValue(n.id)}
-            onNodeModel={onNodeModel}
+            onModelPick={handleModelPick}
             detail={detailOf?.(n.id)}
           />
         ))}
@@ -223,6 +235,18 @@ export default function PipelineLanes({
           </Flex>
         </Box>
       )}
+      <ConfirmDialog
+        open={!!restartAsk}
+        title={`Restart ${restartAsk?.node.id ?? ""}?`}
+        body={`This aborts the node's current work — it starts over from the beginning with ${restartAsk?.model ?? "the new model"}. Already-finished nodes and their artifacts are not affected.`}
+        confirmLabel="Restart Node"
+        cancelLabel="Keep Current Model"
+        onConfirm={() => {
+          if (restartAsk) onNodeModel(restartAsk.node.id, restartAsk.model);
+          setRestartAsk(null);
+        }}
+        onClose={() => setRestartAsk(null)}
+      />
     </Stack>
   );
 }
