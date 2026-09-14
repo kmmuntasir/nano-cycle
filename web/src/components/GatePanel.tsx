@@ -3,7 +3,7 @@ import { DangerOutlineButton, PrimaryButton, WarningButton } from "../ui/buttons
 import type { RunState } from "../api";
 
 /** Human gates: PM question batches + plan divergences. Sticky banner + full Q&A. */
-export function GateBanner({ state, onJump }: { state: RunState; onJump: () => void }) {
+export function GateBanner({ state, onJump, showJump = true }: { state: RunState; onJump: () => void; showJump?: boolean }) {
   const gate = state.gate;
   if (!gate) return null;
   if (gate.type === "answers" && gate.questions) {
@@ -26,9 +26,11 @@ export function GateBanner({ state, onJump }: { state: RunState; onJump: () => v
             {gate.questions.length} Question(s) · Pipeline Paused
           </Text>
           <Box flex="1" />
-          <WarningButton onClick={onJump}>
-            Answer Now →
-          </WarningButton>
+          {showJump && (
+            <WarningButton onClick={onJump}>
+              Answer Now →
+            </WarningButton>
+          )}
         </HStack>
       </Box>
     );
@@ -41,9 +43,11 @@ export function GateBanner({ state, onJump }: { state: RunState; onJump: () => v
             ⚠ Divergence Gate — {gate.nodeId}
           </Text>
           <Box flex="1" />
-          <WarningButton onClick={onJump}>
-            Review →
-          </WarningButton>
+          {showJump && (
+            <WarningButton onClick={onJump}>
+              Review →
+            </WarningButton>
+          )}
         </HStack>
       </Box>
     );
@@ -96,7 +100,7 @@ export default function GatePanel({
                 </Text>
               )}
               {q.options && q.options.length > 0 && (
-                <HStack flexWrap="wrap" gap={2} mt={2}>
+                <HStack flexWrap="wrap" gap={2} mt={2} align="start">
                   {q.options.map((o) => {
                     const active = answerDrafts[q.id] === o.label;
                     return (

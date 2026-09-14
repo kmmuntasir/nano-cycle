@@ -253,7 +253,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       const be = c.backend ?? [];
       const fe = c.frontend ?? [];
       if (be.length === 0 && fe.length === 0) {
-        throw new Error(`capability "${c.id}" has no files on either side`);
+        throw new Error(
+          `capability "${c.id}" lists zero files — every capability MUST list its files in "backend" and/or "frontend" (the only two lanes). ` +
+          `CI workflows, compose files, Dockerfiles, .env.example, README and docs belong in "backend" with "single_side_class": "devops". Resubmit the full plan corrected.`,
+        );
       }
       const oneSide = be.length === 0 || fe.length === 0;
       if (oneSide && !LEGAL_SINGLE_SIDES.includes(c.single_side_class)) {
@@ -332,7 +335,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       (dynamic ? planCapsPrompt(run.task, run.projectPath) : planPrompt(run.task, run.projectPath)) +
       (spec ? `\n\n${specIntoPrompt(spec)}\n\nYour plan's acceptance_criteria MUST include every spec acceptance criterion verbatim (you may add more precise implementation-level criteria).` : "");
     let lastRejection = null;
-    for (let attempt = 0; attempt <= 1; attempt++) {
+    // Dynamic (L) plans get an extra attempt: capability graphs are the most
+    // failure-prone artifact and each rejection teaches the model the compiler.
+    const maxAttempt = dynamic ? 2 : 1;
+    for (let attempt = 0; attempt <= maxAttempt; attempt++) {
       const extra = lastRejection
         ? `\n\nYour previous plan was REJECTED by the compiler: ${lastRejection}\nProduce a corrected plan.`
         : "";
@@ -1115,6 +1121,17 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           n.endedAt = null;
           requeued += 1;
         }
+      }
+      // A plan marked done without its artifact means the compiler rejected
+      // it (artifacts are deleted on rejection) — let the planner try again
+      // instead of resuming into a graph that was never compiled.
+      const planNode = nodeState(run, "plan");
+      if (planNode?.status === "done" && !run.state.artifacts.plan) {
+        planNode.status = "queued";
+        planNode.error = null;
+        planNode.startedAt = null;
+        planNode.endedAt = null;
+        requeued += 1;
       }
       run.cancelRequested = false;
       run.finalized = false;

@@ -73,9 +73,16 @@ Decomposition rules:
 - Where a capability has both a backend and a frontend surface, fill BOTH file lists — the
   halves are implemented by parallel coder nodes (a "backend coder" and a "frontend coder"
   per capability). Keep every file in exactly ONE capability-side across the whole plan.
-- A capability with only ONE side must set single_side_class to the reason it legally has
-  no counterpart: "plumbing" (shared library/service with no UI), "devops", "qa", or
-  "no-counterpart" (e.g. theming/i18n). Plans missing this are REJECTED.
+- File lists are MANDATORY: every capability MUST list real file paths in "backend"
+  and/or "frontend". There are only TWO implementation lanes (a backend coder and a
+  frontend coder) — no devops/qa/docs lane exists, so never leave a capability
+  file-less because "it's infra".
+- Infra, CI workflows, docker-compose, Dockerfiles, .env.example, README and other
+  docs/config files belong in the "backend" array. A capability with only ONE side
+  filled must set single_side_class to the reason it legally has no counterpart:
+  "plumbing" (shared library/service with no UI), "devops" (CI/infra/docs-only),
+  "qa", or "no-counterpart" (e.g. theming/i18n). A capability with BOTH arrays
+  empty is ALWAYS rejected — there is no lane for it to run on.
 - Use dependsOn for real build-order constraints (e.g. shared schema before endpoints that
   use it). Do not add dependencies that are merely cosmetic.
 - Emit 2–6 capabilities. Fewer, bigger slices beat many tiny ones.

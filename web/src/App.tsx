@@ -332,7 +332,7 @@ export default function App() {
           ) : (
             <Stack gap={3}>
               <RunHeader state={state} wall={wall} work={work} gateMs={gateMs} live={live} onCancel={() => setConfirmCancel(true)} onResume={handleResume} />
-              <GateBanner state={state} onJump={() => setTab("qa")} />
+              <GateBanner state={state} onJump={() => setTab("qa")} showJump={tab !== "qa"} />
 
               {/* tabs */}
               <Flex gap={1} borderBottom="1px solid" borderColor="line" pb={0}>
