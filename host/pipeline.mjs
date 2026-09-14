@@ -907,10 +907,30 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         }
         await runDag(run);
         if (run.cancelRequested) break;
-        verdict = run.state.artifacts.verify?.verdict ?? "gaps-found";
+        // --- verify gate: mechanical reconciliation -----------------------------
+        // Never trust the model's summary verdict over its own checks, and
+        // never let environment-unverifiable criteria (branch protection,
+        // hosted CI duration, …) gate the run — they'd fail every round.
+        const verifyArtifact = run.state.artifacts.verify;
+        const failingChecks = (verifyArtifact?.checks ?? []).filter((c) => !c.pass);
+        const nonGating = failingChecks.filter((c) => /^\s*not verifiable/i.test(c.evidence ?? ""));
+        const gatingChecks = failingChecks.filter((c) => !nonGating.includes(c));
+        if (nonGating.length > 0) {
+          emit.event(run.id, "verify", {
+            t: "notice",
+            s: `${nonGating.length} check(s) not verifiable from this environment — recorded, non-gating: ${nonGating.map((c) => String(c.criterion).slice(0, 60)).join("; ")}`,
+          });
+        }
+        let verdict = verifyArtifact?.verdict ?? "gaps-found";
+        if (verdict === "accepted" && gatingChecks.length > 0) {
+          verdict = "gaps-found";
+          emit.event(run.id, "verify", {
+            t: "notice",
+            s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)`,
+          });
+        }
         if (verdict !== "accepted") {
-          run.feedback = (run.state.artifacts.verify?.checks ?? [])
-            .filter((c) => !c.pass)
+          run.feedback = gatingChecks
             .map((c) => `- ${c.criterion}: ${c.evidence ?? ""}`)
             .join("\n");
           if (round < run.maxFixRounds) {
@@ -921,9 +941,16 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         // Verify accepted → audit gate (conformity + quality), unless disabled.
         if (run.audit && nodeState(run, "audit")) {
           const auditArtifact = await execNode(run, "audit", auditPromptFor(run));
-          const auditVerdict = auditArtifact?.verdict ?? "gaps-found";
           const blocking = (auditArtifact?.findings ?? []).filter((f) => f.blocking);
-          if (auditVerdict === "accepted") {
+          let auditOk = auditArtifact?.verdict === "accepted";
+          if (auditOk && blocking.length > 0) {
+            auditOk = false;
+            emit.event(run.id, "audit", {
+              t: "notice",
+              s: `verdict overridden: "accepted" despite ${blocking.length} blocking finding(s)`,
+            });
+          }
+          if (auditOk) {
             verdict = "accepted";
             break;
           }
@@ -944,6 +971,27 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         break;
       }
       run.state.status = verdict === "accepted" ? "completed" : "failed";
+      if (run.state.status === "failed" && !run.state.error) {
+        // Gates exhausted — say WHY, in the state the GUI shows and the feed.
+        const reasons = [];
+        const vf = (run.state.artifacts.verify?.checks ?? []).filter(
+          (c) => !c.pass && !/^\s*not verifiable/i.test(c.evidence ?? ""),
+        );
+        if (vf.length) {
+          reasons.push(`verify: ${vf.length} failing check(s) — ${vf.map((c) => c.criterion).slice(0, 3).join(" | ")}`);
+        }
+        const ab = (run.state.artifacts.audit?.findings ?? []).filter((f) => f.blocking);
+        if (ab.length) {
+          reasons.push(
+            `audit: ${ab.length} blocking finding(s) — ${ab.map((f) => f.issue).slice(0, 3).join(" | ")}`,
+          );
+        }
+        run.state.error =
+          reasons.length > 0
+            ? `gates still failing after ${run.maxFixRounds} fix round(s): ${reasons.join(" ;; ")}`.slice(0, 600)
+            : `gates still failing after ${run.maxFixRounds} fix round(s)`;
+        emit.event(run.id, "_run", { t: "notice", s: `run failed: ${run.state.error}` });
+      }
       await integrate(run, verdict === "accepted");
     } catch (err) {
       // Already finalized synchronously by cancel(): don't overwrite the
