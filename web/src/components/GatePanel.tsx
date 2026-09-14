@@ -1,7 +1,56 @@
-import { Box, Button, HStack, Input, Stack, Text } from "@chakra-ui/react";
+import { Box, HStack, Input, Stack, Text } from "@chakra-ui/react";
+import { DangerOutlineButton, PrimaryButton, WarningButton } from "../ui/buttons";
 import type { RunState } from "../api";
 
-/** Human gates: the PM's question batches and plan divergences. */
+/** Human gates: PM question batches + plan divergences. Sticky banner + full Q&A. */
+export function GateBanner({ state, onJump }: { state: RunState; onJump: () => void }) {
+  const gate = state.gate;
+  if (!gate) return null;
+  if (gate.type === "answers" && gate.questions) {
+    return (
+      <Box
+        border="1px solid"
+        borderColor="#f0b429"
+        borderRadius="md"
+        p={3}
+        bg="#221b08"
+        position="sticky"
+        top="60px"
+        zIndex={10}
+      >
+        <HStack gap={2} flexWrap="wrap" alignItems="center">
+          <Text fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
+            ⏳ Clarification Round {gate.round ?? 1} Needs Your Answers
+          </Text>
+          <Text fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
+            {gate.questions.length} Question(s) · Pipeline Paused
+          </Text>
+          <Box flex="1" />
+          <WarningButton onClick={onJump}>
+            Answer Now →
+          </WarningButton>
+        </HStack>
+      </Box>
+    );
+  }
+  if (gate.type === "divergence") {
+    return (
+      <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={3} bg="#221b08" position="sticky" top="60px" zIndex={10}>
+        <HStack gap={2} flexWrap="wrap">
+          <Text fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
+            ⚠ Divergence Gate — {gate.nodeId}
+          </Text>
+          <Box flex="1" />
+          <WarningButton onClick={onJump}>
+            Review →
+          </WarningButton>
+        </HStack>
+      </Box>
+    );
+  }
+  return null;
+}
+
 export default function GatePanel({
   state,
   answerDrafts,
@@ -19,65 +68,86 @@ export default function GatePanel({
   if (!gate) return null;
 
   if (gate.type === "answers" && gate.questions) {
+    const answered = gate.questions.filter((q) => (answerDrafts[q.id] ?? q.suggested ?? "").trim().length > 0).length;
     return (
-      <Box border="1px solid" borderColor="warn" borderRadius="md" p={3} bg="surface">
-        <Text fontSize="sm" color="warn" mb={2}>
-          Clarification round {gate.round ?? 1} — the pipeline needs your answers
-        </Text>
-        <Stack gap={3}>
+      <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={4} bg="surface">
+        <HStack mb={3} flexWrap="wrap">
+          <Text fontSize="14px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
+            Clarification Round {gate.round ?? 1}
+          </Text>
+          <Text fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
+            {answered}/{gate.questions.length} Answered · Pipeline Paused Until You Submit
+          </Text>
+        </HStack>
+        <Stack gap={4}>
           {gate.questions.map((q, i) => (
-            <Box key={q.id}>
-              <Text fontSize="13px">
+            <Box key={q.id} border="1px solid" borderColor="line" borderRadius="md" p={3}>
+              <Text fontSize="13px" fontWeight={600} fontFamily="system-ui, sans-serif">
                 {i + 1}. {q.question}
                 {q.type && (
-                  <Text as="span" fontSize="10px" color="muted" ml={1}>
-                    ({q.type})
+                  <Text as="span" fontSize="10px" color="muted" ml={2} fontWeight={400}>
+                    ({q.type === "multiple-choice" ? "Multiple Choice" : q.type === "boolean" ? "Boolean" : "Text"})
                   </Text>
                 )}
               </Text>
               {q.why && (
-                <Text fontSize="11px" color="muted">
-                  why: {q.why}
+                <Text fontSize="11px" color="#c9cdd8" mt={1} fontFamily="system-ui, sans-serif">
+                  Why It Matters: {q.why}
                 </Text>
               )}
               {q.options && q.options.length > 0 && (
-                <HStack flexWrap="wrap" gap={1} mt={1}>
-                  {q.options.map((o) => (
-                    <Box
-                      as="button"
-                      key={o.label}
-                      px={2}
-                      py={1}
-                      fontSize="11px"
-                      borderRadius="md"
-                      cursor="pointer"
-                      border="1px solid"
-                      borderColor={answerDrafts[q.id] === o.label ? "accent" : "line"}
-                      bg={answerDrafts[q.id] === o.label ? "surface2" : "transparent"}
-                      color={answerDrafts[q.id] === o.label ? "accent" : "ink"}
-                      onClick={() => setAnswerDrafts({ ...answerDrafts, [q.id]: o.label })}
-                    >
-                      {o.label}
-                      {o.recommended ? " ★" : ""}
-                    </Box>
-                  ))}
+                <HStack flexWrap="wrap" gap={2} mt={2}>
+                  {q.options.map((o) => {
+                    const active = answerDrafts[q.id] === o.label;
+                    return (
+                      <Box key={o.label}>
+                        <Box
+                          as="button"
+                          px={3}
+                          py={2}
+                          fontSize="12px"
+                          borderRadius="md"
+                          cursor="pointer"
+                          border="1px solid"
+                          borderColor={active ? "#7aa2f7" : "line"}
+                          bg={active ? "#1b2130" : "transparent"}
+                          color={active ? "#7aa2f7" : "ink"}
+                          onClick={() => setAnswerDrafts({ ...answerDrafts, [q.id]: o.label })}
+                          fontFamily="system-ui, sans-serif"
+                          title={o.tradeoff ?? o.label}
+                        >
+                          {o.label}
+                          {o.recommended ? " ★" : ""}
+                        </Box>
+                        {o.tradeoff && (
+                          <Text fontSize="10px" color="muted" mt={1} maxW="220px" fontFamily="system-ui, sans-serif">
+                            {o.tradeoff}
+                          </Text>
+                        )}
+                      </Box>
+                    );
+                  })}
                 </HStack>
               )}
+              <Text fontSize="10px" color="#c9cdd8" mt={2} fontFamily="system-ui, sans-serif">
+                Your answer {q.suggested ? `(suggested: ${q.suggested})` : ""} — click an option to fill, or type below:
+              </Text>
               <Input
                 value={answerDrafts[q.id] ?? q.suggested ?? ""}
-                onChange={(e) =>
-                  setAnswerDrafts({ ...answerDrafts, [q.id]: (e.target as HTMLInputElement).value })
-                }
-                placeholder={q.suggested ? `suggested: ${q.suggested}` : "your answer"}
-                css={{ width: "100%", fontSize: "12px", mt: "4px" }}
+                onChange={(e) => setAnswerDrafts({ ...answerDrafts, [q.id]: (e.target as HTMLInputElement).value })}
+                placeholder="Type your answer…"
+                mt={1}
+                bg="surface2"
+                borderColor="line"
+                color="ink"
+                _placeholder={{ color: "#8b91a0" }}
+                fontFamily="system-ui, sans-serif"
               />
             </Box>
           ))}
         </Stack>
-        <HStack mt={3}>
-          <Button
-            size="sm"
-            colorPalette="blue"
+        <HStack mt={4}>
+          <PrimaryButton
             onClick={() =>
               onAnswers(
                 Object.fromEntries(
@@ -86,11 +156,11 @@ export default function GatePanel({
               )
             }
           >
-            Submit answers
-          </Button>
-          <Button size="sm" variant="outline" colorPalette="red" onClick={() => onGate("cancel")}>
-            Cancel run
-          </Button>
+            Submit {gate.questions.length} Answer(s)
+          </PrimaryButton>
+          <DangerOutlineButton onClick={() => onGate("cancel")}>
+            Cancel Run
+          </DangerOutlineButton>
         </HStack>
       </Box>
     );
@@ -98,20 +168,20 @@ export default function GatePanel({
 
   if (gate.type === "divergence") {
     return (
-      <Box border="1px solid" borderColor="warn" borderRadius="md" p={3} bg="surface">
-        <Text fontSize="sm" color="warn" mb={1}>
-          Divergence gate — {gate.nodeId}
+      <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={4} bg="surface">
+        <Text fontSize="14px" fontWeight={700} color="#f0b429" mb={2} fontFamily="system-ui, sans-serif">
+          Divergence Gate — {gate.nodeId}
         </Text>
-        <Text fontSize="13px" mb={2}>
+        <Box as="pre" fontSize="12px" whiteSpace="pre-wrap" mb={3} fontFamily="ui-monospace, monospace">
           {gate.divergence}
-        </Text>
+        </Box>
         <HStack>
-          <Button size="sm" colorPalette="blue" onClick={() => onGate("approve")}>
-            Approve & continue
-          </Button>
-          <Button size="sm" variant="outline" colorPalette="red" onClick={() => onGate("cancel")}>
-            Cancel run
-          </Button>
+          <PrimaryButton onClick={() => onGate("approve")}>
+            Approve & Continue
+          </PrimaryButton>
+          <DangerOutlineButton onClick={() => onGate("cancel")}>
+            Cancel Run
+          </DangerOutlineButton>
         </HStack>
       </Box>
     );

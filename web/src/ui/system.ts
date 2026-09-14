@@ -9,7 +9,7 @@ export const system = createSystem(
       html: {
         bg: "#0f1115",
         color: "#e4e4e7",
-        fontFamily: '"SFMono-Regular", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace',
+        fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
       },
       body: {
         bg: "#0f1115",
@@ -29,7 +29,7 @@ export const system = createSystem(
           surface2: { value: "#1b1f2b" },
           line: { value: "#262b38" },
           ink: { value: "#e4e4e7" },
-          muted: { value: "#8b91a0" },
+          muted: { value: "#9aa1b5" },
           accent: { value: "#7aa2f7" },
           good: { value: "#4fd6a8" },
           warn: { value: "#f0b429" },
