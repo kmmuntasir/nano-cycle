@@ -30,6 +30,8 @@ import {
 } from "./prompts.mjs";
 import { runNode, makeTool, addUsage } from "./runner.mjs";
 import * as git from "./git.mjs";
+import { killRunProcesses } from "./prockill.mjs";
+import { loadRun as loadRunFromDisk } from "./state.mjs";
 
 const SYSTEM_FOR = {
   plan: planSystem,
@@ -95,6 +97,49 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     Object.assign(n, patch);
     run.current.delete(id);
     emit.state(run);
+  }
+
+  // Hard cancel finalization: runs synchronously inside cancel() so the GUI
+  // reflects "cancelled" immediately even if an in-flight model turn takes a
+  // while to settle. execute()'s own finalization becomes a guarded no-op via
+  // run.finalized. Finished nodes + artifacts are left untouched so a later
+  // resume() can continue from the last queued/running nodes.
+  function finalizeCancel(run, reason = "cancelled by owner") {
+    if (run.finalized) return false;
+    run.finalized = true;
+    run.cancelRequested = true;
+    for (const c of run.current.values()) {
+      try {
+        c.abort();
+      } catch {
+        /* ignore */
+      }
+    }
+    const now = Date.now();
+    for (const n of run.state.nodes) {
+      if (n.status === "running") {
+        if (n.startedAt) n.durationMs = (n.durationMs ?? 0) + Math.max(0, now - n.startedAt);
+        n.status = "cancelled";
+        n.endedAt = now;
+        n.error = reason;
+      }
+    }
+    gateClose(run);
+    run.gateResolver = null;
+    run.answersResolver = null;
+    run.state.gate = null;
+    run.state.status = "cancelled";
+    run.state.error = null;
+    run.state.finishedAt = now;
+    run.done.promiseSettled = true;
+    try {
+      run.done.resolve("cancelled");
+    } catch {
+      /* already resolved */
+    }
+    run.done.box.promiseSettled = true;
+    emit.state(run);
+    return true;
   }
 
   // Gate-wait accounting: time spent at human gates is excluded from "working time".
@@ -165,6 +210,11 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
             emit.event(run.id, nodeId, ev);
           },
         });
+        if (run.cancelRequested) {
+          // Lost the race with cancel(): never publish post-cancel output.
+          endNode(run, id, { status: "cancelled", error: "cancelled by owner" });
+          throw new Error("cancelled");
+        }
         run.state.artifacts[id] = artifact;
         run.state.prompts[id] = prompt;
         endNode(run, id);
@@ -626,13 +676,17 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
             emit.event(run.id, nodeId, ev);
           },
         });
+        if (run.cancelRequested) {
+          endNode(run, "clarify", { status: "cancelled", error: "cancelled by owner" });
+          throw new Error("cancelled");
+        }
         if (store.result) {
           endNode(run, "clarify");
           return store.result;
         }
         throw new Error("clarify node finished without calling ask_questions or finalize_spec");
       } catch (err) {
-        if (store.result) {
+        if (store.result && !run.cancelRequested) {
           // the abort we issued to pause for the owner — not a failure
           endNode(run, "clarify");
           return store.result;
@@ -767,7 +821,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   async function execute(run) {
     try {
       // Step 1 — clarify (PM loop): ask → answers → repeat → spec.
-      if (run.clarify) {
+      // Skipped when a spec is already locked (resume after cancel).
+      if (run.clarify && !run.spec) {
         const spec = await clarifyPhase(run);
         run.spec = spec;
         run.state.artifacts.spec = spec;
@@ -803,6 +858,18 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       run.state.status = verdict === "accepted" ? "completed" : "failed";
       await integrate(run, verdict === "accepted");
     } catch (err) {
+      // Already finalized synchronously by cancel(): don't overwrite the
+      // persisted cancelled state, just make sure the run settled.
+      if (run.finalized) {
+        run.done.promiseSettled = true;
+        run.done.box.promiseSettled = true;
+        try {
+          run.done.resolve(run.state.status);
+        } catch {
+          /* already resolved */
+        }
+        return;
+      }
       gateClose(run);
       await integrate(run, false);
       if (run.cancelRequested) {
@@ -913,6 +980,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         gateResolver: null,
         answersResolver: null,
         cancelRequested: false,
+        finalized: false,
         feedback: null,
         nodeWork: {}, // nodeId → {lane, title, files}
         dynamicGraph: null,
@@ -971,8 +1039,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     cancel(id) {
       const run = runs.get(id);
       if (!run) return false;
-      run.cancelRequested = true;
-      for (const c of run.current.values()) c.abort();
+      if (run.done.promiseSettled && ["completed", "failed", "cancelled"].includes(run.state.status)) {
+        return false; // already terminal — nothing to stop
+      }
+      // Resolve pending human gates as cancelled so waiters wake up.
       if (run.gateResolver) {
         const r = run.gateResolver;
         run.gateResolver = null;
@@ -983,7 +1053,81 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         run.answersResolver = null;
         r("cancel");
       }
+      const first = finalizeCancel(run);
+      if (first) {
+        emit.event(run.id, "_run", { t: "notice", s: "cancel requested — stopping sessions and run processes" });
+        // Best-effort: kill stray child processes (dev servers, watchers,
+        // test runners) the run's bash tool left behind.
+        try {
+          const res = killRunProcesses({ cwdPrefix: run.projectPath });
+          const n = res.terminated.length + res.killed.length;
+          if (n > 0) {
+            emit.event(run.id, "_run", {
+              t: "notice",
+              s: `terminated ${n} run process(es) (pids ${[...res.terminated, ...res.killed].join(", ")})`,
+            });
+          }
+        } catch {
+          /* best-effort only */
+        }
+        // Leave the tree on a clean branch state without merging.
+        integrate(run, false).catch(() => {}).finally(() => emit.state(run));
+      }
       return true;
+    },
+
+    resume(id) {
+      const run = runs.get(id);
+      if (!run) {
+        let disk = null;
+        try {
+          disk = loadRunFromDisk(id);
+        } catch {
+          /* not on disk either */
+        }
+        if (disk) {
+          return {
+            ok: false,
+            error: `run is not active in this server session (status: ${disk.state.status}) — resume is unavailable after a restart`,
+          };
+        }
+        return { ok: false, error: "unknown run" };
+      }
+      if (run.state.status !== "cancelled") {
+        return { ok: false, error: "only cancelled runs can be resumed" };
+      }
+      if (!run.done.promiseSettled) {
+        return { ok: false, error: "run is still winding down — try again in a moment" };
+      }
+      // Requeue whatever never finished; done nodes keep status + artifacts.
+      let requeued = 0;
+      for (const n of run.state.nodes) {
+        if (n.status === "cancelled" || n.status === "failed") {
+          n.status = "queued";
+          n.error = null;
+          n.startedAt = null;
+          n.endedAt = null;
+          requeued += 1;
+        }
+      }
+      run.cancelRequested = false;
+      run.finalized = false;
+      run.state.status = "running";
+      run.state.finishedAt = null;
+      run.state.error = null;
+      run.state.gate = null;
+      run.gateResolver = null;
+      run.answersResolver = null;
+      const d = promiseExternals();
+      d.promiseSettled = false;
+      run.done = d;
+      emit.state(run);
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `resumed by owner — ${requeued} node(s) requeued, finished nodes kept`,
+      });
+      execute(run).catch(() => {}); // execute() never throws — it finalizes state
+      return { ok: true };
     },
   };
 }

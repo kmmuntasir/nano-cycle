@@ -1,5 +1,5 @@
 import { Box, Flex, HStack, Stack, Text } from "@chakra-ui/react";
-import { SelectEl } from "../ui/controls";
+import ModelPicker from "../ui/ModelPicker";
 import { fmtDuration, roleOf } from "../lib/format";
 import type { ModelInfo, NodeState, RunState } from "../api";
 
@@ -80,20 +80,15 @@ function NodeCard({
         </Text>
       )}
       {(n.status === "running" || n.status === "queued") && models.length > 0 && (
-        <SelectEl
-          value={modelValue}
-          css={{ width: "100%", fontSize: "10px", mt: "6px", bg: "surface2", color: "ink", border: "1px solid", borderColor: "line", borderRadius: "4px", py: "2px" }}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => onNodeModel(n.id, (e.target as HTMLSelectElement).value)}
-          aria-label={`model for ${n.id}`}
-        >
-          <option value="auto">auto</option>
-          {models.map((m) => (
-            <option key={m.label} value={m.label}>
-              {m.label}
-            </option>
-          ))}
-        </SelectEl>
+        <Box mt="6px" onClick={(e) => e.stopPropagation()}>
+          <ModelPicker
+            value={modelValue}
+            models={models}
+            onChange={(v) => onNodeModel(n.id, v)}
+            compact
+            ariaLabel={`model for ${n.id}`}
+          />
+        </Box>
       )}
     </Box>
   );

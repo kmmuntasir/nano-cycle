@@ -1,5 +1,5 @@
 import { Badge, Box, Flex, HStack, Text } from "@chakra-ui/react";
-import { DangerOutlineButton } from "../ui/buttons";
+import { DangerOutlineButton, PrimaryButton } from "../ui/buttons";
 import { fmtDuration, fmtTokens } from "../lib/format";
 import type { RunState } from "../api";
 
@@ -26,6 +26,7 @@ export default function RunHeader({
   gateMs,
   live,
   onCancel,
+  onResume,
 }: {
   state: RunState;
   wall: number;
@@ -33,6 +34,7 @@ export default function RunHeader({
   gateMs: number;
   live: boolean;
   onCancel: () => void;
+  onResume: () => void;
 }) {
   const totalUsage = state.nodes.reduce(
     (acc, n) => ({ input: acc.input + n.usage.input, output: acc.output + n.usage.output }),
@@ -95,6 +97,16 @@ export default function RunHeader({
           <DangerOutlineButton onClick={onCancel}>
             Cancel Run
           </DangerOutlineButton>
+        )}
+        {state.status === "cancelled" && (
+          <Box textAlign="right">
+            <PrimaryButton onClick={onResume}>
+              Resume Run
+            </PrimaryButton>
+            <Text fontSize="10px" color="muted" mt={1} fontFamily="system-ui, sans-serif">
+              Continues From Last Unfinished Node
+            </Text>
+          </Box>
         )}
       </Flex>
     </Box>

@@ -29,7 +29,7 @@ export default function NewRunModal({
         border="1px solid"
         borderColor="line"
         borderRadius="lg"
-        w="680px"
+        w="1020px"
         maxW="100%"
         p={5}
         onClick={(e) => e.stopPropagation()}

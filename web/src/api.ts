@@ -129,6 +129,7 @@ export const api = {
       body: JSON.stringify({ answers }),
     }),
   cancel: (id: string) => jfetch<{ ok: boolean }>(`/api/runs/${id}/cancel`, { method: "POST" }),
+  resume: (id: string) => jfetch<{ ok: boolean }>(`/api/runs/${id}/resume`, { method: "POST" }),
   setNodeModel: (id: string, node: string, model: string) =>
     jfetch<{ ok: boolean }>(`/api/runs/${id}/model`, {
       method: "POST",

@@ -8,6 +8,7 @@ import RunHeader from "./components/RunHeader";
 import RunsSidebar from "./components/RunsSidebar";
 import Header from "./components/Header";
 import NewRunModal from "./components/NewRunModal";
+import ConfirmDialog from "./components/ConfirmDialog";
 import StartForm from "./components/StartForm";
 import Workbench from "./components/Workbench";
 import { SelectEl, selectStyleMini } from "./ui/controls";
@@ -58,6 +59,7 @@ export default function App() {
   const [maxFixRounds, setMaxFixRounds] = useState(2);
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [starting, setStarting] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   const refreshRuns = useCallback(() => {
     api.listRuns().then(setRuns).catch(() => {});
@@ -167,6 +169,34 @@ export default function App() {
   const submitAnswers = (answers: Record<string, string>) => {
     setAnswerDrafts({});
     if (runId) api.answers(runId, answers);
+  };
+
+  const doCancel = () => {
+    setConfirmCancel(false);
+    if (runId) {
+      api.cancel(runId).catch((e) => alert(String(e)));
+      refreshRuns();
+    }
+  };
+
+  const handleGate = (action: "approve" | "cancel") => {
+    if (action === "cancel") {
+      setConfirmCancel(true);
+      return;
+    }
+    if (runId) api.gate(runId, action);
+  };
+
+  const handleResume = async () => {
+    if (!runId) return;
+    try {
+      await api.resume(runId);
+      await loadRun(runId);
+      setTab("pipeline");
+      refreshRuns();
+    } catch (e) {
+      alert(String(e));
+    }
   };
 
   const live = !!state && ["running", "awaiting-gate", "awaiting-answers"].includes(state.status);
@@ -301,7 +331,7 @@ export default function App() {
             </Box>
           ) : (
             <Stack gap={3}>
-              <RunHeader state={state} wall={wall} work={work} gateMs={gateMs} live={live} onCancel={() => runId && api.cancel(runId)} />
+              <RunHeader state={state} wall={wall} work={work} gateMs={gateMs} live={live} onCancel={() => setConfirmCancel(true)} onResume={handleResume} />
               <GateBanner state={state} onJump={() => setTab("qa")} />
 
               {/* tabs */}
@@ -366,7 +396,7 @@ export default function App() {
                   answerDrafts={answerDrafts}
                   setAnswerDrafts={setAnswerDrafts}
                   onAnswers={submitAnswers}
-                  onGate={(action) => runId && api.gate(runId, action)}
+                  onGate={handleGate}
                 />
               )}
               {tab !== "qa" && state.gate && (
@@ -376,7 +406,7 @@ export default function App() {
                     answerDrafts={answerDrafts}
                     setAnswerDrafts={setAnswerDrafts}
                     onAnswers={submitAnswers}
-                    onGate={(action) => runId && api.gate(runId, action)}
+                    onGate={handleGate}
                   />
                 </Box>
               )}
@@ -386,6 +416,14 @@ export default function App() {
       </Flex>
 
       <NewRunModal open={showNew} onClose={() => setShowNew(false)} form={startFormEl} />
+      <ConfirmDialog
+        open={confirmCancel}
+        title="Cancel This Run?"
+        body="Running sessions are aborted, run processes are terminated, and finished nodes keep their artifacts. You can resume the run later from the last unfinished node."
+        confirmLabel="Cancel Run"
+        onConfirm={doCancel}
+        onClose={() => setConfirmCancel(false)}
+      />
     </Box>
   );
 }

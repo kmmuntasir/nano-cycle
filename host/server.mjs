@@ -186,7 +186,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 201, state);
     }
 
-    const runMatch = url.pathname.match(/^\/api\/runs\/([\w-]+)(\/(gate|cancel|answers|model))?$/);
+    const runMatch = url.pathname.match(/^\/api\/runs\/([\w-]+)(\/(gate|cancel|answers|model|resume))?$/);
     if (runMatch) {
       const [, id, , action] = runMatch;
       if (req.method === "GET" && !action) {
@@ -213,6 +213,10 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === "POST" && action === "cancel") {
         return json(res, 200, { ok: pipeline.cancel(id) });
+      }
+      if (req.method === "POST" && action === "resume") {
+        const out = pipeline.resume(id);
+        return json(res, out.ok ? 200 : 409, out);
       }
     }
 
