@@ -796,7 +796,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       });
       await Promise.all(
         lanes.map(async (lane) => {
-          for (const n of lane) await execCoder(run, n);
+          // NOTE: execCoder takes the node only — passing `run` here used to
+          // feed the run id into profileFor() and kill every parallel wave
+          // with "unknown node: <run-id>".
+          for (const n of lane) await execCoder(n);
         }),
       );
     }
@@ -1093,11 +1096,14 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         }
         return { ok: false, error: "unknown run" };
       }
-      if (run.state.status !== "cancelled") {
-        return { ok: false, error: "only cancelled runs can be resumed" };
+      if (!["cancelled", "failed"].includes(run.state.status)) {
+        return { ok: false, error: "only cancelled or failed runs can be resumed" };
       }
       if (!run.done.promiseSettled) {
         return { ok: false, error: "run is still winding down — try again in a moment" };
+      }
+      if (!run.state.nodes.some((n) => n.status === "queued" || n.status === "cancelled" || n.status === "failed")) {
+        return { ok: false, error: "nothing to resume — every node already finished" };
       }
       // Requeue whatever never finished; done nodes keep status + artifacts.
       let requeued = 0;

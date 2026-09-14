@@ -98,7 +98,7 @@ export default function RunHeader({
             Cancel Run
           </DangerOutlineButton>
         )}
-        {state.status === "cancelled" && (
+        {(state.status === "cancelled" || state.status === "failed") && (
           <Box textAlign="right">
             <PrimaryButton onClick={onResume}>
               Resume Run
