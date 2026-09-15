@@ -31,6 +31,7 @@ import {
   clarifyPrompt,
 } from "./prompts.mjs";
 import { runNode, makeTool, addUsage } from "./runner.mjs";
+import { runMechanicalChecks } from "./checks.mjs";
 import * as git from "./git.mjs";
 import { killRunProcesses } from "./prockill.mjs";
 import { loadRun as loadRunFromDisk } from "./state.mjs";
@@ -45,6 +46,54 @@ const SYSTEM_FOR = {
 
 const pathKey = (p) => path.normalize(p).toLowerCase();
 const disjoint = (a, b) => !a.some((x) => b.includes(x));
+
+// Normalize a possibly-absolute, possibly :line-suffixed path reference (from
+// verify evidence, audit findings, or artifacts) to a project-relative key.
+function fileKey(run, p) {
+  let s = String(p).trim().replace(/:\d+$/, "");
+  if (path.isAbsolute(s)) {
+    const rel = path.relative(run.projectPath, s);
+    if (!rel.startsWith("..")) s = rel;
+  }
+  return path.normalize(s).replace(/^\.\//, "").toLowerCase();
+}
+
+// Spec acceptance-criteria verification environments: exact → normalized →
+// substring match (the verifier's criterion text need not be byte-identical).
+function matchAcVerification(acVerification, criterion) {
+  const list = Array.isArray(acVerification) ? acVerification : [];
+  const norm = (s) => String(s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  const target = norm(criterion);
+  if (!target) return null;
+  let hit = list.find((a) => norm(a.criterion) === target);
+  if (!hit) {
+    hit = list.find(
+      (a) => norm(a.criterion).includes(target) || target.includes(norm(a.criterion)),
+    );
+  }
+  return hit?.env ?? null;
+}
+
+// Evidence that smells of an environment limit rather than a real defect.
+const ENV_LIMIT_RE =
+  /not verifiable|no (github )?remote|branch protection|hosted (service|ci|runtime)|cannot (access|observe|verify)|can't (access|observe|verify)|needs? (a )?(human|person|owner|manual)|external (service|system)|manual(ly)? (check|verif)|not observable/i;
+
+// Extract plausible file-path tokens from gap text (criterion + evidence or an
+// audit finding). Short bare filenames without a slash are noise (index.ts).
+const PATH_TOKEN_RE = /(?:[.~\/]?[\w@.-]+\/)*[\w@.-]+\.[A-Za-z]{1,8}(?::\d+)?/g;
+function pathTokensIn(text) {
+  const out = [];
+  for (const m of String(text ?? "").matchAll(PATH_TOKEN_RE)) {
+    const raw = m[0].replace(/:\d+$/, "");
+    if (!raw.includes("/") && raw.length < 6) continue; // e.g. "a.ts" noise
+    out.push(raw);
+  }
+  return out;
+}
+
+// Exported for unit testing (fix-round targeting + AC-env matching are the
+// two behaviors most worth locking down as the pipeline evolves).
+export const __internals = { fileKey, matchAcVerification, ENV_LIMIT_RE, pathTokensIn };
 
 // Source-doc loader: the spec's source_docs paths are resolved inside the
 // project and their raw text is handed to verify/audit so the ORIGINAL
@@ -66,6 +115,15 @@ function loadSourceDocs(run, emit) {
     }
   }
   return parts.length ? parts.join("\n\n") : null;
+}
+
+// Source docs are run inputs — read once per run and shared by every node
+// (verify/audit already had them; coders get them too now).
+function sourceDocsFor(run, emit) {
+  if (run.sourceDocCache === undefined || run.sourceDocCache === null) {
+    run.sourceDocCache = loadSourceDocs(run, emit) ?? "";
+  }
+  return run.sourceDocCache || null;
 }
 
 // Requirements are durable: the finalized spec lands inside the project it describes.
@@ -93,6 +151,14 @@ function writeSpecFile(run, emit) {
       "## Acceptance criteria",
       "",
       ...((spec.acceptance_criteria ?? []).map((c) => `- [ ] ${c}`) || ["- (none)"]),
+      ...(spec.ac_verification?.length
+        ? [
+            "",
+            "## Verification environments",
+            "",
+            ...spec.ac_verification.map((a) => `- [${a.env}] ${a.criterion}`),
+          ]
+        : []),
       ...(spec.out_of_scope?.length ? ["", "## Out of scope", "", ...spec.out_of_scope.map((o) => `- ${o}`)] : []),
       "",
     ].join("\n");
@@ -191,6 +257,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   }
 
   async function execNode(run, id, prompt) {
+    // Never start a fresh node session against a cancelled run (the plan-retry
+    // loop used to relaunch the planner after a cancel-at-gate).
+    if (run.cancelRequested) throw new Error("cancelled");
     let profile = profileFor(id);
     if (id === "plan" && run.tier === "L") {
       profile = { ...profile, schema: ARTIFACT_SCHEMAS.plan_caps };
@@ -222,10 +291,23 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           schema: profile.schema,
           onCall: (p) => store.artifacts.push(p),
         });
+        // Verify gets a real browser when obscura is available — rendering
+        // criteria (fonts, layout, visible strings) are invisible to curl.
+        // Tool names must appear in the allowlist to be reachable (SDK contract).
+        const nodeTools = [...profile.tools];
+        const nodeCustomTools = [reportTool];
+        if (id === "verify" && webTools?.reader) {
+          nodeTools.push("web_reader");
+          nodeCustomTools.push(webTools.reader);
+          emit.event(run.id, id, {
+            t: "notice",
+            s: "browser tool attached: web_reader — use it to LOAD pages and observe rendered content",
+          });
+        }
         const artifact = await runNode({
           nodeId: id,
-          tools: profile.tools,
-          customTools: [reportTool],
+          tools: nodeTools,
+          customTools: nodeCustomTools,
           artifactStore: store,
           thinking: profile.thinking,
           systemPrompt,
@@ -357,6 +439,50 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     return nodes;
   }
 
+  // Owner-facing projection of a compiled plan for the approval gate: file
+  // paths (not {path, purpose} objects), capability deps, and the criteria.
+  function planApprovalPayload(run, plan) {
+    const base = {
+      tier: run.tier,
+      task_summary: plan?.task_summary ?? "",
+      acceptance_criteria: plan?.acceptance_criteria ?? [],
+    };
+    if (Array.isArray(plan?.capabilities)) {
+      return {
+        ...base,
+        capabilities: plan.capabilities.map((c) => ({
+          id: c.id,
+          title: c.title,
+          backend: (c.backend ?? []).map((f) => f.path),
+          frontend: (c.frontend ?? []).map((f) => f.path),
+          dependsOn: c.dependsOn ?? [],
+          single_side_class: c.single_side_class ?? null,
+        })),
+      };
+    }
+    return {
+      ...base,
+      backend: (plan?.backend ?? []).map((f) => f.path),
+      frontend: (plan?.frontend ?? []).map((f) => f.path),
+    };
+  }
+
+  // Present the compiled plan for owner approval before any coder runs. The
+  // payload is also stashed on the run so a resume after cancel-at-gate can
+  // re-present it (the plan node is already done — runDag would skip planPhase
+  // and coders would run unapproved).
+  async function planApprovalGate(run, plan) {
+    run.pendingPlanApproval = planApprovalPayload(run, plan);
+    run.state.gate = { type: "plan-approval", nodeId: "plan", plan: run.pendingPlanApproval };
+    emit.event(run.id, "plan", {
+      t: "notice",
+      s: "plan compiled — owner approval required before coders run (plan-approval gate)",
+    });
+    emit.state(run);
+    await waitGate(run); // throws on cancel
+    run.pendingPlanApproval = null;
+  }
+
   async function planPhase(run, tier) {
     const dynamic = tier === "L";
     const spec = run.spec;
@@ -443,8 +569,13 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
             });
           }
         }
+        if (run.approvePlan) await planApprovalGate(run, plan);
         return plan;
       } catch (err) {
+        // A cancel at the divergence/plan-approval gate throws "cancelled at
+        // gate" — that must propagate, not masquerade as a compiler rejection
+        // (which would re-run the plan node against a cancelled run).
+        if (run.cancelRequested) throw err;
         lastRejection = String(err?.message ?? err);
         emit.event(run.id, "plan", { t: "notice", s: `plan rejected: ${lastRejection}` });
         emit.event(run.id, "plan", { t: "notice", s: (err.stack ?? "").split("\n").slice(0, 5).join(" | ") });
@@ -757,7 +888,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       plan: run.state.artifacts.plan,
       implementReports: implementReports(run),
       verifyArtifact: run.state.artifacts.verify,
-      sourceDocText: loadSourceDocs(run, emit),
+      sourceDocText: sourceDocsFor(run, emit),
+      mechanicalResults: run.state.mechanicalChecks?.checks ?? null,
     });
   }
 
@@ -770,19 +902,30 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         implementReports: implementReports(run),
         workspace: run.projectPath,
         spec: run.spec,
-        sourceDocText: loadSourceDocs(run, emit),
+        sourceDocText: sourceDocsFor(run, emit),
+        acVerification: run.spec?.ac_verification ?? null,
+        mechanicalResults: run.state.mechanicalChecks?.checks ?? null,
       });
     }
     const work = run.nodeWork[n.id];
+    const sourceDocText = sourceDocsFor(run, emit);
+    const planCriteria = run.state.artifacts.plan?.acceptance_criteria ?? null;
+    const nodeFeedback = run.state.feedbackByNode?.[n.id] ?? null;
     if (work) {
       return implementPrompt({
         task: run.task,
         workspace: run.projectPath,
-        feedback: run.feedback,
         lane: work.lane,
         title: work.title,
         files: work.files,
         spec: run.spec,
+        sourceDocText,
+        planCriteria,
+        nodeFeedback,
+        // a re-run of this node: its previous artifact is the starting point
+        previousArtifact: nodeFeedback ? run.state.artifacts[n.id] ?? null : null,
+        // global blob only when this node has no targeted feedback of its own
+        feedback: nodeFeedback ? null : run.feedback,
       });
     }
     return implementPrompt({
@@ -791,19 +934,30 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       feedback: run.feedback,
       planJson: run.state.artifacts.plan,
       spec: run.spec,
+      sourceDocText,
+      planCriteria,
     });
   }
 
-  // Greedy lane packing: nodes whose file lists OVERLAP must serialize — they
-  // chain within one lane; disjoint nodes go to separate lanes and run parallel.
+  // Greedy lane packing: nodes whose EFFECTIVE file sets (planned ∪ files
+  // actually written in earlier rounds) overlap must serialize — they chain
+  // within one lane; disjoint nodes go to separate lanes and run parallel.
+  // Planned-vs-written counts too: a node whose planned file another node
+  // already wrote is a collision waiting to happen.
   function packParallel(run, ready) {
-    const filesOf = (id) => (run.nodeWork[id]?.files ?? []).map((f) => pathKey(f.path));
+    const effectiveFilesOf = (id) =>
+      [
+        ...new Set([
+          ...(run.nodeWork[id]?.files ?? []).map((f) => pathKey(f.path)),
+          ...(run.state.writtenFiles?.[id] ?? []).map((p) => pathKey(p)),
+        ]),
+      ];
     const lanes = [];
     for (const n of ready) {
-      const f = filesOf(n.id);
+      const f = effectiveFilesOf(n.id);
       let conflictLane = null;
       for (const lane of lanes) {
-        if (lane.some((m) => !disjoint(filesOf(m.id), f))) {
+        if (lane.some((m) => !disjoint(effectiveFilesOf(m.id), f))) {
           conflictLane = lane;
           break;
         }
@@ -812,6 +966,33 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       else lanes.push([n]);
     }
     return lanes;
+  }
+
+  // Files each coder actually wrote, accumulated across rounds — persisted so
+  // resume keeps the hot-file picture.
+  function trackWrittenFiles(run, nodeId, artifact) {
+    const written = artifact?.files_written ?? [];
+    if (written.length === 0) return;
+    const prev = new Set(run.state.writtenFiles?.[nodeId] ?? []);
+    for (const f of written) prev.add(f);
+    run.state.writtenFiles = { ...(run.state.writtenFiles ?? {}), [nodeId]: [...prev] };
+    emit.state(run);
+  }
+
+  // Deterministic checks run in the driver right before EVERY verify pass
+  // (round 0 included): gitleaks, undeclared deps, CDN fonts, i18n parity,
+  // env wiring, README command truth. Failures gate; skips never do.
+  async function runMechanicalGate(run) {
+    emit.event(run.id, "_run", { t: "notice", s: "mechanical checks: running (driver-deterministic)" });
+    const checks = await runMechanicalChecks({ projectPath: run.projectPath, runId: run.id, emit });
+    run.state.mechanicalChecks = { round: run.round ?? 0, at: new Date().toISOString(), checks };
+    for (const c of checks) {
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `checks: ${c.id} — ${c.status}${c.status === "fail" ? `: ${String(c.evidence).slice(0, 300)}` : c.status === "skipped" ? ` (${String(c.evidence).slice(0, 120)})` : ""}`,
+      });
+    }
+    emit.state(run);
   }
 
   async function runDag(run) {
@@ -830,6 +1011,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       );
       if (ready.length === 0) break;
 
+      // Ground truth first: the verify prompt carries the driver's own checks.
+      if (ready.some((n) => n.id === "verify")) await runMechanicalGate(run);
+      if (run.cancelRequested) break;
+
       if (ready.some((n) => n.id === "plan")) {
         await planPhase(run, run.tier);
         continue;
@@ -837,7 +1022,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
 
       const execCoder = async (n) => {
         const artifact = await execNode(run, n.id, promptFor(run, n));
-        if (n.id.startsWith("impl")) await commitCoderOutput(run, n.id, artifact);
+        if (n.id.startsWith("impl")) {
+          trackWrittenFiles(run, n.id, artifact);
+          await commitCoderOutput(run, n.id, artifact);
+        }
         return artifact;
       };
 
@@ -878,8 +1066,104 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     emit.state(run);
   }
 
+  // Which impl nodes own a gap? Match file-path tokens from the gap text
+  // (verify criterion/evidence, audit finding) against each node's planned
+  // files AND the files it already wrote — substring both directions, so a
+  // cited absolute path or a subpath still lands on the right owner.
+  function ownersForGap(run, text) {
+    const tokens = pathTokensIn(text);
+    if (tokens.length === 0) return [];
+    const owners = new Set();
+    for (const n of run.state.nodes) {
+      if (!n.id.startsWith("impl")) continue;
+      const files = [
+        ...(run.nodeWork[n.id]?.files ?? []).map((f) => pathKey(f.path)),
+        ...(run.state.writtenFiles?.[n.id] ?? []).map((p) => pathKey(p)),
+      ];
+      if (files.length === 0) continue;
+      for (const tok of tokens) {
+        const k = fileKey(run, tok);
+        if (files.some((f) => f.includes(k) || k.includes(f))) {
+          owners.add(n.id);
+          break;
+        }
+      }
+    }
+    return [...owners];
+  }
+
+  function formatGap(text, owners) {
+    const lines = [`- GAP: ${text.split("\n")[0]}`];
+    if (owners?.length) lines.push(`  owning files → this node's assignment`);
+    lines.push(`  → fix this gap only; do not refactor unrelated code.`);
+    return lines.join("\n");
+  }
+
+  // Targeted fix round: map gaps to owning coder nodes, requeue only those,
+  // hand each node only ITS gaps. Fallback (no gap has any owner): requeue
+  // every coder with the concatenated blob — the previous behavior.
+  function planFixRound(run, gaps, sourceNode, round) {
+    const implIds = run.state.nodes.filter((n) => n.id.startsWith("impl")).map((n) => n.id);
+    const ownersByGap = gaps.map((text) => ({ text, owners: ownersForGap(run, text) }));
+    const allOwners = new Set(ownersByGap.flatMap((g) => g.owners));
+    if (allOwners.size === 0) {
+      run.fixRequeue = [...implIds];
+      run.feedback = gaps.map((t) => `- GAP: ${t.split("\n")[0]}\n  → fix this gap only; do not refactor unrelated code.`).join("\n");
+      run.state.feedbackByNode = {};
+      emit.event(run.id, sourceNode, {
+        t: "notice",
+        s: `fix round ${round + 1}: no gap matched a coder's files — requeueing all coders (${implIds.length})`,
+      });
+      emit.state(run);
+      return;
+    }
+    run.fixRequeue = [...allOwners];
+    run.feedback = null;
+    const byNode = Object.fromEntries([...allOwners].map((id) => [id, []]));
+    for (const { text, owners } of ownersByGap) {
+      const targets = owners.length ? owners : [...allOwners]; // unowned → every requeued node
+      for (const id of targets) {
+        byNode[id].push(
+          owners.length
+            ? formatGap(text, owners)
+            : `- GAP (unowned — fix only if it touches your files): ${text.split("\n")[0]}`,
+        );
+      }
+    }
+    run.state.feedbackByNode = Object.fromEntries(
+      Object.entries(byNode).map(([id, parts]) => [id, parts.join("\n")]),
+    );
+    emit.event(run.id, sourceNode, {
+      t: "notice",
+      s: `fix round ${round + 1}: targeted — requeueing ${[...allOwners].join(", ")}`,
+    });
+    emit.state(run);
+  }
+
+  // Deferred = a remote/human-tagged criterion that failed for environment
+  // reasons: recorded for the owner, never burns another fix round.
+  function recordDeferred(run, check, env) {
+    const list = (run.state.deferredChecks ??= []);
+    if (list.some((d) => d.criterion === check.criterion)) return;
+    list.push({ criterion: check.criterion, env, evidence: String(check.evidence ?? "").slice(0, 400) });
+    emit.event(run.id, "verify", {
+      t: "notice",
+      s: `needs ${env} verification (recorded, non-gating): ${String(check.criterion).slice(0, 120)}`,
+    });
+  }
+
   async function execute(run) {
     try {
+      // Resume after cancel-at-plan-gate: the plan node is already done, so
+      // runDag would skip planPhase entirely — re-present the approval gate
+      // BEFORE any coder runs. Without this, resume bypasses approval.
+      if (run.pendingPlanApproval) {
+        run.state.gate = { type: "plan-approval", nodeId: "plan", plan: run.pendingPlanApproval };
+        emit.state(run);
+        await waitGate(run);
+        run.pendingPlanApproval = null;
+      }
+
       // Step 1 — clarify (PM loop): ask → answers → repeat → spec.
       // Skipped when a spec is already locked (resume after cancel).
       if (run.clarify && !run.spec) {
@@ -892,10 +1176,14 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       // Step 2 — build: plan → parallel coders → verify → audit, verdict-gated.
       let verdict = null;
       for (let round = 0; round <= run.maxFixRounds; round++) {
+        run.round = round;
         if (round > 0) {
-          // Requeue coder + verify + audit nodes; the plan (and compiled graph) stands.
+          // Targeted requeue: only the coder nodes that own the failing gaps
+          // (planFixRound's set); fallback = all coders. The plan and compiled
+          // graph stand; untouched coders keep their done status + artifacts.
+          const requeueSet = new Set(run.fixRequeue ?? []);
           for (const n of run.state.nodes) {
-            if (n.id !== "plan" && n.id !== "clarify" && n.id.startsWith("impl")) {
+            if (requeueSet.has(n.id)) {
               n.status = "queued";
               n.startedAt = null;
               n.endedAt = null;
@@ -908,13 +1196,22 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         await runDag(run);
         if (run.cancelRequested) break;
         // --- verify gate: mechanical reconciliation -----------------------------
-        // Never trust the model's summary verdict over its own checks, and
-        // never let environment-unverifiable criteria (branch protection,
-        // hosted CI duration, …) gate the run — they'd fail every round.
+        // Never trust the model's summary verdict over its own checks, never
+        // let environment-unverifiable criteria gate the run, and never let
+        // the model talk its way past a driver-observed mechanical failure.
         const verifyArtifact = run.state.artifacts.verify;
         const failingChecks = (verifyArtifact?.checks ?? []).filter((c) => !c.pass);
-        const nonGating = failingChecks.filter((c) => /^\s*not verifiable/i.test(c.evidence ?? ""));
-        const gatingChecks = failingChecks.filter((c) => !nonGating.includes(c));
+        const mechFailing = (run.state.mechanicalChecks?.checks ?? []).filter((c) => c.status === "fail");
+        const nonGating = [];
+        const gatingChecks = [];
+        for (const c of failingChecks) {
+          const legacy = /^\s*not verifiable/i.test(c.evidence ?? "");
+          const env = matchAcVerification(run.spec?.ac_verification, c.criterion);
+          const envLimited = (env === "remote" || env === "human") && ENV_LIMIT_RE.test(c.evidence ?? "");
+          if (legacy || envLimited) nonGating.push(c);
+          else gatingChecks.push(c);
+          if (envLimited) recordDeferred(run, c, env);
+        }
         if (nonGating.length > 0) {
           emit.event(run.id, "verify", {
             t: "notice",
@@ -922,19 +1219,23 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           });
         }
         verdict = verifyArtifact?.verdict ?? "gaps-found";
-        if (verdict === "accepted" && gatingChecks.length > 0) {
+        if (verdict === "accepted" && (gatingChecks.length > 0 || mechFailing.length > 0)) {
           verdict = "gaps-found";
           emit.event(run.id, "verify", {
             t: "notice",
-            s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)`,
+            s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)${mechFailing.length ? ` and ${mechFailing.length} mechanical check failure(s)` : ""}`,
           });
         }
         if (verdict !== "accepted") {
-          run.feedback = gatingChecks
-            .map((c) => `- ${c.criterion}: ${c.evidence ?? ""}`)
-            .join("\n");
+          const gaps = [
+            ...gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
+            ...mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
+          ];
           if (round < run.maxFixRounds) {
+            planFixRound(run, gaps, "verify", round);
             emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1}` });
+          } else {
+            run.feedback = gaps.map((t) => `- GAP: ${t.split("\n")[0]}`).join("\n");
           }
           continue;
         }
@@ -956,14 +1257,21 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           }
           verdict = "gaps-found";
           const src = blocking.length ? blocking : (auditArtifact?.findings ?? []);
-          run.feedback = src
-            .map((f) => `- [${f.category}]${f.file ? ` ${f.file}:` : ""} ${f.issue}${f.fix ? ` (fix: ${f.fix})` : ""}`)
-            .join("\n");
           if (round < run.maxFixRounds) {
+            planFixRound(
+              run,
+              src.map((f) => `[${f.category}]${f.file ? ` ${f.file}:` : ""} ${f.issue}${f.fix ? ` (fix: ${f.fix})` : ""}`),
+              "audit",
+              round,
+            );
             emit.event(run.id, "audit", {
               t: "notice",
               s: `audit: ${blocking.length} blocking finding(s) — fix round ${round + 1}`,
             });
+          } else {
+            run.feedback = src
+              .map((f) => `- [${f.category}]${f.file ? ` ${f.file}:` : ""} ${f.issue}${f.fix ? ` (fix: ${f.fix})` : ""}`)
+              .join("\n");
           }
           continue;
         }
@@ -971,14 +1279,27 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         break;
       }
       run.state.status = verdict === "accepted" ? "completed" : "failed";
+      if (run.state.deferredChecks?.length) {
+        emit.event(run.id, "_run", {
+          t: "notice",
+          s: `deferred to owner (${run.state.deferredChecks.length}): ${run.state.deferredChecks.map((d) => `[${d.env}] ${String(d.criterion).slice(0, 80)}`).join("; ")}`,
+        });
+      }
       if (run.state.status === "failed" && !run.state.error) {
         // Gates exhausted — say WHY, in the state the GUI shows and the feed.
         const reasons = [];
-        const vf = (run.state.artifacts.verify?.checks ?? []).filter(
-          (c) => !c.pass && !/^\s*not verifiable/i.test(c.evidence ?? ""),
-        );
+        const vf = (run.state.artifacts.verify?.checks ?? []).filter((c) => {
+          if (c.pass) return false;
+          if (/^\s*not verifiable/i.test(c.evidence ?? "")) return false;
+          const env = matchAcVerification(run.spec?.ac_verification, c.criterion);
+          return !((env === "remote" || env === "human") && ENV_LIMIT_RE.test(c.evidence ?? ""));
+        });
         if (vf.length) {
           reasons.push(`verify: ${vf.length} failing check(s) — ${vf.map((c) => c.criterion).slice(0, 3).join(" | ")}`);
+        }
+        const mf = (run.state.mechanicalChecks?.checks ?? []).filter((c) => c.status === "fail");
+        if (mf.length) {
+          reasons.push(`checks: ${mf.length} mechanical failure(s) — ${mf.map((c) => c.id).slice(0, 3).join(" | ")}`);
         }
         const ab = (run.state.artifacts.audit?.findings ?? []).filter((f) => f.blocking);
         if (ab.length) {
@@ -1031,7 +1352,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       return null;
     },
 
-    async start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds, git: gitRequested, audit: auditRequested }) {
+    async start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds, git: gitRequested, audit: auditRequested, approvePlan }) {
       const tierGraph = TIERS[tier];
       if (!tierGraph) throw new Error(`unknown tier ${tier}`);
       // One working tree per project: a second concurrent run on the same
@@ -1096,6 +1417,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         artifacts: {},
         prompts: {},
         nodeModels: {},
+        feedbackByNode: {},
+        writtenFiles: {},
+        deferredChecks: [],
+        mechanicalChecks: null,
       };
       // Audit gate (conformity + quality) runs after verify accepts. On by
       // default; the owner can switch it off per run from the GUI.
@@ -1115,6 +1440,12 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         models,
         clarify: !!clarify,
         audit: auditEnabled,
+        // Owner gate on the compiled plan (M/L only) before any coder runs.
+        approvePlan: approvePlan !== false && (tier === "M" || tier === "L"),
+        pendingPlanApproval: null,
+        round: 0,
+        fixRequeue: null,
+        sourceDocCache: undefined,
         // Optional owner policy: force >=1 question round (finalize tool
         // withheld on round 1). Default off — prompt quality drives asking.
         requireQuestions: clarify && requireQuestions === true,

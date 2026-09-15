@@ -54,6 +54,33 @@ OUTRANK your summary of them. The finalized spec must satisfy traceability:
 A spec that drops, weakens, or inverts a source-doc requirement is a broken spec,
 even if every criterion in it is verifiable.
 
+## Tag every criterion's verification environment
+
+finalize_spec's ac_verification must contain ONE entry per acceptance criterion,
+copying the criterion text EXACTLY:
+- local — verifiable by running code/commands in this workspace (tests, curl, grep,
+  docker compose, a browser tool)
+- remote — needs a hosted service no workspace command can reach (GitHub-hosted CI
+  runs actually executing, branch-protection settings, external dashboards)
+- human — needs a person's judgment or manual action (visual design taste, a live
+  phone check, signing off on copy)
+
+A remote/human tag tells the driver to RECORD the check as deferred instead of
+burning fix rounds no coder can ever fix. Mis-tagging a local criterion as remote
+hides a real gap — when in doubt, tag local.
+
+## Delivery-shape decisions are owner questions
+
+When the source docs and repo rules are SILENT on decisions that shape the dev loop,
+ask them as owner questions instead of letting coder nodes pick silently:
+- dev topology — apps run on the host (hot reload) with containerized infra, vs
+  everything in containers (reproducible, no hot reload)?
+- hot-reload expectations — must code changes show up without a rebuild?
+- port and tooling policy — which ports, which package manager, Node pinning.
+
+These determine whether the built environment even matches how the owner works, and
+are exactly the questions a spec that omits them leaves to chance.
+
 ## Question quality (this is the craft)
 
 Each question carries:
@@ -139,11 +166,25 @@ working on other files in the same workspace concurrently. Never touch files out
     : `You are the IMPLEMENT node of a deterministic software pipeline.\n`;
   return `${laneText}
 The task (and your assignment) is given; implement it fully in the workspace — real files,
-no stubs. You may run commands (e.g. node) to sanity-check your own work.
-Output contract: call the report_artifact tool EXACTLY ONCE with summary + files_written.`;
+no stubs. Run lint and tests for what you changed before reporting; fix what they surface.
+Output contract: call the report_artifact tool EXACTLY ONCE with summary + files_written
+(+ notes: decisions made, deviations from the plan and why).`;
 }
 
-export function implementPrompt({ task, workspace, feedback, lane, title, files, planJson, spec }) {
+export function implementPrompt({
+  task,
+  workspace,
+  feedback,
+  lane,
+  title,
+  files,
+  planJson,
+  spec,
+  sourceDocText,
+  planCriteria,
+  nodeFeedback,
+  previousArtifact,
+}) {
   const parts = [`Task: ${task}`, `Workspace: ${workspace}`];
   if (spec) {
     parts.push(
@@ -151,6 +192,25 @@ export function implementPrompt({ task, workspace, feedback, lane, title, files,
         (spec.decisions?.length
           ? `\nLocked decisions:\n${spec.decisions.map((d) => `- ${d.topic}: ${d.decision}`).join("\n")}`
           : ""),
+    );
+  }
+  if (spec?.acceptance_criteria?.length) {
+    parts.push(
+      `ACCEPTANCE CRITERIA — THE CONTRACT (the verifier gates on these verbatim; satisfy every one that touches your files):\n${spec.acceptance_criteria
+        .map((c) => `- ${c}`)
+        .join("\n")}`,
+    );
+  }
+  if (planCriteria?.length) {
+    parts.push(
+      `Plan-level criteria (implementation-level checks the plan committed to):\n${planCriteria
+        .map((c) => `- ${c}`)
+        .join("\n")}`,
+    );
+  }
+  if (sourceDocText) {
+    parts.push(
+      `SOURCE REQUIREMENT DOCUMENT — its requirements OUTRANK the spec summary above; honor them for your files:\n\n${sourceDocText}`,
     );
   }
   if (title || files) {
@@ -163,7 +223,22 @@ export function implementPrompt({ task, workspace, feedback, lane, title, files,
     );
   }
   if (planJson) parts.push(`Full plan (JSON):\n${JSON.stringify(planJson, null, 2)}`);
-  if (feedback) parts.push(`A verifier rejected the previous attempt. Fix these gaps:\n${feedback}`);
+  if (previousArtifact) {
+    parts.push(
+      `YOUR PREVIOUS ATTEMPT (build on it; do not undo what already passes):\n${JSON.stringify(
+        { summary: previousArtifact.summary, notes: previousArtifact.notes, files_written: previousArtifact.files_written },
+        null,
+        2,
+      )}`,
+    );
+  }
+  if (nodeFeedback) {
+    parts.push(
+      `FIX-ROUND FEEDBACK FOR YOUR NODE — fix these gaps only; do not refactor unrelated code:\n${nodeFeedback}`,
+    );
+  } else if (feedback) {
+    parts.push(`A verifier rejected the previous attempt. Fix these gaps:\n${feedback}`);
+  }
   parts.push("Implement now, then report via report_artifact.");
   return parts.join("\n\n");
 }
@@ -213,6 +288,19 @@ a README is not NestJS 12 installed.
   imported by the app entry, the test proves nothing — say so and fail the criterion.
 - WIRING criteria: reconcile both directions (every variable the code reads must be
   declared with a placeholder; every declared variable must actually be consumed).
+- RENDERING criteria: if a web_reader (browser) tool is available, use it to LOAD the
+  app's pages and observe RENDERED content — which font actually applied, what layout
+  looks like, which strings are visible. curl shows HTML bytes, not rendering: a CDN
+  font <link> that satisfies curl can still render tofu (missing-glyph boxes) in a real
+  browser. Record what the rendered page showed.
+
+Verification environments: criteria the spec tags remote/human (see VERIFICATION
+ENVIRONMENTS in the prompt, when present) cannot be observed from this workspace. For
+those, when the failure is genuinely about the hosted service or human action, set the
+check's evidence to begin with "not verifiable from this environment: <what to check
+manually>" — the driver records these instead of gating the run on them. A missing
+file/config that happens to serve a remote-tagged criterion is still a LOCAL, gating
+failure — do not hide local defects behind the tag.
 
 Evidence standard:
 - Every check's evidence must be an OBSERVED command and its output (what you ran, what
@@ -281,13 +369,20 @@ Output contract: call the report_artifact tool EXACTLY ONCE with the verdict.
 - "gaps-found" with the blocking findings enumerated (each with file, issue, and fix).`;
 }
 
-export function auditPrompt({ task, workspace, spec, plan, implementReports, verifyArtifact, sourceDocText }) {
+export function auditPrompt({ task, workspace, spec, plan, implementReports, verifyArtifact, sourceDocText, mechanicalResults }) {
   const parts = [`Task: ${task}`, `Workspace: ${workspace}`];
   if (sourceDocText) {
     parts.push(
       `SOURCE REQUIREMENT DOCUMENT — the ultimate authority; build the traceability check against it first (every requirement must be met by the implementation; spec deviations from it are findings):
 
 ${sourceDocText}`,
+    );
+  }
+  if (mechanicalResults?.length) {
+    parts.push(
+      `DRIVER-OBSERVED MECHANICAL CHECK RESULTS (deterministic, already gated upstream by the driver — informational here; escalate related practice findings if warranted):\n${mechanicalResults
+        .map((c) => `- ${c.id}: ${String(c.status).toUpperCase()} — ${c.evidence}`)
+        .join("\n")}`,
     );
   }
   if (spec) {
@@ -308,7 +403,7 @@ ${sourceDocText}`,
   return parts.join("\n\n");
 }
 
-export function verifyPrompt({ task, plan, implementReports, workspace, spec, sourceDocText }) {
+export function verifyPrompt({ task, plan, implementReports, workspace, spec, sourceDocText, acVerification, mechanicalResults }) {
   const parts = [`Task: ${task}`, `Workspace: ${workspace}`];
   if (sourceDocText) {
     parts.push(
@@ -324,6 +419,20 @@ ${sourceDocText}`,
         null,
         2,
       )}`,
+    );
+  }
+  if (acVerification?.length) {
+    parts.push(
+      `VERIFICATION ENVIRONMENTS (driver-classified):\n${acVerification
+        .map((a) => `- [${a.env}] ${a.criterion}`)
+        .join("\n")}`,
+    );
+  }
+  if (mechanicalResults?.length) {
+    parts.push(
+      `DRIVER-OBSERVED MECHANICAL CHECK RESULTS (deterministic — treat as ground truth; you cannot argue these away):\n${mechanicalResults
+        .map((c) => `- ${c.id}: ${String(c.status).toUpperCase()} — ${c.evidence}`)
+        .join("\n")}\nFor every FAIL above, include a failing check whose criterion names the invariant and whose evidence cites this driver result. Do NOT mark a driver-failed check passing on your own reasoning. SKIPPED checks carry no signal — verify those manually if a criterion depends on them.`,
     );
   }
   if (plan) parts.push(`Plan (JSON):\n${JSON.stringify(plan, null, 2)}`);

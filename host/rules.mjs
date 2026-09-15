@@ -6,7 +6,8 @@
 //   <project>/.claude/rules/backend-development-rules.md   → implement-be (+security)
 //   <project>/.claude/rules/security-rules.md              → implement-be
 //   <project>/.claude/rules/frontend-development-rules.md  → implement-fe
-//   <project>/.claude/rules/testing-rules.md               → verify
+//   <project>/.claude/rules/testing-rules.md               → implement nodes AND verify/audit
+//   <project>/.claude/rules/git-guidelines.md              → implement nodes AND verify/audit
 //
 // Projects with none of these run with the built-in minimal rules only —
 // nano-cycle stays language- and stack-agnostic by default.
@@ -23,12 +24,14 @@ const STACK_RULES = {
     "backend-development-rules.md",
     "security-rules.md",
     "frontend-development-rules.md",
+    "git-guidelines.md",
   ],
   audit: [
     "testing-rules.md",
     "backend-development-rules.md",
     "security-rules.md",
     "frontend-development-rules.md",
+    "git-guidelines.md",
   ],
 };
 
@@ -45,6 +48,10 @@ export function stackRulesFor(nodeId) {
   if (nodeId === "implement" || nodeId.endsWith("-fe")) {
     out.push("frontend-development-rules.md");
   }
+  // The testing contract reaches coders, not just the gates ("every behavior
+  // ships tested", DB-never-mocked, …), and git conventions too (coders may
+  // run git via bash even when the driver's git integration is off).
+  out.push("testing-rules.md", "git-guidelines.md");
   return out;
 }
 

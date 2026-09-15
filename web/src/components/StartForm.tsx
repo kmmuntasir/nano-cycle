@@ -30,6 +30,8 @@ export default function StartForm({
   gitAvailable,
   audit,
   setAudit,
+  approvePlan,
+  setApprovePlan,
   starting,
   onStart,
   project,
@@ -53,6 +55,8 @@ export default function StartForm({
   gitAvailable: boolean;
   audit: boolean;
   setAudit: (v: boolean) => void;
+  approvePlan: boolean;
+  setApprovePlan: (v: boolean) => void;
   starting: boolean;
   onStart: () => void;
   project: string;
@@ -161,6 +165,13 @@ export default function StartForm({
               onClick={() => setAudit(!audit)}
             >
               {audit ? "✓ Audit" : "Audit Off"}
+            </OutlineButton>
+            <OutlineButton
+              active={approvePlan}
+              title="Pause after the plan compiles (M/L tiers) for owner review before any code is written."
+              onClick={() => setApprovePlan(!approvePlan)}
+            >
+              {approvePlan ? "✓ Plan Approval" : "Plan Approval Off"}
             </OutlineButton>
             <Flex alignItems="center" gap={1}>
               <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">Fix Rounds:</Text>

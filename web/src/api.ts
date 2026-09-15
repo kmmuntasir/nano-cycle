@@ -31,7 +31,7 @@ export interface RunState {
     mergeError: string | null;
   };
   gate: {
-    type?: "divergence" | "answers";
+    type?: "divergence" | "answers" | "plan-approval";
     nodeId: string;
     divergence?: string;
     questions?: {
@@ -43,12 +43,37 @@ export interface RunState {
       suggested?: string;
     }[];
     round?: number;
+    plan?: PlanApproval;
   } | null;
   error: string | null;
   nodes: NodeState[];
   nodeModels?: Record<string, string>;
   prompts?: Record<string, string>;
   artifacts: Record<string, unknown>;
+  feedbackByNode?: Record<string, string>;
+  writtenFiles?: Record<string, string[]>;
+  deferredChecks?: { criterion: string; env: string; evidence?: string }[];
+  mechanicalChecks?: {
+    round: number;
+    at: string;
+    checks: { id: string; title: string; status: string; evidence: string }[];
+  } | null;
+}
+
+export interface PlanApproval {
+  tier: string;
+  task_summary: string;
+  acceptance_criteria: string[];
+  capabilities?: {
+    id: string;
+    title: string;
+    backend: string[];
+    frontend: string[];
+    dependsOn: string[];
+    single_side_class?: string | null;
+  }[];
+  backend?: string[];
+  frontend?: string[];
 }
 
 export interface RunEvent {
@@ -109,7 +134,7 @@ export const api = {
     tier: string,
     project: string,
     models: Record<string, string>,
-    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean },
+    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean; approvePlan?: boolean },
   ) =>
     jfetch<RunState>("/api/runs", {
       method: "POST",

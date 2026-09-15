@@ -22,9 +22,16 @@ export default function Workbench({ state }: { state: RunState }) {
     for (const [k, v] of Object.entries(state.prompts ?? {})) {
       out.push({ name: `input:${k}`, kind: "input", content: v, group: groupOf(k, "input") });
     }
+    // Driver-side ground truth + deferred verification, surfaced as pseudo-artifacts.
+    if (state.mechanicalChecks?.checks?.length) {
+      out.push({ name: "checks:mechanical", kind: "artifact", content: pretty(state.mechanicalChecks), group: "Verify" });
+    }
+    if (state.deferredChecks?.length) {
+      out.push({ name: "checks:deferred", kind: "artifact", content: pretty(state.deferredChecks), group: "Spec" });
+    }
     const order = ["Spec", "Plans", "Outputs", "Verify", "Inputs"];
     return out.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group) || a.name.localeCompare(b.name));
-  }, [state.artifacts, state.prompts]);
+  }, [state.artifacts, state.prompts, state.mechanicalChecks, state.deferredChecks]);
 
   const [activeName, setActiveName] = useState<string | null>(null);
   useEffect(() => {

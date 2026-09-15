@@ -59,6 +59,12 @@ export const ARTIFACT_SCHEMAS = {
   implement: Type.Object({
     summary: Type.String(),
     files_written: Type.Array(Type.String()),
+    notes: Type.Optional(
+      Type.String({
+        description:
+          "Impl-delta: decisions made, deviations from the plan and why, anything the verifier should know",
+      }),
+    ),
   }),
   // clarify-phase tools: the PM loop
   questions: Type.Object({
@@ -104,6 +110,20 @@ export const ARTIFACT_SCHEMAS = {
     acceptance_criteria: Type.Array(Type.String(), {
       description: "THE contract — runnable/checkable criteria the verifier will gate on",
     }),
+    ac_verification: Type.Optional(
+      Type.Array(
+        Type.Object({
+          criterion: Type.String({
+            description: "The criterion text EXACTLY as it appears in acceptance_criteria",
+          }),
+          env: Type.Union([Type.Literal("local"), Type.Literal("remote"), Type.Literal("human")], {
+            description:
+              "local = verifiable by running code/commands in this workspace; remote = needs a hosted service (GitHub CI runs, branch protection); human = needs a person to judge",
+          }),
+        }),
+        { description: "ONE entry per acceptance criterion — tag every one" },
+      ),
+    ),
     out_of_scope: Type.Optional(Type.Array(Type.String())),
   }),
   verify: Type.Object({
@@ -139,39 +159,42 @@ export const ARTIFACT_SCHEMAS = {
   }),
 };
 
-// Built-in minimal rules — always present; project context files (AGENTS.md /
-// CLAUDE.md / .claude/rules/*) are injected on top by host/rules.mjs.
-const CODING_RULES = `
+// Built-in implementer rules — always present for coder nodes; project context
+// files (AGENTS.md / CLAUDE.md / .claude/rules/*) are injected on top by
+// host/rules.mjs. Verify/audit carry no coding rules: their method lives in
+// their system prompts (host/prompts.mjs).
+const IMPLEMENT_RULES = `
 Rules (binding):
-- TypeScript strict where applicable; no \`any\`; no TODOs or placeholder logic.
-- Keep it minimal — implement exactly the task, nothing extra.
-- Stay inside your assigned files — sibling coder nodes are working on other files concurrently.
+- Implement the task FULLY — every artifact the task, the spec's acceptance criteria, and the injected rules require. No stubs, no TODOs, no placeholder logic.
+- TypeScript strict where applicable; no \`any\`.
+- Run lint and tests for what you changed before reporting; fix what they surface. If no test setup exists, follow the injected testing rules if present.
+- Stay inside your assigned files — sibling coder nodes are working on other files concurrently. On fix rounds: fix ONLY your assigned gaps; do not refactor unrelated code.
 - If a command needs something unavailable, surface it instead of pretending success.
+- Report honestly: summary of what you built, files_written, and notes (decisions made, deviations from the plan and why).
 `.trim();
 
 export const NODE_PROFILES = {
   plan: {
     title: "Plan",
     tools: ["read", "grep", "find", "ls", "report_artifact"],
-    thinking: "low",
+    thinking: "medium",
     schema: ARTIFACT_SCHEMAS.plan,
     role: "plan",
   },
   implement: {
     title: "Implement",
     tools: ["read", "write", "edit", "bash", "report_artifact"],
-    thinking: "low",
+    thinking: "medium",
     schema: ARTIFACT_SCHEMAS.implement,
     role: "backend",
-    rules: CODING_RULES,
+    rules: IMPLEMENT_RULES,
   },
   verify: {
     title: "Verify",
     tools: ["read", "bash", "report_artifact"],
-    thinking: "low",
+    thinking: "high",
     schema: ARTIFACT_SCHEMAS.verify,
     role: "verify",
-    rules: CODING_RULES,
   },
   audit: {
     title: "Audit",
@@ -179,7 +202,6 @@ export const NODE_PROFILES = {
     thinking: "high",
     schema: ARTIFACT_SCHEMAS.audit,
     role: "audit",
-    rules: CODING_RULES,
   },
 };
 
@@ -239,5 +261,5 @@ export const LEGAL_SINGLE_SIDES = ["plumbing", "devops", "qa", "no-counterpart"]
 // The owner can always cancel from the GUI.
 export const CLARIFY_PROFILE = {
   tools: ["read", "grep", "find", "ls", "investigate", "ask_questions", "finalize_spec"],
-  thinking: "low",
+  thinking: "medium",
 };

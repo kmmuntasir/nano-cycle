@@ -12,10 +12,14 @@ asks the owner high-leverage questions in batches (answered in the GUI), and rep
 until it locks a **spec**: refined summary, decisions, and acceptance criteria. The spec
 is written to `<project>/.nano-cycle/spec-<runid>.md` and is THE contract.
 
-**Step 2 — Build.** plan → parallel coders → verify, fully autonomous. The spec's
-acceptance criteria flow verbatim into the plan and the verifier gates on them.
-Verify rejects → coder nodes re-run with the failing checks as feedback
-(`maxFixRounds`, default 2) → accepted or honestly `failed`.
+**Step 2 — Build.** plan → *(owner approves the compiled plan — M/L tiers, on by
+default)* → parallel coders → verify, fully autonomous. The spec's acceptance
+criteria flow **verbatim into the plan AND into every coder's prompt** (with the
+source requirement docs and the repo's testing rules) — the builders see the same
+contract the verifier gates on. Verify rejects → only the coder nodes that **own
+the failing gaps** re-run, each with only its gaps (`maxFixRounds`, default 2) →
+accepted or honestly `failed`. Deterministic driver checks (below) run before
+every verify pass and cannot be argued away by the model.
 
 ## Web research (optional)
 
@@ -80,11 +84,52 @@ up the new model when it starts, a running node stops and restarts with it.
 | Layer | Mechanism |
 |---|---|
 | Spawning | the graph walks nodes; the model cannot spawn anything |
-| Tools | per-node allowlists (`plan`/`verify` are read-only) |
+| Tools | per-node allowlists (`plan`/`verify` are read-only); verify gets a browser (`web_reader`) when obscura is on PATH |
 | Context | driver-assembled system prompt; zero runtime discovery |
 | Outputs | schema'd `report_artifact` tool call, validated by the driver |
 | Models | per-node `provider/model:thinking` from run config (GUI picker) |
+| Effort | thinking levels: plan/implement/clarify `medium`, verify/audit `high` |
+| Ground truth | driver-side mechanical checks before every verify — the model cannot overrule them |
 | Resume/cancel | `session.abort()` per node; run state persists under `runs/` |
+
+## Deterministic ground truth — driver checks (`host/checks.mjs`)
+
+Before **every** verify pass the driver itself runs, in the project tree:
+
+| Check | Catches |
+|---|---|
+| `secrets-gitleaks` | real secrets in the tree (gitleaks binary → pinned docker → skip) |
+| `deps-declared` | imports/configs referencing packages no `package.json` declares (per-manifest scope, tsconfig-alias aware) |
+| `no-cdn-fonts` | `fonts.googleapis.com`/`gstatic` references — the tofu failure mode |
+| `i18n-parity` | `en.json`/`bn.json` locale pairs with different key sets (both directions) |
+| `env-wiring` | `.env.example` keys vs `process.env`/`import.meta.env` reads, both directions |
+| `readme-commands` | README-documented `npm run <x>` / `./scripts/<y>` that don't resolve |
+
+Failures gate the run even if the verify model passes the criterion; skips never
+gate. Results land in the verify prompt as ground truth, in `state.mechanicalChecks`
+(visible in the GUI's Artifacts tab), and in the event feed. Disable with
+`NANO_CHECKS=off` (or a comma list of ids); pin the gitleaks image with
+`NANO_GITLEAKS_IMAGE`.
+
+## Targeted fix rounds
+
+A rejected round maps each failing check / blocking finding to the coder node(s)
+whose planned-or-written files it cites (path matching against assignments) and
+**requeues only those nodes** — each gets its own gaps plus its previous artifact
+("build on it; do not undo what already passes"). If no gap matches any coder's
+files, the round falls back to requeueing everyone (the old behavior). Per-node
+feedback is persisted in `state.feedbackByNode`; files written so far in
+`state.writtenFiles` also feed lane packing — nodes whose effective file sets
+(planned ∪ written) overlap always serialize, killing hot-file collisions.
+
+## Verification environments (defers the unfixable)
+
+The clarify phase tags every acceptance criterion `local` / `remote` / `human`
+(`spec.ac_verification`). A failing check on a `remote`/`human` criterion whose
+evidence indicates an environment limit (no git remote, branch protection,
+hosted CI) is recorded in `state.deferredChecks` and surfaced to the owner — it
+never burns a fix round no coder could ever fix. Untagged specs keep the legacy
+`not verifiable…` evidence-prefix heuristic.
 
 ## Project context (optional, conventional)
 
@@ -95,8 +140,14 @@ present, discovered at runtime never:
 <project>/AGENTS.md | CLAUDE.md                        → every node
 <project>/.claude/rules/backend-development-rules.md   → implement-be (with security-rules.md)
 <project>/.claude/rules/frontend-development-rules.md  → implement-fe
-<project>/.claude/rules/testing-rules.md               → verify
+<project>/.claude/rules/testing-rules.md               → implement nodes AND verify/audit
+<project>/.claude/rules/git-guidelines.md              → implement nodes AND verify/audit
 ```
+
+Coders also receive the **full contract** in their prompt: the spec's acceptance
+criteria verbatim, the plan's own criteria, the raw source requirement documents
+(`spec.source_docs`), and — on fix rounds — their previous artifact. The design
+goal: builders and verifiers judge against the same law.
 
 A project with none of these simply runs on the built-in minimal rules.
 

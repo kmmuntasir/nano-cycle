@@ -57,6 +57,7 @@ export default function App() {
   const [clarify, setClarify] = useState(false);
   const [useGit, setUseGit] = useState(true);
   const [useAudit, setUseAudit] = useState(true);
+  const [approvePlan, setApprovePlan] = useState(true);
   const [maxFixRounds, setMaxFixRounds] = useState(2);
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [starting, setStarting] = useState(false);
@@ -76,7 +77,7 @@ export default function App() {
     setState(s);
     setEvents(evs);
     setSelectedNode(s.nodes[0]?.id ?? null);
-    if (s.gate?.type === "answers") setTab("qa");
+    if (s.gate?.type === "answers" || s.gate?.type === "plan-approval") setTab("qa");
     else setTab((t) => (t === "qa" ? "pipeline" : t));
     history.replaceState(null, "", `?run=${id}`);
   }, []);
@@ -134,7 +135,7 @@ export default function App() {
   const start = async () => {
     setStarting(true);
     try {
-      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds, git: useGit, audit: useAudit });
+      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds, git: useGit, audit: useAudit, approvePlan });
       setShowNew(false);
       setTask("");
       await loadRun(s.id);
@@ -230,6 +231,8 @@ export default function App() {
       gitAvailable={project !== "sandbox"}
       audit={useAudit}
       setAudit={setUseAudit}
+      approvePlan={approvePlan}
+      setApprovePlan={setApprovePlan}
       starting={starting}
       onStart={start}
       project={project}
