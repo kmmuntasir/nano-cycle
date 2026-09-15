@@ -403,8 +403,13 @@ ${sourceDocText}`,
   return parts.join("\n\n");
 }
 
-export function verifyPrompt({ task, plan, implementReports, workspace, spec, sourceDocText, acVerification, mechanicalResults }) {
+export function verifyPrompt({ task, plan, implementReports, workspace, spec, sourceDocText, acVerification, mechanicalResults, ticketScope }) {
   const parts = [`Task: ${task}`, `Workspace: ${workspace}`];
+  if (ticketScope) {
+    parts.push(
+      `TICKET-SCOPED VERIFICATION — you are verifying ONE capability ("${ticketScope.id}" · ${ticketScope.title}) of a larger plan, BEFORE later capabilities are built.\nScope — the only files this ticket owns:\n${ticketScope.files.map((f) => `- ${f}`).join("\n")}\nVerify the spec's acceptance criteria, the plan's criteria, and the driver checks AS THEY APPLY TO THESE FILES AND WHAT THEY DELIVER. Other capabilities' files may not exist yet — that is EXPECTED; do not fail their absence. Cross-capability integration is the final full-tree verify's job, after all tickets.`,
+    );
+  }
   if (sourceDocText) {
     parts.push(
       `SOURCE REQUIREMENT DOCUMENT — the ultimate authority; its requirements and "Done when" items OUTRANK the spec below. Verify each one directly, and treat any spec deviation from this doc as a gap:

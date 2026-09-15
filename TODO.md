@@ -53,3 +53,12 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 ## 9. Docs
 - [x] README.md updates (new mechanisms)
 - [x] FIX-REPORT.md
+
+## 10. Follow-up round (deferred items, 2026-09-16)
+- [x] Thinking levels → high for every role (plan/implement/clarify raised from medium)
+- [x] L-tier ticketization: capabilities compile to sequential tickets (coders → verify-<capId> gate → scoped fix rounds) + final cross-ticket verify; resume requeues only non-accepted tickets
+- [x] verify-<cap> profiles/roles, ticket-scoped verifyPrompt, GUI "Ticket Gates (L)" lane, state.tickets
+- [x] fix: execute() now drives the L plan phase before the ticket loop (first attempt skipped it — run starved on a null graph)
+- [x] Live L run verified end-to-end (20260916-005034498, 3 tickets, all gates green, 17/17 assertions)
+- [ ] Mechanical remote CI verification (push + gh run watch) — still deferred, needs a configured remote
+- [ ] Worktree isolation for parallel coders — still deferred (hot-file serialization is the mitigation)

@@ -250,7 +250,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   };
 
   function systemFor(run, id) {
-    if (id === "verify") return SYSTEM_FOR.verify();
+    if (id === "verify" || id.startsWith("verify-")) return SYSTEM_FOR.verify();
     if (id === "audit") return SYSTEM_FOR.audit();
     if (id === "plan") return run.tier === "L" ? SYSTEM_FOR.planCaps() : SYSTEM_FOR.plan();
     return SYSTEM_FOR.implement(profileFor(id).lane);
@@ -296,7 +296,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         // Tool names must appear in the allowlist to be reachable (SDK contract).
         const nodeTools = [...profile.tools];
         const nodeCustomTools = [reportTool];
-        if (id === "verify" && webTools?.reader) {
+        if ((id === "verify" || id.startsWith("verify-")) && webTools?.reader) {
           nodeTools.push("web_reader");
           nodeCustomTools.push(webTools.reader);
           emit.event(run.id, id, {
@@ -392,50 +392,91 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     for (const c of caps) visit(c.id);
   }
 
-  function compileGraph(run, plan) {
-    validateCapabilities(plan);
-    const caps = plan.capabilities;
-    const halves = (capId) => {
-      const c = caps.find((x) => x.id === capId);
-      const out = [];
-      if (c.backend?.length) out.push(`impl-${capId}-be`);
-      if (c.frontend?.length) out.push(`impl-${capId}-fe`);
-      return out;
-    };
-    const nodes = [{ id: "plan", dependsOn: [] }];
-    for (const c of caps) {
-      const deps = ["plan", ...(c.dependsOn ?? []).flatMap((d) => halves(d))];
-      if (c.backend?.length) nodes.push({ id: `impl-${c.id}-be`, dependsOn: deps });
-      if (c.frontend?.length) nodes.push({ id: `impl-${c.id}-fe`, dependsOn: deps });
-    }
-    const implIds = nodes.filter((n) => n.id.startsWith("impl-")).map((n) => n.id);
-    nodes.push({ id: "verify", dependsOn: implIds });
+  function ensureNode(run, id) {
+    if (nodeState(run, id)) return;
+    run.state.nodes.push({
+      id,
+      status: "queued",
+      usage: { input: 0, output: 0, cacheRead: 0 },
+      retries: 0,
+      durationMs: 0,
+      startedAt: null,
+      endedAt: null,
+      error: null,
+    });
+  }
 
-    // per-node coder assignments
+  // Topological order over capability deps (cycles already rejected by
+  // validateCapabilities' DFS — this DFS re-checks defensively).
+  function topoCaps(caps) {
+    const byId = new Map(caps.map((c) => [c.id, c]));
+    const order = [];
+    const mark = {};
+    const visit = (id) => {
+      if (mark[id] === 2) return;
+      if (mark[id] === 1) throw new Error(`capability dependency cycle at "${id}"`);
+      mark[id] = 1;
+      for (const d of byId.get(id).dependsOn ?? []) visit(d);
+      mark[id] = 2;
+      order.push(byId.get(id));
+    };
+    for (const c of caps) visit(c.id);
+    return order;
+  }
+
+  // L-tier compilation: capabilities become TICKETS, verified one at a time in
+  // dependency order — each ticket's coders run, then its own verify gate
+  // (verify-<capId>) accepts or drives scoped fix rounds BEFORE the next
+  // ticket starts. A final cross-ticket verify (+ audit) sweeps at the end.
+  // Sequencing is deliberately sequential (the reference workflow's cadence):
+  // small, deeply-verified diffs beat wide, shallowly-verified ones.
+  function compileTickets(run, plan) {
+    const caps = topoCaps(plan.capabilities);
+    const tickets = [];
     for (const c of caps) {
+      const implIds = [];
       if (c.backend?.length) {
+        implIds.push(`impl-${c.id}-be`);
         run.nodeWork[`impl-${c.id}-be`] = { lane: "backend", title: c.title, files: c.backend };
       }
       if (c.frontend?.length) {
+        implIds.push(`impl-${c.id}-fe`);
         run.nodeWork[`impl-${c.id}-fe`] = { lane: "frontend", title: c.title, files: c.frontend };
       }
+      const verifyId = `verify-${c.id}`;
+      tickets.push({ id: c.id, title: c.title, implIds, verifyId, dependsOn: c.dependsOn ?? [] });
+      for (const id of [...implIds, verifyId]) ensureNode(run, id);
     }
-    // dynamic nodes appear in state + GUI
-    for (const n of nodes) {
-      if (!nodeState(run, n.id)) {
-        run.state.nodes.push({
-          id: n.id,
-          status: "queued",
-          usage: { input: 0, output: 0, cacheRead: 0 },
-          retries: 0,
-          durationMs: 0,
-          startedAt: null,
-          endedAt: null,
-          error: null,
-        });
-      }
-    }
+    run.tickets = tickets;
+    run.state.tickets = tickets.map((t) => ({
+      id: t.id,
+      title: t.title,
+      implIds: t.implIds,
+      verifyId: t.verifyId,
+    }));
+    emit.event(run.id, "_run", {
+      t: "notice",
+      s: `compiled ticket pipeline: ${tickets.map((t) => `${t.id} [${t.implIds.join(" ∥ ")} → ${t.verifyId}]`).join(" → ")} → final verify`,
+    });
     emit.state(run);
+  }
+
+  // The sub-graph runDag walks while one ticket is active.
+  function ticketGraph(ticket) {
+    const nodes = [];
+    for (const id of ticket.implIds) nodes.push({ id, dependsOn: ["plan"] });
+    nodes.push({ id: ticket.verifyId, dependsOn: [...ticket.implIds] });
+    return nodes;
+  }
+
+  // Final cross-ticket sweep graph: every impl node (all done by now) feeds
+  // the full "verify" node.
+  function finalGraph(run) {
+    ensureNode(run, "verify");
+    const implIds = (run.tickets ?? []).flatMap((t) => t.implIds);
+    const nodes = [{ id: "plan", dependsOn: [] }];
+    for (const id of implIds) nodes.push({ id, dependsOn: ["plan"] });
+    nodes.push({ id: "verify", dependsOn: implIds });
     return nodes;
   }
 
@@ -525,11 +566,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         }
         if (dynamic) {
           validateCapabilities(plan);
-          run.dynamicGraph = compileGraph(run, plan);
-          emit.event(run.id, "_run", {
-            t: "notice",
-            s: `compiled work graph: ${run.dynamicGraph.filter((n) => n.id.startsWith("impl-")).length} coder nodes from ${plan.capabilities.length} capabilities`,
-          });
+          compileTickets(run, plan);
         } else {
           // static tiers: the v1 plan is one slice — wire coder assignments
           run.nodeWork["implement"] = {
@@ -548,20 +585,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
             const nodes = [{ id: "plan", dependsOn: [] }];
             for (const h of halves) nodes.push({ id: h, dependsOn: ["plan"] });
             nodes.push({ id: "verify", dependsOn: [...halves] });
-            for (const n of nodes) {
-              if (!nodeState(run, n.id)) {
-                run.state.nodes.push({
-                  id: n.id,
-                  status: "queued",
-                  usage: { input: 0, output: 0, cacheRead: 0 },
-                  retries: 0,
-                  durationMs: 0,
-                  startedAt: null,
-                  endedAt: null,
-                  error: null,
-                });
-              }
-            }
+            for (const n of nodes) ensureNode(run, n.id);
             run.dynamicGraph = nodes;
             emit.event(run.id, "_run", {
               t: "notice",
@@ -895,17 +919,34 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
 
   function promptFor(run, n) {
     if (n.id === "audit") return auditPromptFor(run);
-    if (n.id === "verify") {
-      return verifyPrompt({
+    if (n.id.startsWith("verify")) {
+      const base = {
         task: run.task,
         plan: run.state.artifacts.plan,
-        implementReports: implementReports(run),
         workspace: run.projectPath,
         spec: run.spec,
         sourceDocText: sourceDocsFor(run, emit),
         acVerification: run.spec?.ac_verification ?? null,
         mechanicalResults: run.state.mechanicalChecks?.checks ?? null,
-      });
+      };
+      // Per-ticket verify: scope reports + expectations to ONE capability.
+      const ticket = (run.tickets ?? []).find((t) => t.verifyId === n.id);
+      if (ticket) {
+        const reports = {};
+        for (const id of ticket.implIds) {
+          const a = run.state.artifacts[id];
+          if (a) reports[id] = a;
+        }
+        const files = ticket.implIds.flatMap(
+          (id) => (run.nodeWork[id]?.files ?? []).map((f) => f.path),
+        );
+        return verifyPrompt({
+          ...base,
+          implementReports: reports,
+          ticketScope: { id: ticket.id, title: ticket.title, files },
+        });
+      }
+      return verifyPrompt({ ...base, implementReports: implementReports(run) });
     }
     const work = run.nodeWork[n.id];
     const sourceDocText = sourceDocsFor(run, emit);
@@ -1012,7 +1053,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       if (ready.length === 0) break;
 
       // Ground truth first: the verify prompt carries the driver's own checks.
-      if (ready.some((n) => n.id === "verify")) await runMechanicalGate(run);
+      // (Also fires for per-ticket "verify-<capId>" nodes.)
+      if (ready.some((n) => n.id.startsWith("verify"))) await runMechanicalGate(run);
       if (run.cancelRequested) break;
 
       if (ready.some((n) => n.id === "plan")) {
@@ -1070,12 +1112,14 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   // (verify criterion/evidence, audit finding) against each node's planned
   // files AND the files it already wrote — substring both directions, so a
   // cited absolute path or a subpath still lands on the right owner.
-  function ownersForGap(run, text) {
+  function ownersForGap(run, text, scope) {
     const tokens = pathTokensIn(text);
     if (tokens.length === 0) return [];
+    const scopeSet = scope ? new Set(scope) : null;
     const owners = new Set();
     for (const n of run.state.nodes) {
       if (!n.id.startsWith("impl")) continue;
+      if (scopeSet && !scopeSet.has(n.id)) continue; // per-ticket fix rounds stay inside the ticket
       const files = [
         ...(run.nodeWork[n.id]?.files ?? []).map((f) => pathKey(f.path)),
         ...(run.state.writtenFiles?.[n.id] ?? []).map((p) => pathKey(p)),
@@ -1102,9 +1146,14 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   // Targeted fix round: map gaps to owning coder nodes, requeue only those,
   // hand each node only ITS gaps. Fallback (no gap has any owner): requeue
   // every coder with the concatenated blob — the previous behavior.
-  function planFixRound(run, gaps, sourceNode, round) {
-    const implIds = run.state.nodes.filter((n) => n.id.startsWith("impl")).map((n) => n.id);
-    const ownersByGap = gaps.map((text) => ({ text, owners: ownersForGap(run, text) }));
+  function planFixRound(run, gaps, sourceNode, round, scope) {
+    const implIds = scope
+      ? run.state.nodes.filter((n) => scope.includes(n.id)).map((n) => n.id)
+      : run.state.nodes.filter((n) => n.id.startsWith("impl")).map((n) => n.id);
+    if (implIds.length === 0) implIds.push(
+      ...run.state.nodes.filter((n) => n.id.startsWith("impl")).map((n) => n.id),
+    );
+    const ownersByGap = gaps.map((text) => ({ text, owners: ownersForGap(run, text, scope) }));
     const allOwners = new Set(ownersByGap.flatMap((g) => g.owners));
     if (allOwners.size === 0) {
       run.fixRequeue = [...implIds];
@@ -1152,6 +1201,115 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     });
   }
 
+  // Shared verdict reconciliation for every verify-shaped node (final "verify"
+  // and per-ticket "verify-<capId>"): checks over summary verdicts, mechanical
+  // failures gate regardless of the model's opinion, remote/human-tagged
+  // environment-limited failures defer instead of gating.
+  function reconcileVerify(run, verifyArtifact) {
+    const failingChecks = (verifyArtifact?.checks ?? []).filter((c) => !c.pass);
+    const mechFailing = (run.state.mechanicalChecks?.checks ?? []).filter((c) => c.status === "fail");
+    const nonGating = [];
+    const gatingChecks = [];
+    for (const c of failingChecks) {
+      const legacy = /^\s*not verifiable/i.test(c.evidence ?? "");
+      const env = matchAcVerification(run.spec?.ac_verification, c.criterion);
+      const envLimited = (env === "remote" || env === "human") && ENV_LIMIT_RE.test(c.evidence ?? "");
+      if (legacy || envLimited) nonGating.push(c);
+      else gatingChecks.push(c);
+      if (envLimited) recordDeferred(run, c, env);
+    }
+    if (nonGating.length > 0) {
+      emit.event(run.id, "verify", {
+        t: "notice",
+        s: `${nonGating.length} check(s) not verifiable from this environment — recorded, non-gating: ${nonGating.map((c) => String(c.criterion).slice(0, 60)).join("; ")}`,
+      });
+    }
+    let verdict = verifyArtifact?.verdict ?? "gaps-found";
+    if (verdict === "accepted" && (gatingChecks.length > 0 || mechFailing.length > 0)) {
+      verdict = "gaps-found";
+      emit.event(run.id, "verify", {
+        t: "notice",
+        s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)${mechFailing.length ? ` and ${mechFailing.length} mechanical check failure(s)` : ""}`,
+      });
+    }
+    return { verdict, gatingChecks, mechFailing };
+  }
+
+  // L-tier ticket pipeline: capabilities run as sequential tickets — coders,
+  // then the ticket's own verify gate, then scoped fix rounds — before the
+  // next ticket starts. Returns true when every ticket is verified; on
+  // failure, sets run.state.error with the reasons and returns false.
+  async function runTickets(run) {
+    for (const ticket of run.tickets ?? []) {
+      if (run.cancelRequested) throw new Error("cancelled");
+      if (nodeState(run, ticket.verifyId)?.status === "done") continue; // resume: accepted already
+      run.dynamicGraph = ticketGraph(ticket);
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `ticket ${ticket.id} (${ticket.title}) — ${ticket.implIds.join(" ∥ ")} → ${ticket.verifyId}`,
+      });
+      let rec = null;
+      let ticketVerdict = null;
+      for (let round = 0; round <= run.maxFixRounds; round++) {
+        run.round = round;
+        if (round > 0) {
+          // Scoped targeted requeue: only this ticket's coder nodes.
+          const requeueSet = new Set((run.fixRequeue ?? []).filter((id) => ticket.implIds.includes(id)));
+          for (const n of run.state.nodes) {
+            if (requeueSet.has(n.id)) {
+              n.status = "queued";
+              n.startedAt = null;
+              n.endedAt = null;
+            }
+          }
+          if (nodeState(run, ticket.verifyId)) nodeState(run, ticket.verifyId).status = "queued";
+          emit.state(run);
+        }
+        await runDag(run);
+        if (run.cancelRequested) throw new Error("cancelled");
+        rec = reconcileVerify(run, run.state.artifacts[ticket.verifyId]);
+        ticketVerdict = rec.verdict;
+        if (ticketVerdict === "accepted") {
+          emit.event(run.id, "_run", { t: "notice", s: `ticket ${ticket.id} verified — accepted` });
+          break;
+        }
+        if (round < run.maxFixRounds) {
+          const gaps = [
+            ...rec.gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
+            ...rec.mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
+          ];
+          planFixRound(run, gaps, ticket.verifyId, round, ticket.implIds);
+          emit.event(run.id, ticket.verifyId, {
+            t: "notice",
+            s: `ticket ${ticket.id}: gaps-found — fix round ${round + 1}`,
+          });
+        }
+      }
+      if (ticketVerdict !== "accepted") {
+        const reasons = [];
+        if (rec?.gatingChecks?.length) {
+          reasons.push(
+            `verify: ${rec.gatingChecks.length} failing check(s) — ${rec.gatingChecks.map((c) => c.criterion).slice(0, 3).join(" | ")}`,
+          );
+        }
+        if (rec?.mechFailing?.length) {
+          reasons.push(`checks: ${rec.mechFailing.length} mechanical failure(s) — ${rec.mechFailing.map((c) => c.id).slice(0, 3).join(" | ")}`);
+        }
+        run.state.error =
+          `ticket ${ticket.id} (${ticket.title}) failed verification after ${run.maxFixRounds} fix round(s)` +
+          (reasons.length ? `: ${reasons.join(" ;; ")}` : "") +
+          " — resume the run to retry this ticket".slice(0, 600);
+        return false;
+      }
+    }
+    run.dynamicGraph = finalGraph(run);
+    emit.event(run.id, "_run", {
+      t: "notice",
+      s: `all tickets verified — final cross-ticket verify${run.audit ? " + audit" : ""}`,
+    });
+    return true;
+  }
+
   async function execute(run) {
     try {
       // Resume after cancel-at-plan-gate: the plan node is already done, so
@@ -1174,6 +1332,24 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       }
 
       // Step 2 — build: plan → parallel coders → verify → audit, verdict-gated.
+      // L tier: drive the plan phase FIRST (planPhase compiles the tickets and
+      // runs the approval gate inside runDag), then run the ticket pipeline;
+      // the generic loop below is the final cross-ticket verify (+ audit).
+      if (run.tier === "L") {
+        if (nodeState(run, "plan")?.status !== "done") {
+          run.dynamicGraph = TIERS.L; // [plan]
+          await runDag(run);
+          if (run.cancelRequested) throw new Error("cancelled");
+        } else if (!run.tickets && run.state.artifacts.plan?.capabilities) {
+          // defensive resume edge: plan artifact exists but was never compiled
+          validateCapabilities(run.state.artifacts.plan);
+          compileTickets(run, run.state.artifacts.plan);
+        }
+        if (Array.isArray(run.tickets)) {
+          const ok = await runTickets(run);
+          if (!ok) throw new Error(run.state.error ?? "a ticket failed its verification");
+        }
+      }
       let verdict = null;
       for (let round = 0; round <= run.maxFixRounds; round++) {
         run.round = round;
@@ -1199,37 +1375,12 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         // Never trust the model's summary verdict over its own checks, never
         // let environment-unverifiable criteria gate the run, and never let
         // the model talk its way past a driver-observed mechanical failure.
-        const verifyArtifact = run.state.artifacts.verify;
-        const failingChecks = (verifyArtifact?.checks ?? []).filter((c) => !c.pass);
-        const mechFailing = (run.state.mechanicalChecks?.checks ?? []).filter((c) => c.status === "fail");
-        const nonGating = [];
-        const gatingChecks = [];
-        for (const c of failingChecks) {
-          const legacy = /^\s*not verifiable/i.test(c.evidence ?? "");
-          const env = matchAcVerification(run.spec?.ac_verification, c.criterion);
-          const envLimited = (env === "remote" || env === "human") && ENV_LIMIT_RE.test(c.evidence ?? "");
-          if (legacy || envLimited) nonGating.push(c);
-          else gatingChecks.push(c);
-          if (envLimited) recordDeferred(run, c, env);
-        }
-        if (nonGating.length > 0) {
-          emit.event(run.id, "verify", {
-            t: "notice",
-            s: `${nonGating.length} check(s) not verifiable from this environment — recorded, non-gating: ${nonGating.map((c) => String(c.criterion).slice(0, 60)).join("; ")}`,
-          });
-        }
-        verdict = verifyArtifact?.verdict ?? "gaps-found";
-        if (verdict === "accepted" && (gatingChecks.length > 0 || mechFailing.length > 0)) {
-          verdict = "gaps-found";
-          emit.event(run.id, "verify", {
-            t: "notice",
-            s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)${mechFailing.length ? ` and ${mechFailing.length} mechanical check failure(s)` : ""}`,
-          });
-        }
+        const rec = reconcileVerify(run, run.state.artifacts.verify);
+        verdict = rec.verdict;
         if (verdict !== "accepted") {
           const gaps = [
-            ...gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
-            ...mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
+            ...rec.gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
+            ...rec.mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
           ];
           if (round < run.maxFixRounds) {
             planFixRound(run, gaps, "verify", round);
@@ -1586,8 +1737,26 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         if (run.state.status !== "failed") {
           return { ok: false, error: "nothing to resume — every node already finished" };
         }
+        // L tier: only tickets whose verify gate did not accept get re-run —
+        // accepted tickets' coders must not re-run during the final sweep.
+        const unacceptedTicketImplIds = new Set(
+          (run.tickets ?? [])
+            .filter((t) => run.state.artifacts[t.verifyId]?.verdict !== "accepted")
+            .flatMap((t) => t.implIds),
+        );
         for (const n of run.state.nodes) {
-          if (n.id !== "plan" && n.id !== "clarify" && (n.id.startsWith("impl") || n.id === "verify" || n.id === "audit")) {
+          const isImpl = n.id.startsWith("impl");
+          const requeueGeneral =
+            n.id !== "plan" &&
+            n.id !== "clarify" &&
+            ((isImpl && (unacceptedTicketImplIds.size === 0 || unacceptedTicketImplIds.has(n.id))) ||
+              n.id === "verify" ||
+              n.id === "audit");
+          // L tier: also requeue per-ticket verify gates that did NOT accept —
+          // runTickets must retry the failing ticket, not skip it as done.
+          const requeueTicketVerify =
+            n.id.startsWith("verify-") && n.status === "done" && run.state.artifacts[n.id]?.verdict !== "accepted";
+          if (requeueGeneral || requeueTicketVerify) {
             n.status = "queued";
             n.error = null;
             n.startedAt = null;

@@ -92,3 +92,25 @@ Cancel-at-gate used to masquerade as a plan rejection: `waitGate`'s `cancelled a
 | RC9 unasked product questions | delivery-shape questions in clarify |
 
 **Deferred follow-ups (agreed):** L-tier ticketization (per-capability verify/commit/integrate), mechanical remote CI verification (push + `gh run watch` — needs a configured remote; `ac_verification` already stops it burning rounds), worktree isolation for parallel coders.
+
+
+## 6. Follow-up round (2026-09-16, second commit): thinking `high` + L-tier ticketization
+
+**Thinking levels** — every role now runs at `high` (plan/implement/clarify raised from `medium`; verify/audit were already `high`). Model choice stays per-run in the GUI.
+
+**L-tier ticketization** (the big deferred item) — `L` is no longer a wide parallel wave with one end-of-run verify. The plan's capabilities compile into **tickets** that run sequentially in dependency order:
+
+```txt
+plan → ticket₁ (coders → verify-<cap₁>) → ticket₂ (…) → … → final cross-ticket verify (+ audit)
+```
+
+- Each ticket: its coder nodes (lanes pack by planned ∪ written file overlap), then its **own verify gate** (`verify-<capId>` — same red-team profile, browser tool, driver checks), then **scoped** fix rounds (gap→owner mapping restricted to the ticket's nodes; fallback stays inside the ticket).
+- Ticket-scoped verify prompts (`TICKET-SCOPED VERIFICATION` block + only that ticket's implementer reports): "other capabilities' files may not exist yet — do not fail their absence; integration is the final verify's job."
+- A failing ticket fails the run with its reasons; **resume retries only non-accepted tickets** (accepted tickets' coders are not re-run).
+- Mechanical checks + browser attach fire for every `verify-*` node; `state.tickets` persists the sequence; the GUI gains a "Ticket Gates (L)" lane; `compileGraph` (the old whole-tree wave compiler) is replaced by `compileTickets`/`ticketGraph`/`finalGraph`.
+
+**Bug found and fixed during this round's live test:** the first attempt checked `run.tickets` before `runDag` had run `planPhase` (which compiles the tickets), so the ticket loop was skipped and the run starved on a null graph (failed with empty-gap fix rounds, no coder ever ran). `execute()` now drives the L plan phase explicitly first, then hands off to `runTickets`.
+
+**Live verification** (`runs/20260916-005034498`, 3 capabilities, free-tier models, plan-approval gate exercised): tickets ran strictly sequentially (ticket 2's coder started 1 ms after ticket 1's verify ended), all three ticket gates accepted (5/7/5 checks) with scoped prompts and no foreign implementer reports, final cross-ticket verify accepted, deliverable complete (`pages/about.html`, `pages/contact.html`, `assets/style.css`, matched `locales/`). 17/17 assertions PASS. An earlier aborted attempt (`20260916-004818999`) is kept on disk as the bug's evidence.
+
+**Still deferred:** mechanical remote CI verification (push + `gh run watch` — needs a configured git remote on the target project) and worktree isolation for parallel coders (hot-file serialization remains the mitigation).

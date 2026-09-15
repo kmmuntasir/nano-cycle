@@ -128,10 +128,14 @@ export default function PipelineLanes({
   const coders = state.nodes.filter((n) => n.id.startsWith("impl"));
   const be = coders.filter((n) => roleOf(n.id) !== "frontend");
   const fe = coders.filter((n) => roleOf(n.id) === "frontend");
-  const solo = state.nodes.filter((n) => !["clarify", "plan", "verify", "audit"].includes(n.id) && !n.id.startsWith("impl"));
+  const solo = state.nodes.filter(
+    (n) => !["clarify", "plan", "verify", "audit"].includes(n.id) && !n.id.startsWith("impl") && !n.id.startsWith("verify-"),
+  );
   const clarify = pick("clarify");
   const plan = pick("plan");
   const verify = pick("verify");
+  // L tier: per-ticket verify gates (verify-<capId>) live in the Verify lane.
+  const ticketVerifies = state.nodes.filter((n) => n.id.startsWith("verify-"));
   const audit = pick("audit");
   const modelValue = (id: string) => state.nodeModels?.[id] ?? "auto";
 
@@ -200,6 +204,12 @@ export default function PipelineLanes({
           {renderRow(fe, "No Frontend Coders")}
         </Box>
       </Flex>
+      {ticketVerifies.length > 0 && (
+        <Box>
+          {laneTitle("Ticket Gates (L)", ticketVerifies.length)}
+          {renderRow(ticketVerifies, "")}
+        </Box>
+      )}
       {verify && (
         <Box>
           {laneTitle("Verify (Gate)", 1)}

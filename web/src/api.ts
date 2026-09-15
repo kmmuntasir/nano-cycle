@@ -53,6 +53,7 @@ export interface RunState {
   feedbackByNode?: Record<string, string>;
   writtenFiles?: Record<string, string[]>;
   deferredChecks?: { criterion: string; env: string; evidence?: string }[];
+  tickets?: { id: string; title: string; implIds: string[]; verifyId: string }[];
   mechanicalChecks?: {
     round: number;
     at: string;

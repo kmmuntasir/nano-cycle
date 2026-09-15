@@ -177,14 +177,14 @@ export const NODE_PROFILES = {
   plan: {
     title: "Plan",
     tools: ["read", "grep", "find", "ls", "report_artifact"],
-    thinking: "medium",
+    thinking: "high",
     schema: ARTIFACT_SCHEMAS.plan,
     role: "plan",
   },
   implement: {
     title: "Implement",
     tools: ["read", "write", "edit", "bash", "report_artifact"],
-    thinking: "medium",
+    thinking: "high",
     schema: ARTIFACT_SCHEMAS.implement,
     role: "backend",
     rules: IMPLEMENT_RULES,
@@ -210,7 +210,8 @@ export const NODE_PROFILES = {
 // single run can drive N parallel backend coders and M parallel frontend coders.
 export function profileFor(nodeId) {
   if (nodeId === "plan") return NODE_PROFILES.plan;
-  if (nodeId === "verify") return NODE_PROFILES.verify;
+  // "verify" and per-ticket "verify-<capId>" nodes share the verify profile
+  if (nodeId === "verify" || nodeId.startsWith("verify-")) return NODE_PROFILES.verify;
   if (nodeId === "audit") return NODE_PROFILES.audit;
   if (nodeId === "implement") return NODE_PROFILES.implement;
   if (nodeId.endsWith("-be")) return { ...NODE_PROFILES.implement, lane: "backend" };
@@ -261,5 +262,5 @@ export const LEGAL_SINGLE_SIDES = ["plumbing", "devops", "qa", "no-counterpart"]
 // The owner can always cancel from the GUI.
 export const CLARIFY_PROFILE = {
   tools: ["read", "grep", "find", "ls", "investigate", "ask_questions", "finalize_spec"],
-  thinking: "medium",
+  thinking: "high",
 };

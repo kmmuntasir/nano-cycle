@@ -58,15 +58,17 @@ npm start          # http://127.0.0.1:4177
 demo  plan → implement → verify                                (+fix rounds, divergence gate)
 S     implement → verify                                       (no planning)
 M     plan → implement-be ∥ implement-fe → verify              (one slice, two parallel lanes)
-L     plan → [cap₁-be ∥ cap₁-fe] → [cap₂ …] → verify           (dynamic work graph)
+L     plan → ticket₁(coders → verify) → ticket₂(…) → final verify   (ticket pipeline)
 ```
 
-**L is graph-shaped.** The plan decomposes the task into 2–6 *capabilities* with
-capability-level dependencies; the engine compiles each into backend/frontend coder
-nodes — any number of parallel coders per side — and schedules waves greedily: nodes
-whose file lists overlap serialize within a lane, disjoint nodes run concurrently.
-A dependency between capabilities (shared module before its consumers) is respected
-by the DAG.
+**L is ticket-shaped.** The plan decomposes the task into 2–6 *capabilities*; the
+engine compiles them into **tickets** that run sequentially in dependency order —
+each ticket's coder nodes (backend/frontend lanes pack by file overlap), then the
+ticket's own verify gate (`verify-<capId>`, scoped to that capability's files),
+then scoped fix rounds — before the next ticket starts. A final cross-ticket
+verify (+ audit) sweeps the whole tree at the end. Small, deeply-verified diffs
+beat wide, shallowly-verified ones; a failing ticket fails the run with its
+reasons and is resumable.
 
 The **counterpart rule is a compiler check**: a capability with only one side must
 declare why it legally has no counterpart (`plumbing` / `devops` / `qa` /
@@ -88,7 +90,7 @@ up the new model when it starts, a running node stops and restarts with it.
 | Context | driver-assembled system prompt; zero runtime discovery |
 | Outputs | schema'd `report_artifact` tool call, validated by the driver |
 | Models | per-node `provider/model:thinking` from run config (GUI picker) |
-| Effort | thinking levels: plan/implement/clarify `medium`, verify/audit `high` |
+| Effort | thinking level `high` for every role |
 | Ground truth | driver-side mechanical checks before every verify — the model cannot overrule them |
 | Resume/cancel | `session.abort()` per node; run state persists under `runs/` |
 
