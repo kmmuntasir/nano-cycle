@@ -1001,25 +1001,39 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     });
   }
 
-  // Greedy lane packing: nodes whose EFFECTIVE file sets (planned ∪ files
-  // actually written in earlier rounds) overlap must serialize — they chain
-  // within one lane; disjoint nodes go to separate lanes and run parallel.
+  // Effective file set of a node: planned ∪ actually-written (across rounds).
   // Planned-vs-written counts too: a node whose planned file another node
   // already wrote is a collision waiting to happen.
+  function effectiveFilesOf(run, id) {
+    return [
+      ...new Set([
+        ...(run.nodeWork[id]?.files ?? []).map((f) => pathKey(f.path)),
+        ...(run.state.writtenFiles?.[id] ?? []).map((p) => pathKey(p)),
+      ]),
+    ];
+  }
+
+  // A ticket's file footprint — planned ∪ written across all its coder nodes.
+  function ticketFiles(run, ticket) {
+    return new Set(ticket.implIds.flatMap((id) => effectiveFilesOf(run, id)));
+  }
+
+  // Greedy lane packing: nodes whose effective file sets overlap must
+  // serialize — they chain within one lane; disjoint nodes go to separate
+  // lanes and run parallel. Verify-shaped nodes ALWAYS serialize against each
+  // other regardless of files: parallel verifies would race compose stacks,
+  // test runs, and dev servers in the one working tree.
   function packParallel(run, ready) {
-    const effectiveFilesOf = (id) =>
-      [
-        ...new Set([
-          ...(run.nodeWork[id]?.files ?? []).map((f) => pathKey(f.path)),
-          ...(run.state.writtenFiles?.[id] ?? []).map((p) => pathKey(p)),
-        ]),
-      ];
+    const isVerifyish = (id) => id.startsWith("verify");
     const lanes = [];
     for (const n of ready) {
-      const f = effectiveFilesOf(n.id);
+      const f = effectiveFilesOf(run, n.id);
       let conflictLane = null;
       for (const lane of lanes) {
-        if (lane.some((m) => !disjoint(effectiveFilesOf(m.id), f))) {
+        const clashes =
+          (isVerifyish(n.id) && lane.some((m) => isVerifyish(m.id))) ||
+          lane.some((m) => !disjoint(effectiveFilesOf(run, m.id), f));
+        if (clashes) {
           conflictLane = lane;
           break;
         }
@@ -1228,30 +1242,43 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   }
 
   // Targeted fix round: map gaps to owning coder nodes, requeue only those,
-  // hand each node only ITS gaps. Fallback (no gap has any owner): requeue
-  // every coder with the concatenated blob — the previous behavior.
+  // hand each node only ITS gaps. Returns the requeue list — the caller owns
+  // where it persists (per-ticket for wave tickets, run.fixRequeue for the
+  // final loop). Fallback (no gap has any owner): requeue every coder in
+  // scope; scoped fallbacks distribute the blob per-node so concurrent
+  // tickets never leak feedback into each other.
   function planFixRound(run, gaps, sourceNode, round, scope) {
     const implIds = scope
       ? run.state.nodes.filter((n) => scope.includes(n.id)).map((n) => n.id)
       : run.state.nodes.filter((n) => n.id.startsWith("impl")).map((n) => n.id);
-    if (implIds.length === 0) implIds.push(
-      ...run.state.nodes.filter((n) => n.id.startsWith("impl")).map((n) => n.id),
-    );
+    if (implIds.length === 0)
+      implIds.push(...run.state.nodes.filter((n) => n.id.startsWith("impl")).map((n) => n.id));
     const ownersByGap = gaps.map((text) => ({ text, owners: ownersForGap(run, text, scope) }));
     const allOwners = new Set(ownersByGap.flatMap((g) => g.owners));
     if (allOwners.size === 0) {
-      run.fixRequeue = [...implIds];
-      run.feedback = gaps.map((t) => `- GAP: ${t.split("\n")[0]}\n  → fix this gap only; do not refactor unrelated code.`).join("\n");
-      run.state.feedbackByNode = {};
+      const blob = gaps
+        .map((t) => `- GAP: ${t.split("\n")[0]}\n  → fix this gap only; do not refactor unrelated code.`)
+        .join("\n");
+      if (scope) {
+        // Scoped fallback: every node in scope gets the full blob per-node —
+        // concurrent tickets must not share run.feedback. MERGE — replacing
+        // the map would wipe a concurrent ticket's entries.
+        run.state.feedbackByNode = {
+          ...(run.state.feedbackByNode ?? {}),
+          ...Object.fromEntries(implIds.map((id) => [id, blob])),
+        };
+      } else {
+        run.feedback = blob;
+        run.state.feedbackByNode = {};
+      }
       emit.event(run.id, sourceNode, {
         t: "notice",
         s: `fix round ${round + 1}: no gap matched a coder's files — requeueing all coders (${implIds.length})`,
       });
       emit.state(run);
-      return;
+      return { requeue: [...implIds] };
     }
-    run.fixRequeue = [...allOwners];
-    run.feedback = null;
+    run.feedback = scope ? run.feedback : null;
     const byNode = Object.fromEntries([...allOwners].map((id) => [id, []]));
     for (const { text, owners } of ownersByGap) {
       const targets = owners.length ? owners : [...allOwners]; // unowned → every requeued node
@@ -1263,14 +1290,17 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         );
       }
     }
-    run.state.feedbackByNode = Object.fromEntries(
-      Object.entries(byNode).map(([id, parts]) => [id, parts.join("\n")]),
-    );
+    // Merge, not replace — see the scoped-fallback note above.
+    run.state.feedbackByNode = {
+      ...(run.state.feedbackByNode ?? {}),
+      ...Object.fromEntries(Object.entries(byNode).map(([id, parts]) => [id, parts.join("\n")])),
+    };
     emit.event(run.id, sourceNode, {
       t: "notice",
       s: `fix round ${round + 1}: targeted — requeueing ${[...allOwners].join(", ")}`,
     });
     emit.state(run);
+    return { requeue: [...allOwners] };
   }
 
   // Deferred = a remote/human-tagged criterion that failed for environment
@@ -1289,7 +1319,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   // and per-ticket "verify-<capId>"): checks over summary verdicts, mechanical
   // failures gate regardless of the model's opinion, remote/human-tagged
   // environment-limited failures defer instead of gating.
-  function reconcileVerify(run, verifyArtifact) {
+  function reconcileVerify(run, verifyArtifact, sourceNode = "verify") {
     const failingChecks = (verifyArtifact?.checks ?? []).filter((c) => !c.pass);
     const mechFailing = (run.state.mechanicalChecks?.checks ?? []).filter((c) => c.status === "fail");
     // A red hosted CI run is driver-observed ground truth — gates like a
@@ -1309,7 +1339,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       if (envLimited) recordDeferred(run, c, env);
     }
     if (nonGating.length > 0) {
-      emit.event(run.id, "verify", {
+      emit.event(run.id, sourceNode, {
         t: "notice",
         s: `${nonGating.length} check(s) not verifiable from this environment — recorded, non-gating: ${nonGating.map((c) => String(c.criterion).slice(0, 60)).join("; ")}`,
       });
@@ -1317,7 +1347,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     let verdict = verifyArtifact?.verdict ?? "gaps-found";
     if (verdict === "accepted" && (gatingChecks.length > 0 || mechFailing.length > 0 || remoteFailing.length > 0)) {
       verdict = "gaps-found";
-      emit.event(run.id, "verify", {
+      emit.event(run.id, sourceNode, {
         t: "notice",
         s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)${mechFailing.length ? ` and ${mechFailing.length} mechanical check failure(s)` : ""}${remoteFailing.length ? " and a failed remote CI run" : ""}`,
       });
@@ -1325,58 +1355,112 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     return { verdict, gatingChecks, mechFailing, remoteFailing };
   }
 
-  // L-tier ticket pipeline: capabilities run as sequential tickets — coders,
-  // then the ticket's own verify gate, then scoped fix rounds — before the
-  // next ticket starts. Returns true when every ticket is verified; on
-  // failure, sets run.state.error with the reasons and returns false.
+  // L-tier ticket pipeline, WAVE-scheduled. A ticket is ADMITTED when its
+  // dependency tickets are all accepted AND its effective file set (planned ∪
+  // written) is disjoint from every in-flight ticket's. Admitted tickets share
+  // one graph — runDag packs their coder nodes into parallel lanes exactly as
+  // within a ticket (verify gates always serialize against each other) — and
+  // each ticket keeps its OWN verify gate, scoped fix-round feedback, and
+  // round budget. Small deeply-verified diffs, no artificial serialization of
+  // independent work. A ticket that exhausts its rounds fails the run with its
+  // reasons; resume re-admits it for another pass.
   async function runTickets(run) {
-    for (const ticket of run.tickets ?? []) {
+    const pending = [...(run.tickets ?? [])];
+    const byId = new Map(pending.map((t) => [t.id, t]));
+    const acceptedArtifact = (ticketId) => {
+      const t = byId.get(ticketId);
+      return t ? run.state.artifacts[t.verifyId]?.verdict === "accepted" : false;
+    };
+    const active = []; // tickets in flight (mixed fix-round states allowed)
+
+    const requeueTicketNodes = (ticket, ids) => {
+      const set = new Set([...(ids ?? []), ticket.verifyId]);
+      for (const n of run.state.nodes) {
+        if (set.has(n.id)) {
+          n.status = "queued";
+          n.startedAt = null;
+          n.endedAt = null;
+        }
+      }
+    };
+
+    while (pending.length > 0 || active.length > 0) {
       if (run.cancelRequested) throw new Error("cancelled");
-      if (nodeState(run, ticket.verifyId)?.status === "done") continue; // resume: accepted already
-      run.dynamicGraph = ticketGraph(ticket);
-      emit.event(run.id, "_run", {
-        t: "notice",
-        s: `ticket ${ticket.id} (${ticket.title}) — ${ticket.implIds.join(" ∥ ")} → ${ticket.verifyId}`,
-      });
-      let rec = null;
-      let ticketVerdict = null;
-      for (let round = 0; round <= run.maxFixRounds; round++) {
-        run.round = round;
-        if (round > 0) {
-          // Scoped targeted requeue: only this ticket's coder nodes.
-          const requeueSet = new Set((run.fixRequeue ?? []).filter((id) => ticket.implIds.includes(id)));
-          for (const n of run.state.nodes) {
-            if (requeueSet.has(n.id)) {
-              n.status = "queued";
-              n.startedAt = null;
-              n.endedAt = null;
-            }
+
+      // --- admission: deps accepted + files disjoint from the in-flight wave
+      const inFlightFiles = new Set();
+      for (const t of active) for (const f of ticketFiles(run, t)) inFlightFiles.add(f);
+      const admitted = [];
+      for (let i = 0; i < pending.length; i++) {
+        const t = pending[i];
+        if (!(t.dependsOn ?? []).every(acceptedArtifact)) continue;
+        const files = ticketFiles(run, t);
+        let conflicts = false;
+        for (const f of files) {
+          if (inFlightFiles.has(f)) {
+            conflicts = true;
+            break;
           }
-          if (nodeState(run, ticket.verifyId)) nodeState(run, ticket.verifyId).status = "queued";
-          emit.state(run);
         }
-        await runDag(run);
-        if (run.cancelRequested) throw new Error("cancelled");
-        rec = reconcileVerify(run, run.state.artifacts[ticket.verifyId]);
-        ticketVerdict = rec.verdict;
-        if (ticketVerdict === "accepted") {
-          emit.event(run.id, "_run", { t: "notice", s: `ticket ${ticket.id} verified — accepted` });
-          break;
+        if (conflicts) continue; // serialized by file overlap, not by policy
+        for (const f of files) inFlightFiles.add(f);
+        // Fresh pass: a resume (or an earlier wave) may have left this
+        // ticket's verify done-but-unaccepted — requeue its nodes.
+        if (nodeState(run, t.verifyId)?.status === "done") requeueTicketNodes(t, t.implIds);
+        t.round = 0;
+        t.requeue = null;
+        active.push(t);
+        pending.splice(i, 1);
+        i--;
+        admitted.push(t);
+        emit.event(run.id, "_run", {
+          t: "notice",
+          s: `ticket ${t.id} (${t.title}) — ${t.implIds.join(" ∥ ")} → ${t.verifyId}`,
+        });
+      }
+      if (admitted.length > 1) {
+        emit.event(run.id, "_run", {
+          t: "notice",
+          s: `wave: ${admitted.length} independent tickets admitted in parallel (${admitted.map((t) => t.id).join(" + ")}) — deps ok, files disjoint`,
+        });
+      }
+      if (active.length === 0) {
+        // Unreachable with topo order + fail-fast; guard loudly anyway.
+        throw new Error(`ticket scheduler stalled: ${pending.map((t) => t.id).join(", ")} blocked`);
+      }
+
+      // --- one shared graph for the whole wave; a single runDag pass
+      // (parallel lanes inside; no double-scheduling).
+      run.dynamicGraph = active.flatMap((t) => ticketGraph(t));
+      await runDag(run);
+      if (run.cancelRequested) throw new Error("cancelled");
+
+      // --- reconcile every active ticket whose verify gate completed
+      for (const t of [...active]) {
+        if (nodeState(run, t.verifyId)?.status !== "done") continue;
+        const rec = reconcileVerify(run, run.state.artifacts[t.verifyId], t.verifyId);
+        if (rec.verdict === "accepted") {
+          active.splice(active.indexOf(t), 1);
+          emit.event(run.id, "_run", { t: "notice", s: `ticket ${t.id} verified — accepted` });
+          continue;
         }
-        if (round < run.maxFixRounds) {
+        if (t.round < run.maxFixRounds) {
           const gaps = [
             ...rec.gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
             ...rec.mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
             ...rec.remoteFailing.map((c) => `[remote-ci] ${c.criterion}: ${c.evidence}`),
           ];
-          planFixRound(run, gaps, ticket.verifyId, round, ticket.implIds);
-          emit.event(run.id, ticket.verifyId, {
+          const { requeue } = planFixRound(run, gaps, t.verifyId, t.round, t.implIds);
+          t.requeue = requeue;
+          t.round += 1;
+          requeueTicketNodes(t, requeue);
+          emit.event(run.id, t.verifyId, {
             t: "notice",
-            s: `ticket ${ticket.id}: gaps-found — fix round ${round + 1}`,
+            s: `ticket ${t.id}: gaps-found — fix round ${t.round}`,
           });
+          continue;
         }
-      }
-      if (ticketVerdict !== "accepted") {
+        // Rounds exhausted — fail the run with this ticket's reasons.
         const reasons = [];
         if (rec?.gatingChecks?.length) {
           reasons.push(
@@ -1387,11 +1471,13 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           reasons.push(`checks: ${rec.mechFailing.length} mechanical failure(s) — ${rec.mechFailing.map((c) => c.id).slice(0, 3).join(" | ")}`);
         }
         run.state.error =
-          `ticket ${ticket.id} (${ticket.title}) failed verification after ${run.maxFixRounds} fix round(s)` +
+          `ticket ${t.id} (${t.title}) failed verification after ${run.maxFixRounds} fix round(s)` +
           (reasons.length ? `: ${reasons.join(" ;; ")}` : "") +
           " — resume the run to retry this ticket".slice(0, 600);
         return false;
       }
+      emit.state(run);
+      // loop: admission may now unblock dependents; fix-round tickets re-run
     }
     run.dynamicGraph = finalGraph(run);
     emit.event(run.id, "_run", {
@@ -1478,7 +1564,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
             ),
           ];
           if (round < run.maxFixRounds) {
-            planFixRound(run, gaps, "verify", round);
+            const { requeue } = planFixRound(run, gaps, "verify", round);
+            run.fixRequeue = requeue;
             emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1}` });
           } else {
             run.feedback = gaps.map((t) => `- GAP: ${t.split("\n")[0]}`).join("\n");

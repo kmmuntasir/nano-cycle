@@ -72,3 +72,10 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 - [x] fix: gh ran in the server's cwd, not the project's (caught by unit test)
 - [x] Live e2e on private GitHub test repo (glm-5.3-flash): round 0 CI red → targeted fix round → coder fixed root cause from failed-log excerpt → round 1 CI green → accepted → ff-merged. 8/8 assertions + 2 prompt unit checks
 - [ ] Worktree isolation for parallel coders — the only remaining deferred item (hot-file serialization is the mitigation)
+
+## 12. Ticket wave scheduler (2026-09-16)
+- [x] runTickets rewritten as a wave scheduler: a ticket is admitted when deps are accepted AND its file set is disjoint from in-flight tickets; admitted tickets share one graph (single runDag — no double-scheduling), each keeps its own verify gate + scoped fix rounds + round budget
+- [x] planFixRound returns the requeue list (per-ticket storage); scoped fallback distributes the blob per-node; feedbackByNode MERGES (concurrent tickets never leak feedback)
+- [x] Verify-shaped nodes always serialize against each other in lane packing (parallel verifies would race compose/test runs in one tree)
+- [x] reconcileVerify notices carry the source verify node id
+- [x] Live wave test (isolated server on :4199): 2 independent tickets ran concurrently (overlapping windows), verify gates serialized into one lane, dependent ticket started after both dep verifies, all gates + final verify accepted — 5/5 assertions

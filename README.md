@@ -61,14 +61,17 @@ M     plan → implement-be ∥ implement-fe → verify              (one slice,
 L     plan → ticket₁(coders → verify) → ticket₂(…) → final verify   (ticket pipeline)
 ```
 
-**L is ticket-shaped.** The plan decomposes the task into 2–6 *capabilities*; the
-engine compiles them into **tickets** that run sequentially in dependency order —
-each ticket's coder nodes (backend/frontend lanes pack by file overlap), then the
-ticket's own verify gate (`verify-<capId>`, scoped to that capability's files),
-then scoped fix rounds — before the next ticket starts. A final cross-ticket
-verify (+ audit) sweeps the whole tree at the end. Small, deeply-verified diffs
-beat wide, shallowly-verified ones; a failing ticket fails the run with its
-reasons and is resumable.
+**L is ticket-shaped, wave-scheduled.** The plan decomposes the task into 2–6
+*capabilities*; the engine compiles them into **tickets**. A ticket is admitted
+when its dependency tickets are all **accepted** AND its effective file set
+(planned ∪ written) is **disjoint** from every in-flight ticket's — so
+independent, non-overlapping tickets run in parallel waves, each ticket keeping
+its own verify gate (`verify-<capId>`, scoped to that capability's files) and
+scoped fix rounds. Verify gates always serialize against each other (parallel
+verifies would race compose stacks and test runs in the one tree). A final
+cross-ticket verify (+ audit) sweeps the whole tree at the end. Small,
+deeply-verified diffs without artificial serialization; a failing ticket fails
+the run with its reasons and is resumable.
 
 The **counterpart rule is a compiler check**: a capability with only one side must
 declare why it legally has no counterpart (`plumbing` / `devops` / `qa` /
