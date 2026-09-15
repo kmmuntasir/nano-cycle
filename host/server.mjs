@@ -31,6 +31,22 @@ const MIME = {
 console.log("[nano-cycle] initializing ModelRuntime…");
 const modelRuntime = await ModelRuntime.create();
 
+// Per-model thinking levels for the GUI's level dropdown. pi-ai is a
+// transitive dependency (not re-exported by pi-coding-agent); a direct
+// file-URL import bypasses the package exports map. Missing → levels simply
+// stay absent from /api/models.
+let supportedThinkingLevels = null;
+try {
+  const { pathToFileURL } = await import("node:url");
+  const piAiPath = path.join(
+    ROOT_DIR,
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js",
+  );
+  supportedThinkingLevels = (await import(pathToFileURL(piAiPath).href)).getSupportedThinkingLevels ?? null;
+} catch {
+  supportedThinkingLevels = null;
+}
+
 // Optional research capabilities for clarify/plan nodes.
 const searxngUrl = process.env.NANO_SEARXNG_URL;
 const webCaps = detectWebCapabilities(searxngUrl);
@@ -125,6 +141,7 @@ const server = http.createServer(async (req, res) => {
         provider: m.provider,
         id: m.id,
         label: `${m.provider}/${m.id}`,
+        ...(supportedThinkingLevels ? { thinkingLevels: supportedThinkingLevels(m) } : {}),
       }));
       return json(res, 200, models);
     }

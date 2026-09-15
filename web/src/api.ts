@@ -103,6 +103,8 @@ export interface ModelInfo {
   provider: string;
   id: string;
   label: string;
+  /** Thinking levels this model supports (e.g. ["low","high","max"]); absent when unknown. */
+  thinkingLevels?: string[];
 }
 
 export interface Project {

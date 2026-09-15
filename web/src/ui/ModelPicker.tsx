@@ -2,7 +2,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Input, Text } from "@chakra-ui/react";
 import type { ModelInfo } from "../api";
 
-/** Searchable model dropdown — native <select> can't filter a long model list. */
+const KNOWN_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Split "provider/model:level" into base + level (null when no valid suffix). */
+function splitSpec(value: string): { base: string; level: string | null } {
+  if (!value || value === "auto") return { base: value || "auto", level: null };
+  const idx = value.lastIndexOf(":");
+  if (idx > value.lastIndexOf("/") && idx > 0) {
+    const maybe = value.slice(idx + 1).toLowerCase();
+    if (KNOWN_LEVELS.includes(maybe)) return { base: value.slice(0, idx), level: maybe };
+  }
+  return { base: value, level: null };
+}
+
+/** Searchable model dropdown — native <select> can't filter a long model list.
+ *  When the selected model reports supported thinking levels, a second compact
+ *  dropdown beside it sets the ":level" suffix (empty = node/session default). */
 export default function ModelPicker({
   value,
   models,
@@ -42,40 +57,78 @@ export default function ModelPicker({
     return models.filter((m) => m.label.toLowerCase().includes(needle));
   }, [models, q]);
 
-  const display = !value || value === "auto" ? "Auto (Provider Default)" : value;
+  const { base, level } = splitSpec(value);
+  const selected = useMemo(() => models.find((m) => m.label === base) ?? null, [models, base]);
+  const levels = selected?.thinkingLevels?.length ? selected.thinkingLevels : null;
+
+  const display = !value || value === "auto" ? "Auto (Provider Default)" : base;
 
   const pick = (v: string) => {
-    onChange(v);
+    // Keep the current thinking level only if the newly picked model supports it.
+    const next = models.find((m) => m.label === v) ?? null;
+    const kept = level && next?.thinkingLevels?.includes(level) ? `${v}:${level}` : v;
+    onChange(kept);
     setOpen(false);
     setQ("");
   };
 
+  const levelStyle: React.CSSProperties = {
+    fontSize: compact ? "10px" : "11px",
+    background: "#1b1f2b",
+    color: "#e4e4e7",
+    border: "1px solid #3a4152",
+    borderRadius: "6px",
+    padding: compact ? "1px 2px" : "4px 6px",
+    fontFamily: "system-ui, sans-serif",
+    cursor: "pointer",
+    flexShrink: 0,
+  };
+
   return (
     <Box ref={boxRef} position="relative" w="100%">
-      <Box
-        as="button"
-        w="100%"
-        textAlign="left"
-        fontSize={compact ? "10px" : "12px"}
-        fontFamily="system-ui, sans-serif"
-        bg="surface2"
-        color="ink"
-        border="1px solid"
-        borderColor={open ? "#7aa2f7" : "#3a4152"}
-        borderRadius="6px"
-        px={2}
-        py={compact ? "2px" : "6px"}
-        overflow="hidden"
-        textOverflow="ellipsis"
-        whiteSpace="nowrap"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-        aria-label={ariaLabel ?? "model picker"}
-        title={display}
-      >
-        {display} <Text as="span" color="muted">▾</Text>
+      <Box display="flex" gap={1} alignItems="stretch">
+        <Box
+          as="button"
+          flex="1"
+          minW={0}
+          textAlign="left"
+          fontSize={compact ? "10px" : "12px"}
+          fontFamily="system-ui, sans-serif"
+          bg="surface2"
+          color="ink"
+          border="1px solid"
+          borderColor={open ? "#7aa2f7" : "#3a4152"}
+          borderRadius="6px"
+          px={2}
+          py={compact ? "2px" : "6px"}
+          overflow="hidden"
+          textOverflow="ellipsis"
+          whiteSpace="nowrap"
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpen((v) => !v);
+          }}
+          aria-label={ariaLabel ?? "model picker"}
+          title={value === base ? display : value}
+        >
+          {display} <Text as="span" color="muted">▾</Text>
+        </Box>
+        {levels && (
+          <select
+            aria-label={`${ariaLabel ?? "model picker"} thinking level`}
+            style={levelStyle}
+            value={level ?? ""}
+            onChange={(e) => onChange(e.target.value ? `${base}:${e.target.value}` : base)}
+            title={`Thinking level (supported by ${base}) — "(default)" uses the node's configured level`}
+          >
+            <option value="">(default)</option>
+            {levels.map((l) => (
+              <option key={l} value={l}>
+                {l}
+              </option>
+            ))}
+          </select>
+        )}
       </Box>
       {open && (
         <Box
@@ -113,7 +166,7 @@ export default function ModelPicker({
               onClick={() => pick("auto")}
             />
             {filtered.map((m) => (
-              <PickerRow key={m.label} label={m.label} active={value === m.label} onClick={() => pick(m.label)} />
+              <PickerRow key={m.label} label={m.label} active={base === m.label} onClick={() => pick(m.label)} />
             ))}
             {filtered.length === 0 && (
               <Text fontSize="11px" color="muted" px={3} py={2} fontFamily="system-ui, sans-serif">
