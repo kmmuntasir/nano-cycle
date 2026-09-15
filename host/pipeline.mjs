@@ -921,7 +921,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
             s: `${nonGating.length} check(s) not verifiable from this environment — recorded, non-gating: ${nonGating.map((c) => String(c.criterion).slice(0, 60)).join("; ")}`,
           });
         }
-        let verdict = verifyArtifact?.verdict ?? "gaps-found";
+        verdict = verifyArtifact?.verdict ?? "gaps-found";
         if (verdict === "accepted" && gatingChecks.length > 0) {
           verdict = "gaps-found";
           emit.event(run.id, "verify", {
@@ -1249,7 +1249,24 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         return { ok: false, error: "run is still winding down — try again in a moment" };
       }
       if (!run.state.nodes.some((n) => n.status === "queued" || n.status === "cancelled" || n.status === "failed")) {
-        return { ok: false, error: "nothing to resume — every node already finished" };
+        // All nodes finished but the run failed → the GATES are what failed
+        // (fix rounds exhausted). Resume = requeue the build for another
+        // gates pass: coders + verify + audit; clarify/plan/artifacts stand.
+        if (run.state.status !== "failed") {
+          return { ok: false, error: "nothing to resume — every node already finished" };
+        }
+        for (const n of run.state.nodes) {
+          if (n.id !== "plan" && n.id !== "clarify" && (n.id.startsWith("impl") || n.id === "verify" || n.id === "audit")) {
+            n.status = "queued";
+            n.error = null;
+            n.startedAt = null;
+            n.endedAt = null;
+          }
+        }
+        emit.event(run.id, "_run", {
+          t: "notice",
+          s: "resume: all nodes had finished — requeued coders + verify + audit for another gates pass (plan/spec/artifacts kept)",
+        });
       }
       // Requeue whatever never finished; done nodes keep status + artifacts.
       let requeued = 0;
