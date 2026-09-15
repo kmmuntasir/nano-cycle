@@ -58,6 +58,7 @@ export default function App() {
   const [useGit, setUseGit] = useState(true);
   const [useAudit, setUseAudit] = useState(true);
   const [approvePlan, setApprovePlan] = useState(true);
+  const [remoteChecks, setRemoteChecks] = useState(false);
   const [maxFixRounds, setMaxFixRounds] = useState(2);
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [starting, setStarting] = useState(false);
@@ -135,7 +136,7 @@ export default function App() {
   const start = async () => {
     setStarting(true);
     try {
-      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds, git: useGit, audit: useAudit, approvePlan });
+      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds, git: useGit, audit: useAudit, approvePlan, remoteChecks: remoteChecks && useGit });
       setShowNew(false);
       setTask("");
       await loadRun(s.id);
@@ -233,6 +234,8 @@ export default function App() {
       setAudit={setUseAudit}
       approvePlan={approvePlan}
       setApprovePlan={setApprovePlan}
+      remoteChecks={remoteChecks}
+      setRemoteChecks={setRemoteChecks}
       starting={starting}
       onStart={start}
       project={project}

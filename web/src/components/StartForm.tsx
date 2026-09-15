@@ -32,6 +32,8 @@ export default function StartForm({
   setAudit,
   approvePlan,
   setApprovePlan,
+  remoteChecks,
+  setRemoteChecks,
   starting,
   onStart,
   project,
@@ -57,6 +59,8 @@ export default function StartForm({
   setAudit: (v: boolean) => void;
   approvePlan: boolean;
   setApprovePlan: (v: boolean) => void;
+  remoteChecks: boolean;
+  setRemoteChecks: (v: boolean) => void;
   starting: boolean;
   onStart: () => void;
   project: string;
@@ -172,6 +176,18 @@ export default function StartForm({
               onClick={() => setApprovePlan(!approvePlan)}
             >
               {approvePlan ? "✓ Plan Approval" : "Plan Approval Off"}
+            </OutlineButton>
+            <OutlineButton
+              active={remoteChecks && git}
+              disabled={!gitAvailable || !git}
+              title={
+                gitAvailable && git
+                  ? "Before the final verify: push the run branch to origin and watch the hosted GitHub Actions runs it triggers — red CI gates the run. Requires gh authenticated."
+                  : "Requires Git enabled."
+              }
+              onClick={() => setRemoteChecks(!remoteChecks)}
+            >
+              {remoteChecks && git ? "✓ Remote CI" : "Remote CI Off"}
             </OutlineButton>
             <Flex alignItems="center" gap={1}>
               <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">Fix Rounds:</Text>

@@ -62,3 +62,13 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 - [x] Live L run verified end-to-end (20260916-005034498, 3 tickets, all gates green, 17/17 assertions)
 - [ ] Mechanical remote CI verification (push + gh run watch) — still deferred, needs a configured remote
 - [ ] Worktree isolation for parallel coders — still deferred (hot-file serialization is the mitigation)
+
+## 11. Remote CI verification (final deferred item, 2026-09-16)
+- [x] Start-of-run toggle "Remote CI" (opt-in, requires Git; GUI + server + start plumbing)
+- [x] host/ci.mjs: gh capability probe (binary + auth + repo access, cwd-correct) + watchRunsForSha (push → settle → list → poll to completion, 20-min cap, failed-log excerpts)
+- [x] git.mjs: hasRemote / pushBranch / headSha
+- [x] runRemoteCiGate before the FINAL verify only; results in state.remoteChecks; red CI gates like a mechanical failure; re-push each fix round re-validates
+- [x] Remote policy injected into verify/audit prompts — enabled (cite observations) / degraded (skip recorded) / disabled (agents instructed NOT to reason about hosted CI; remote-tagged criteria defer)
+- [x] fix: gh ran in the server's cwd, not the project's (caught by unit test)
+- [x] Live e2e on private GitHub test repo (glm-5.3-flash): round 0 CI red → targeted fix round → coder fixed root cause from failed-log excerpt → round 1 CI green → accepted → ff-merged. 8/8 assertions + 2 prompt unit checks
+- [ ] Worktree isolation for parallel coders — the only remaining deferred item (hot-file serialization is the mitigation)

@@ -54,6 +54,13 @@ export interface RunState {
   writtenFiles?: Record<string, string[]>;
   deferredChecks?: { criterion: string; env: string; evidence?: string }[];
   tickets?: { id: string; title: string; implIds: string[]; verifyId: string }[];
+  remoteChecks?: {
+    round: number;
+    at: string;
+    status: "pass" | "fail" | "skipped";
+    evidence: string;
+    runs: { id: number; name: string; status: string; conclusion: string | null; url: string; log: string | null }[];
+  } | null;
   mechanicalChecks?: {
     round: number;
     at: string;
@@ -135,7 +142,7 @@ export const api = {
     tier: string,
     project: string,
     models: Record<string, string>,
-    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean; approvePlan?: boolean },
+    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean; approvePlan?: boolean; remoteChecks?: boolean },
   ) =>
     jfetch<RunState>("/api/runs", {
       method: "POST",

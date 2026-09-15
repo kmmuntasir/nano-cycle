@@ -62,6 +62,25 @@ export async function commit(cwd, message) {
   return (await git(cwd, ["rev-parse", "--short", "HEAD"])).trim();
 }
 
+/** True when the repo has an `origin` remote configured. */
+export async function hasRemote(cwd) {
+  try {
+    return (await git(cwd, ["remote", "get-url", "origin"])).trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Push a branch with upstream tracking. Used ONLY for owner-opted remote CI verification. */
+export async function pushBranch(cwd, branch) {
+  await git(cwd, ["push", "-u", "origin", branch]);
+}
+
+/** Full HEAD sha (for SHA-scoped `gh run list`). */
+export async function headSha(cwd) {
+  return (await git(cwd, ["rev-parse", "HEAD"])).trim();
+}
+
 export async function ffMerge(cwd, branch) {
   await git(cwd, ["merge", "--ff-only", branch]);
 }

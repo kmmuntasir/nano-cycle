@@ -369,8 +369,13 @@ Output contract: call the report_artifact tool EXACTLY ONCE with the verdict.
 - "gaps-found" with the blocking findings enumerated (each with file, issue, and fix).`;
 }
 
-export function auditPrompt({ task, workspace, spec, plan, implementReports, verifyArtifact, sourceDocText, mechanicalResults }) {
+export function auditPrompt({ task, workspace, spec, plan, implementReports, verifyArtifact, sourceDocText, mechanicalResults, remoteResults }) {
   const parts = [`Task: ${task}`, `Workspace: ${workspace}`];
+  if (remoteResults) {
+    parts.push(
+      `DRIVER-OBSERVED REMOTE CI RESULTS (informational — already gated upstream by the driver):\nStatus: ${String(remoteResults.status).toUpperCase()} — ${String(remoteResults.evidence).slice(0, 600)}`,
+    );
+  }
   if (sourceDocText) {
     parts.push(
       `SOURCE REQUIREMENT DOCUMENT — the ultimate authority; build the traceability check against it first (every requirement must be met by the implementation; spec deviations from it are findings):
@@ -403,8 +408,9 @@ ${sourceDocText}`,
   return parts.join("\n\n");
 }
 
-export function verifyPrompt({ task, plan, implementReports, workspace, spec, sourceDocText, acVerification, mechanicalResults, ticketScope }) {
+export function verifyPrompt({ task, plan, implementReports, workspace, spec, sourceDocText, acVerification, mechanicalResults, ticketScope, remotePolicy, remoteResults }) {
   const parts = [`Task: ${task}`, `Workspace: ${workspace}`];
+  if (remotePolicy) parts.push(`REMOTE CI POLICY: ${remotePolicy}`);
   if (ticketScope) {
     parts.push(
       `TICKET-SCOPED VERIFICATION — you are verifying ONE capability ("${ticketScope.id}" · ${ticketScope.title}) of a larger plan, BEFORE later capabilities are built.\nScope — the only files this ticket owns:\n${ticketScope.files.map((f) => `- ${f}`).join("\n")}\nVerify the spec's acceptance criteria, the plan's criteria, and the driver checks AS THEY APPLY TO THESE FILES AND WHAT THEY DELIVER. Other capabilities' files may not exist yet — that is EXPECTED; do not fail their absence. Cross-capability integration is the final full-tree verify's job, after all tickets.`,
@@ -438,6 +444,14 @@ ${sourceDocText}`,
       `DRIVER-OBSERVED MECHANICAL CHECK RESULTS (deterministic — treat as ground truth; you cannot argue these away):\n${mechanicalResults
         .map((c) => `- ${c.id}: ${String(c.status).toUpperCase()} — ${c.evidence}`)
         .join("\n")}\nFor every FAIL above, include a failing check whose criterion names the invariant and whose evidence cites this driver result. Do NOT mark a driver-failed check passing on your own reasoning. SKIPPED checks carry no signal — verify those manually if a criterion depends on them.`,
+    );
+  }
+  if (remoteResults) {
+    const runs = (remoteResults.runs ?? [])
+      .map((r) => `- ${r.name} (${r.url}) → ${r.status === "completed" ? r.conclusion : `${r.status} (watch capped)`}${r.log ? `\n  failed-log excerpt: ${String(r.log).slice(0, 800)}` : ""}`)
+      .join("\n");
+    parts.push(
+      `DRIVER-OBSERVED REMOTE CI RESULTS (deterministic — the driver pushed the branch and watched the hosted runs; treat as ground truth):\nStatus: ${String(remoteResults.status).toUpperCase()} — ${remoteResults.evidence}${runs ? `\nRuns:\n${runs}` : ""}\nA FAIL here gates the run regardless of your verdict — include it as a failing check citing this result. A PASS evidences "CI runs and is green" criteria directly.`,
     );
   }
   if (plan) parts.push(`Plan (JSON):\n${JSON.stringify(plan, null, 2)}`);

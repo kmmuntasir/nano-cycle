@@ -114,3 +114,18 @@ plan → ticket₁ (coders → verify-<cap₁>) → ticket₂ (…) → … → 
 **Live verification** (`runs/20260916-005034498`, 3 capabilities, free-tier models, plan-approval gate exercised): tickets ran strictly sequentially (ticket 2's coder started 1 ms after ticket 1's verify ended), all three ticket gates accepted (5/7/5 checks) with scoped prompts and no foreign implementer reports, final cross-ticket verify accepted, deliverable complete (`pages/about.html`, `pages/contact.html`, `assets/style.css`, matched `locales/`). 17/17 assertions PASS. An earlier aborted attempt (`20260916-004818999`) is kept on disk as the bug's evidence.
 
 **Still deferred:** mechanical remote CI verification (push + `gh run watch` — needs a configured git remote on the target project) and worktree isolation for parallel coders (hot-file serialization remains the mitigation).
+
+
+## 7. Remote CI verification (2026-09-16, third commit) — the last actionable deferred item
+
+Owner-opted via the **Remote CI** start toggle (default **off**; requires **Git** enabled — pushing to `origin` is exactly what the toggle authorizes):
+
+- **`host/ci.mjs`** (new): one-time capability probe (gh binary + auth + repo access **from the project directory** — an early bug ran gh in the server's cwd and was caught by a unit test) and `watchRunsForSha`: settle ~10 s → `gh run list --commit <sha>` → poll each run to completion (20-min cap, `NANO_CI_TIMEOUT_MS`) → conclusions, run URLs, and `--log-failed` excerpts.
+- **`host/git.mjs`**: `hasRemote` / `pushBranch` / `headSha`.
+- **Pipeline**: `runRemoteCiGate` fires before the **final** verify only (after all coders/tickets, so each push carries complete committed work — per-ticket pushes remain future work). Red CI gates exactly like a mechanical failure (`remoteFailing` in `reconcileVerify`, in the verdict override, in fix-round gaps with an explicit "the failed-log excerpt names the cause — fix it, including files OUTSIDE your original assignment" hint, and in failure reasons). Each fix round re-pushes and re-watches — CI validates the fix, the reference's takeover pattern made deterministic. Skips (no gh / no origin / push failure / no runs triggered) are recorded, never gate.
+- **Agent instruction (the unchecked case)**: verify/audit prompts now carry a REMOTE CI POLICY block — *enabled* (cite the driver's observations), *degraded* (attempted, skip recorded), or *disabled* ("Do NOT attempt to reason about hosted CI behavior… record with evidence `not verifiable from this environment: remote CI verification disabled for this run`") so remote-tagged criteria defer cleanly instead of burning rounds.
+- **GUI**: "Remote CI" toggle in the Plan row (disabled without Git), `state.remoteChecks` in the Artifacts tab, wire types.
+
+**Live e2e** on a private GitHub test repo (`kmmuntasir/nano-cycle-ci-e2e`, created for this purpose) with a seeded failing CI check and `glm-5.3-flash` (fresh zai quota): round 0 push → CI **red** → verify failed → **targeted** fix round → the coder's commit *"fix: add docs/ready.md readiness marker so scripts/check.js passes"* (root cause read straight from the failed-log excerpt, file outside its original assignment) → re-push → CI **green** → verify accepted (4 checks) → run branch **ff-merged**. 8/8 assertions + 2 policy-prompt unit checks. An earlier honest-failure run (`20260916-011751004`) is kept on disk — it failed only because the test task text forbade the fix.
+
+**Remaining deferred:** worktree isolation for parallel coders only (hot-file serialization remains the mitigation). The test repo is private and disposable — delete at will.

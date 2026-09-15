@@ -184,6 +184,7 @@ const server = http.createServer(async (req, res) => {
         git: body.git === true && project.path !== SANDBOX_DIR,
         audit: body.audit !== false,
         approvePlan: body.approvePlan !== false,
+        remoteChecks: body.remoteChecks === true,
       });
       return json(res, 201, state);
     }

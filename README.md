@@ -113,6 +113,22 @@ gate. Results land in the verify prompt as ground truth, in `state.mechanicalChe
 `NANO_CHECKS=off` (or a comma list of ids); pin the gitleaks image with
 `NANO_GITLEAKS_IMAGE`.
 
+## Remote CI verification (opt-in)
+
+The **Remote CI** start toggle (requires **Git** enabled) answers the
+"CI blocks merge on GitHub" class of criteria mechanically: before the final
+verify, the driver pushes the run branch to `origin` and watches the hosted
+GitHub Actions runs it triggers (`gh`, capped at `NANO_CI_TIMEOUT_MS`, default
+20 min). Green runs evidence "CI is green" criteria directly; a red run gates
+the fix loop with its failed-log excerpt — the next round's coders fix what CI
+actually reported, and the re-push re-validates. Results (run URLs,
+conclusions, logs) land in `state.remoteChecks`, the verify prompt, and the
+GUI's Artifacts tab.
+
+Unchecked — or Git off, or `gh`/origin unavailable (recorded skip) — the
+verifier is explicitly instructed NOT to reason about hosted CI: remote-tagged
+criteria are recorded as deferred, never gate, and never burn fix rounds.
+
 ## Targeted fix rounds
 
 A rejected round maps each failing check / blocking finding to the coder node(s)

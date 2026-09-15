@@ -26,6 +26,9 @@ export default function Workbench({ state }: { state: RunState }) {
     if (state.mechanicalChecks?.checks?.length) {
       out.push({ name: "checks:mechanical", kind: "artifact", content: pretty(state.mechanicalChecks), group: "Verify" });
     }
+    if (state.remoteChecks) {
+      out.push({ name: "checks:remote-ci", kind: "artifact", content: pretty(state.remoteChecks), group: "Verify" });
+    }
     if (state.deferredChecks?.length) {
       out.push({ name: "checks:deferred", kind: "artifact", content: pretty(state.deferredChecks), group: "Spec" });
     }

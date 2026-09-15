@@ -32,6 +32,7 @@ import {
 } from "./prompts.mjs";
 import { runNode, makeTool, addUsage } from "./runner.mjs";
 import { runMechanicalChecks } from "./checks.mjs";
+import { detectCiCapability, watchRunsForSha } from "./ci.mjs";
 import * as git from "./git.mjs";
 import { killRunProcesses } from "./prockill.mjs";
 import { loadRun as loadRunFromDisk } from "./state.mjs";
@@ -914,7 +915,25 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       verifyArtifact: run.state.artifacts.verify,
       sourceDocText: sourceDocsFor(run, emit),
       mechanicalResults: run.state.mechanicalChecks?.checks ?? null,
+      remoteResults: run.state.remoteChecks,
     });
+  }
+
+  // The verify/audit prompts must KNOW the owner's remote-CI policy: enabled
+  // (cite the driver's observations), degraded (skip recorded), or disabled
+  // (do not even reason about hosted CI — record and defer).
+  function remoteCiPolicy(run) {
+    if (!run.remoteCi) {
+      return "REMOTE CI VERIFICATION IS DISABLED for this run (owner opt-out). Do NOT attempt to reason about hosted CI behavior. For remote-tagged criteria, record the check with evidence beginning \"not verifiable from this environment: remote CI verification disabled for this run\" — the driver defers those instead of gating on them.";
+    }
+    const rc = run.state.remoteChecks;
+    if (!rc) {
+      return "Remote CI verification is enabled: the driver pushes the run branch and watches the hosted Actions runs before the final verify — cite the DRIVER-OBSERVED REMOTE CI RESULTS block whenever it is present.";
+    }
+    if (rc.status === "skipped") {
+      return `Remote CI verification was attempted but skipped: ${String(rc.evidence).slice(0, 300)} — treat hosted-CI criteria as deferred unless the results block shows an observation.`;
+    }
+    return "Remote CI verification is enabled and observed by the driver — hosted-CI criteria (runs executing and passing) are evidenced by the DRIVER-OBSERVED REMOTE CI RESULTS block; branch-protection SETTINGS remain remote.";
   }
 
   function promptFor(run, n) {
@@ -928,6 +947,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         sourceDocText: sourceDocsFor(run, emit),
         acVerification: run.spec?.ac_verification ?? null,
         mechanicalResults: run.state.mechanicalChecks?.checks ?? null,
+        remotePolicy: remoteCiPolicy(run),
+        remoteResults: run.state.remoteChecks,
       };
       // Per-ticket verify: scope reports + expectations to ONE capability.
       const ticket = (run.tickets ?? []).find((t) => t.verifyId === n.id);
@@ -1036,6 +1057,65 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
     emit.state(run);
   }
 
+  // Owner-opted remote CI verification: push the run branch and watch the
+  // hosted GitHub Actions runs it triggers. Runs-of-record land in
+  // state.remoteChecks and gate exactly like a mechanical check — a red hosted
+  // CI run is ground truth no model verdict can overrule. Capability (gh +
+  // auth + origin) is probed once per run; any gap degrades to a recorded skip.
+  async function runRemoteCiGate(run) {
+    if (!run.remoteCi) return;
+    if (run.ciCapability === undefined) {
+      run.ciCapability = await detectCiCapability(run.projectPath);
+      if (!run.ciCapability.ok) {
+        run.state.remoteChecks = {
+          round: run.round ?? 0,
+          at: new Date().toISOString(),
+          status: "skipped",
+          evidence: `remote CI unavailable: ${run.ciCapability.reason}`,
+          runs: [],
+        };
+        emit.event(run.id, "_run", {
+          t: "notice",
+          s: `remote CI: skipped — ${run.ciCapability.reason} (owner opted in; degrading to recorded skip)`,
+        });
+        emit.state(run);
+        return;
+      }
+      emit.event(run.id, "_run", { t: "notice", s: "remote CI: gh + origin verified" });
+    }
+    if (!run.ciCapability.ok) return;
+    try {
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `remote CI: pushing ${run.git.runBranch} to origin (owner opted in — this triggers hosted CI)`,
+      });
+      await git.pushBranch(run.projectPath, run.git.runBranch);
+    } catch (e) {
+      run.state.remoteChecks = {
+        round: run.round ?? 0,
+        at: new Date().toISOString(),
+        status: "skipped",
+        evidence: `push failed: ${String(e?.message ?? e).slice(0, 300)}`,
+        runs: [],
+      };
+      emit.event(run.id, "_run", { t: "notice", s: `remote CI: push failed — recorded skip (${String(e?.message ?? e).slice(0, 160)})` });
+      emit.state(run);
+      return;
+    }
+    const sha = await git.headSha(run.projectPath);
+    const result = await watchRunsForSha({
+      cwd: run.projectPath,
+      sha,
+      emit: (ev) => emit.event(run.id, "_run", ev),
+    });
+    run.state.remoteChecks = { round: run.round ?? 0, at: new Date().toISOString(), ...result };
+    emit.event(run.id, "_run", {
+      t: "notice",
+      s: `remote CI: ${result.status}${result.status !== "pass" ? `: ${String(result.evidence).slice(0, 300)}` : ` — ${String(result.evidence).slice(0, 220)}`}`,
+    });
+    emit.state(run);
+  }
+
   async function runDag(run) {
     const done = (id) => nodeState(run, id)?.status === "done";
     while (!run.cancelRequested) {
@@ -1053,7 +1133,11 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       if (ready.length === 0) break;
 
       // Ground truth first: the verify prompt carries the driver's own checks.
-      // (Also fires for per-ticket "verify-<capId>" nodes.)
+      // Remote CI (when opted in) runs only for the FINAL verify — after all
+      // coders/tickets, so each push carries complete, committed work.
+      // (Per-ticket "verify-<capId>" nodes get the local mechanical checks only.)
+      if (ready.some((n) => n.id === "verify")) await runRemoteCiGate(run);
+      if (run.cancelRequested) break;
       if (ready.some((n) => n.id.startsWith("verify"))) await runMechanicalGate(run);
       if (run.cancelRequested) break;
 
@@ -1208,6 +1292,12 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   function reconcileVerify(run, verifyArtifact) {
     const failingChecks = (verifyArtifact?.checks ?? []).filter((c) => !c.pass);
     const mechFailing = (run.state.mechanicalChecks?.checks ?? []).filter((c) => c.status === "fail");
+    // A red hosted CI run is driver-observed ground truth — gates like a
+    // mechanical failure. Skips never gate.
+    const remoteFailing =
+      run.state.remoteChecks?.status === "fail"
+        ? [{ criterion: "Hosted CI runs triggered by the run branch complete successfully", evidence: run.state.remoteChecks.evidence }]
+        : [];
     const nonGating = [];
     const gatingChecks = [];
     for (const c of failingChecks) {
@@ -1225,14 +1315,14 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       });
     }
     let verdict = verifyArtifact?.verdict ?? "gaps-found";
-    if (verdict === "accepted" && (gatingChecks.length > 0 || mechFailing.length > 0)) {
+    if (verdict === "accepted" && (gatingChecks.length > 0 || mechFailing.length > 0 || remoteFailing.length > 0)) {
       verdict = "gaps-found";
       emit.event(run.id, "verify", {
         t: "notice",
-        s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)${mechFailing.length ? ` and ${mechFailing.length} mechanical check failure(s)` : ""}`,
+        s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)${mechFailing.length ? ` and ${mechFailing.length} mechanical check failure(s)` : ""}${remoteFailing.length ? " and a failed remote CI run" : ""}`,
       });
     }
-    return { verdict, gatingChecks, mechFailing };
+    return { verdict, gatingChecks, mechFailing, remoteFailing };
   }
 
   // L-tier ticket pipeline: capabilities run as sequential tickets — coders,
@@ -1277,6 +1367,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           const gaps = [
             ...rec.gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
             ...rec.mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
+            ...rec.remoteFailing.map((c) => `[remote-ci] ${c.criterion}: ${c.evidence}`),
           ];
           planFixRound(run, gaps, ticket.verifyId, round, ticket.implIds);
           emit.event(run.id, ticket.verifyId, {
@@ -1381,6 +1472,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           const gaps = [
             ...rec.gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
             ...rec.mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
+            ...rec.remoteFailing.map(
+              (c) =>
+                `[remote-ci] ${c.criterion}: ${c.evidence}\n  → the failed-log excerpt names the cause — fix it, including creating/modifying files OUTSIDE your original assignment if the log points there`,
+            ),
           ];
           if (round < run.maxFixRounds) {
             planFixRound(run, gaps, "verify", round);
@@ -1452,6 +1547,9 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         if (mf.length) {
           reasons.push(`checks: ${mf.length} mechanical failure(s) — ${mf.map((c) => c.id).slice(0, 3).join(" | ")}`);
         }
+        if (run.state.remoteChecks?.status === "fail") {
+          reasons.push(`remote CI: failed — ${String(run.state.remoteChecks.evidence).slice(0, 160)}`);
+        }
         const ab = (run.state.artifacts.audit?.findings ?? []).filter((f) => f.blocking);
         if (ab.length) {
           reasons.push(
@@ -1503,7 +1601,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       return null;
     },
 
-    async start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds, git: gitRequested, audit: auditRequested, approvePlan }) {
+    async start({ id, task, tier, project, models, clarify, requireQuestions, maxFixRounds, git: gitRequested, audit: auditRequested, approvePlan, remoteChecks: remoteChecksRequested }) {
       const tierGraph = TIERS[tier];
       if (!tierGraph) throw new Error(`unknown tier ${tier}`);
       // One working tree per project: a second concurrent run on the same
@@ -1572,6 +1670,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         writtenFiles: {},
         deferredChecks: [],
         mechanicalChecks: null,
+        remoteChecks: null,
       };
       // Audit gate (conformity + quality) runs after verify accepts. On by
       // default; the owner can switch it off per run from the GUI.
@@ -1597,6 +1696,10 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         round: 0,
         fixRequeue: null,
         sourceDocCache: undefined,
+        // Remote CI verification (owner opt-in): the driver pushes the run
+        // branch and watches the hosted Actions runs before the final verify.
+        remoteCi: remoteChecksRequested === true && !!gitInfo?.enabled,
+        ciCapability: undefined,
         // Optional owner policy: force >=1 question round (finalize tool
         // withheld on round 1). Default off — prompt quality drives asking.
         requireQuestions: clarify && requireQuestions === true,
@@ -1623,6 +1726,17 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         emit.event(id, "_run", {
           t: "notice",
           s: `git: branch ${gitInfo.runBranch} created from ${gitInfo.baseBranch} — commits per coder node, ff-merge on accepted verdict`,
+        });
+      }
+      if (remoteChecksRequested === true && !gitInfo?.enabled) {
+        emit.event(id, "_run", {
+          t: "notice",
+          s: "remote CI: requested but git is disabled for this run — remote CI verification off (enable Git to use it)",
+        });
+      } else if (run.remoteCi) {
+        emit.event(id, "_run", {
+          t: "notice",
+          s: `remote CI verification enabled — ${gitInfo.runBranch} will be pushed to origin before the final verify to trigger and watch hosted Actions runs`,
         });
       }
       execute(run).catch(() => {}); // execute() never throws — it finalizes state
