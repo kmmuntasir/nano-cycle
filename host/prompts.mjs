@@ -77,6 +77,8 @@ ask them as owner questions instead of letting coder nodes pick silently:
   everything in containers (reproducible, no hot reload)?
 - hot-reload expectations — must code changes show up without a rebuild?
 - port and tooling policy — which ports, which package manager, Node pinning.
+- observability contract — e.g. a health payload's shape: flat status vs per-component
+  checks with latencies and a timestamp, and who consumes it (monitors, F02 probes).
 
 These determine whether the built environment even matches how the owner works, and
 are exactly the questions a spec that omits them leaves to chance.
@@ -166,7 +168,9 @@ working on other files in the same workspace concurrently. Never touch files out
     : `You are the IMPLEMENT node of a deterministic software pipeline.\n`;
   return `${laneText}
 The task (and your assignment) is given; implement it fully in the workspace — real files,
-no stubs. Run lint and tests for what you changed before reporting; fix what they surface.
+no stubs. Cover failure paths, not just happy paths: tests that degrade each dependency
+and assert error shapes catch what green-path tests never will. Run lint and tests for
+what you changed before reporting; fix what they surface.
 Output contract: call the report_artifact tool EXACTLY ONCE with summary + files_written
 (+ notes: decisions made, deviations from the plan and why).`;
 }
@@ -291,6 +295,12 @@ Method — behavior over existence, for EVERY criterion:
 a README is not NestJS 12 installed.
 - TEST criteria: confirm the tests exercise the SHIPPED path. If a tested module is not
   imported by the app entry, the test proves nothing — say so and fail the criterion.
+  E2e suites must boot the app the way its entrypoint does (shared bootstrap/wiring
+  module) — a suite that hand-rebuilds the wiring drifts silently from the real app.
+- TEST-DEPTH criteria: for each external dependency the feature touches, expect a
+  SEPARATE degraded-path e2e (Redis down ≠ DB down), error-envelope coverage (e.g. 404
+  shape, no stack leak), and direct unit tests for pure helpers. One happy path plus one
+  degraded path is SHALLOW — say so.
 - WIRING criteria: reconcile both directions (every variable the code reads must be
   declared with a placeholder; every declared variable must actually be consumed).
 - RENDERING criteria: if a web_reader (browser) tool is available, use it to LOAD the
@@ -351,8 +361,9 @@ Hunt in four categories, in this priority order:
    finding.
 3. quality — dead code (modules never imported by the app entry, including tests that
    exercise dead paths), unused dependencies, dead config files, duplicated sources of
-   truth (two i18n initializations, three locale contracts), tautological tests (a spec
-   that asserts an echo), layering violations, naming inconsistencies.
+   truth (two i18n initializations, three locale contracts), test suites that hand-rebuild
+   the app's bootstrap instead of reusing its wiring module (drift risk), tautological
+   tests (a spec that asserts an echo), layering violations, naming inconsistencies.
 4. practice — CI gate coverage (does CI actually run every required gate on the real
    paths? e.g. format/lint must cover app sources, the server must be compiled
    somewhere), Docker hygiene (.dockerignore, no host bind-mount writes, pinned

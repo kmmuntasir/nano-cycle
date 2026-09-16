@@ -1017,7 +1017,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   // env wiring, README command truth. Failures gate; skips never do.
   async function runMechanicalGate(run) {
     emit.event(run.id, "_run", { t: "notice", s: "mechanical checks: running (driver-deterministic)" });
-    const checks = await runMechanicalChecks({ projectPath: run.projectPath, runId: run.id, emit });
+    const checks = await runMechanicalChecks({ projectPath: run.projectPath, runId: run.id, emit, task: run.task });
     run.state.mechanicalChecks = { round: run.round ?? 0, at: new Date().toISOString(), checks };
     for (const c of checks) {
       emit.event(run.id, "_run", {
@@ -1769,6 +1769,12 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         emit.event(id, "_run", {
           t: "notice",
           s: `git: branch ${gitInfo.runBranch} created from ${gitInfo.baseBranch} — commits per coder node, ff-merge on accepted verdict`,
+        });
+      } else {
+        // The process debt both F01 audits scored hardest: uncommitted work.
+        emit.event(id, "_run", {
+          t: "notice",
+          s: "git: OFF — all work will be uncommitted (one rm -rf from loss; audits score this as process debt). Enable Git, and Remote CI with a remote, for durable CI-proven runs",
         });
       }
       if (remoteChecksRequested === true && !gitInfo?.enabled) {

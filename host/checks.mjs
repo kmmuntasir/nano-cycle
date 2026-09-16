@@ -578,12 +578,85 @@ async function checkComposeEnv(projectPath) {
   };
 }
 
+/** Unpinned/floating compose image tags drift silently (`:latest` re-pulls a
+ *  different stack one day). Warning: major-minor pins are fine, `latest` and
+ *  tag-less images are the finding.
+ */
+async function checkComposePins(projectPath) {
+  const composeFiles = [];
+  try {
+    for (const e of fs.readdirSync(projectPath, { withFileTypes: true })) {
+      if (e.isFile() && /^(docker-)?compose[^/]*\.ya?ml$/i.test(e.name)) composeFiles.push(e.name);
+    }
+  } catch {
+    /* unreadable dir */
+  }
+  if (composeFiles.length === 0) {
+    return { id: "compose-pins", title: "Compose image pins", status: "skipped", evidence: "no compose files at the project root" };
+  }
+  const hits = [];
+  for (const name of composeFiles) {
+    const lines = readFileLines(path.join(projectPath, name));
+    if (!lines) continue;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].replace(/#.*$/, ""); // strip comments
+      const m = line.match(/\bimage:\s*['"]?([^\s'"}]+)/); // block AND inline flow style
+      if (!m) continue;
+      const ref = m[1];
+      const tag = ref.split(":").slice(1).join(":"); // registry:port/img:tag — take after 2nd colon
+      if (ref.endsWith(":latest") || (!tag && !ref.startsWith("./") && !ref.includes("/:"))) {
+        hits.push(`${name}:${i + 1} → ${ref}`);
+      }
+    }
+  }
+  if (hits.length > 0) {
+    return {
+      id: "compose-pins",
+      title: "Compose image pins",
+      status: "warn",
+      evidence: cap(`floating image references (pin exact or major.minor tags — ':latest' re-pulls a different stack one day): ${hits.join("; ")}`),
+    };
+  }
+  return { id: "compose-pins", title: "Compose image pins", status: "pass", evidence: `all image references pinned across ${composeFiles.length} compose file(s)` };
+}
+
+/** Feature backlog hygiene: if the task names a feature id (F01, OMNI-203, …)
+ *  and docs/features.md still marks it not-started (🔴), warn — BOTH F01 trees
+ *  (reference included) shipped with a stale backlog status.
+ */
+async function checkFeatureStatus(projectPath, task) {
+  const ids = [...String(task ?? "").matchAll(/\b(F\d{1,3}|OMNI-\d{1,4})\b/gi)].map((m) => m[1].toUpperCase());
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) {
+    return { id: "feature-status", title: "Feature backlog status", status: "skipped", evidence: "task names no feature id (F## / OMNI-###)" };
+  }
+  const backlog = path.join(projectPath, "docs", "features.md");
+  if (!fs.existsSync(backlog)) {
+    return { id: "feature-status", title: "Feature backlog status", status: "skipped", evidence: "no docs/features.md backlog" };
+  }
+  const lines = readFileLines(backlog) ?? [];
+  const stale = [];
+  for (const id of uniqueIds) {
+    const row = lines.find((l) => new RegExp(`\\|\\s*${id}\\s*\\|`, "i").test(l) || new RegExp(`^#+.*\\b${id}\\b`, "i").test(l));
+    if (row && /🔴/.test(row)) stale.push(id);
+  }
+  if (stale.length > 0) {
+    return {
+      id: "feature-status",
+      title: "Feature backlog status",
+      status: "warn",
+      evidence: `docs/features.md still marks ${stale.join(", ")} as not-started (🔴) — flip the status when this work lands so the backlog stays truthful`,
+    };
+  }
+  return { id: "feature-status", title: "Feature backlog status", status: "pass", evidence: `${uniqueIds.join(", ")} not stale in docs/features.md` };
+}
+
 // ------------------------------------------------------------------ entry ---
 
 /** Run all mechanical checks. Never throws; each check returns
  *  { id, title, status: "pass"|"warn"|"fail"|"skipped", evidence }.
  *  Only "fail" gates; "warn" is recorded for the owner without a fix round. */
-export async function runMechanicalChecks({ projectPath, runId, emit }) {
+export async function runMechanicalChecks({ projectPath, runId, emit, task }) {
   void runId;
   void emit; // reserved for per-check progress if ever needed
   const results = await Promise.all([
@@ -594,6 +667,8 @@ export async function runMechanicalChecks({ projectPath, runId, emit }) {
     guard("env-wiring", "Env template wiring", () => checkEnvWiring(projectPath)),
     guard("readme-commands", "README command truth", () => checkReadmeCommands(projectPath)),
     guard("compose-env", "Compose auto-loaded .env", () => checkComposeEnv(projectPath)),
+    guard("compose-pins", "Compose image pins", () => checkComposePins(projectPath)),
+    guard("feature-status", "Feature backlog status", () => checkFeatureStatus(projectPath, task)),
   ]);
   return results;
 }

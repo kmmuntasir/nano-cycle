@@ -115,6 +115,8 @@ Before **every** verify pass the driver itself runs, in the project tree:
 | `env-wiring` | `.env.example` keys vs `process.env`/`import.meta.env` reads, both directions |
 | `readme-commands` | README-documented `npm run <x>` / `./scripts/<y>` that don't resolve |
 | `compose-env` | *(warn)* a project-dir `.env` that docker compose auto-loads — stale values break fresh-volume first boot while warm tests stay green |
+| `compose-pins` | *(warn)* floating compose image refs (`:latest` / tag-less) — silent stack drift |
+| `feature-status` | *(warn)* the task's feature id still marked not-started (🔴) in `docs/features.md` |
 
 Failures gate the run even if the verify model passes the criterion; skips never
 gate. Results land in the verify prompt as ground truth, in `state.mechanicalChecks`

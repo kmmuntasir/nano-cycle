@@ -90,3 +90,13 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 - [x] writeSpecFile removed — nothing is written into target repos; specs persist in runs/ and are served per project via GET /api/specs/:project (?format=md)
 - [x] compose-env driver check (warn): project-dir .env auto-loaded by compose → first-boot drift warning (the D1 class)
 - [x] verifySystem: COLD-boot guidance for bootstrap criteria (fresh volume/project name — warm-container success hides first-boot breakage)
+
+## 15. Comparison-mined improvements (2026-09-16)
+- [x] Test-depth prompts: verifySystem (separate degraded-path e2e per dependency, envelope coverage, helper unit tests; shallow = say so) + implementSystem (failure paths, not just happy)
+- [x] e2e-wiring blind spot: verifySystem (e2e boots the app as the entrypoint does) + auditSystem quality list (hand-rebuilt bootstrap = drift risk)
+- [x] compose-pins check (warn): floating image refs in compose files (inline + block YAML)
+- [x] Git-off startup nudge (process debt warning)
+- [x] feature-status check (warn): task's feature id still 🔴 in docs/features.md (both F01 trees shipped stale)
+- [x] Observability contract added to clarify delivery-shape questions
+- [x] gitleaks.toml allowlist: agreed NOT needed (audits disproved the false-positive risk)
+- Verified on fixtures + the real omni-isp tree: the three new warns flag exactly the three open audit items (stale .env, RedisInsight :latest, F01 🔴)
