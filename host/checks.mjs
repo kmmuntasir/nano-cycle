@@ -15,6 +15,9 @@ const execFileAsync = promisify(execFile);
 
 const EVIDENCE_CAP = 2000;
 const WALK_OPTS = {
+  // Product code only. Toolchain mirrors (.pi/.opencode/.kilo/.claude skill
+  // and agent files), workflow state (.context), and non-AI product assets
+  // are NOT product code — scanning them produced false-positive gaps.
   excludeDirs: new Set([
     "node_modules",
     ".git",
@@ -25,6 +28,12 @@ const WALK_OPTS = {
     ".nano-cycle",
     ".cache",
     "web-dist",
+    ".pi",
+    ".opencode",
+    ".kilo",
+    ".claude",
+    ".context",
+    "not_for_ai_models",
   ]),
   maxFiles: 5000,
   maxFileBytes: 1_000_000,
@@ -305,20 +314,35 @@ async function checkDepsDeclared(projectPath) {
         }
       }
     }
-    // eslint/prettier/vite config files at the manifest root also import plugins
+    // eslint/prettier/vite config files at the manifest root also reference
+    // packages — via real import/require statements and `plugins:` array
+    // entries ONLY. Arbitrary quoted strings are NOT imports (an eslint
+    // `ignores: ["dist", "coverage"]` glob once masqueraded as one and burned
+    // two fix rounds).
     try {
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
         if (!e.isFile() || !configNameRe.test(e.name)) continue;
         if (!/\.(js|cjs|mjs|ts)$/.test(e.name)) continue;
         const lines = readFileLines(path.join(dir, e.name));
         if (!lines) continue;
+        const rel = `${path.relative(projectPath, dir)}/${e.name}`;
+        const record = (name, line) => {
+          if (!name) return;
+          if (!undeclared.has(name)) undeclared.set(name, []);
+          if (undeclared.get(name).length < 5) undeclared.get(name).push(`${rel}:${line}`);
+        };
         for (let i = 0; i < lines.length; i++) {
-          const m = lines[i].match(/["']([^"'\n]+)["']/g) ?? [];
-          for (const q of m) {
-            const name = bareName(q.slice(1, -1), aliases, declared);
-            if (!name) continue;
-            if (!undeclared.has(name)) undeclared.set(name, []);
-            if (undeclared.get(name).length < 5) undeclared.get(name).push(`${path.relative(projectPath, dir)}/${e.name}:${i + 1}`);
+          for (const re of IMPORT_RES) {
+            re.lastIndex = 0;
+            let m;
+            while ((m = re.exec(lines[i])) !== null) record(bareName(m[1], aliases, declared), i + 1);
+          }
+          // `plugins: ["pkg", ...]` entries are package references
+          const plug = lines[i].match(/plugins\s*:\s*\[([^\]]*)\]/);
+          if (plug) {
+            for (const q of plug[1].match(/["']([^"'\n]+)["']/g) ?? []) {
+              record(bareName(q.slice(1, -1), aliases, declared), i + 1);
+            }
           }
         }
       }
@@ -341,27 +365,41 @@ function pathKey(p) {
   return path.normalize(String(p)).toLowerCase();
 }
 
-/** No external font-CDN references — the tofu failure mode's source. */
+/** No external font-CDN references in shipped code — the tofu failure mode's
+ *  source. References confined to docs/ (design sources, demo HTML) are a
+ *  non-gating warning; anything in app code fails. */
 async function checkNoCdnFonts(projectPath) {
   const re = /fonts\.(googleapis|gstatic)\.com/;
-  const hits = [];
+  const codeHits = [];
+  const docHits = [];
   for (const abs of walk(projectPath, { exts: TEXT_EXTS })) {
+    const rel = path.relative(projectPath, abs);
     const lines = readFileLines(abs);
     if (!lines) continue;
     for (let i = 0; i < lines.length; i++) {
-      if (re.test(lines[i])) {
-        hits.push(`${path.relative(projectPath, abs)}:${i + 1}`);
-        if (hits.length >= 10) break;
-      }
+      if (!re.test(lines[i])) continue;
+      const entry = `${rel}:${i + 1}`;
+      if (/(^|\/)docs\//.test(rel)) docHits.push(entry);
+      else codeHits.push(entry);
+      if (codeHits.length + docHits.length >= 10) break;
     }
-    if (hits.length >= 10) break;
+    if (codeHits.length + docHits.length >= 10) break;
   }
-  if (hits.length > 0) {
+  if (codeHits.length > 0) {
+    const docNote = docHits.length ? ` (${docHits.length} more under docs/ — warnings)` : "";
     return {
       id: "no-cdn-fonts",
       title: "Local font loading (no font CDN)",
       status: "fail",
-      evidence: cap(`font-CDN references found (bundle fonts locally instead — a blocked/flaky CDN renders missing-glyph tofu): ${hits.join("; ")}`),
+      evidence: cap(`font-CDN references in app code (bundle fonts locally instead — a blocked/flaky CDN renders missing-glyph tofu): ${codeHits.join("; ")}${docNote}`),
+    };
+  }
+  if (docHits.length > 0) {
+    return {
+      id: "no-cdn-fonts",
+      title: "Local font loading (no font CDN)",
+      status: "warn",
+      evidence: cap(`font-CDN references only under docs/ (design sources, not shipped code) — recorded as a warning, not gated: ${docHits.join("; ")}`),
     };
   }
   return { id: "no-cdn-fonts", title: "Local font loading (no font CDN)", status: "pass", evidence: "no fonts.googleapis.com/gstatic references in source" };
@@ -513,7 +551,8 @@ async function checkReadmeCommands(projectPath) {
 // ------------------------------------------------------------------ entry ---
 
 /** Run all mechanical checks. Never throws; each check returns
- *  { id, title, status: "pass"|"fail"|"skipped", evidence }. */
+ *  { id, title, status: "pass"|"warn"|"fail"|"skipped", evidence }.
+ *  Only "fail" gates; "warn" is recorded for the owner without a fix round. */
 export async function runMechanicalChecks({ projectPath, runId, emit }) {
   void runId;
   void emit; // reserved for per-check progress if ever needed

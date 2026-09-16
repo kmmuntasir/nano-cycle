@@ -79,3 +79,9 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 - [x] Verify-shaped nodes always serialize against each other in lane packing (parallel verifies would race compose/test runs in one tree)
 - [x] reconcileVerify notices carry the source verify node id
 - [x] Live wave test (isolated server on :4199): 2 independent tickets ran concurrently (overlapping windows), verify gates serialized into one lane, dependent ticket started after both dep verifies, all gates + final verify accepted — 5/5 assertions
+
+## 13. Mechanical-check false-positive fixes (2026-09-16)
+- [x] Walk exclusions: .pi/.opencode/.kilo/.claude/.context/not_for_ai_models (toolchain mirrors ≠ product code)
+- [x] deps-declared config scan: real import/require + `plugins:` entries only (eslint `ignores:` globs no longer count as imports)
+- [x] no-cdn-fonts: docs/**-only hits → non-gating "warn" status (design sources); app-code hits still fail
+- [x] Fixture regression + real omni-isp tree verified (the three false-positive classes that burned fix rounds in run 20260916-014301453 are gone)
