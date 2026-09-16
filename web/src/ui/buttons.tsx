@@ -94,6 +94,8 @@ export function GhostButton({
 }: {
   children: ReactNode;
   size?: "xs" | "sm" | "md";
+  disabled?: boolean;
+  title?: string;
   onClick?: () => void;
 }) {
   return (
@@ -103,6 +105,9 @@ export function GhostButton({
       color="#a1a7b8"
       fontFamily={SANS}
       _hover={{ color: "#ffffff", bg: "#1b1f2b" }}
+      _disabled={{ color: "#565c6b", cursor: "not-allowed", opacity: 1, _hover: { bg: "transparent" } }}
+      disabled={rest.disabled}
+      title={rest.title}
       onClick={rest.onClick}
     >
       {children}

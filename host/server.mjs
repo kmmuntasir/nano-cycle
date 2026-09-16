@@ -8,7 +8,7 @@ import { WebSocketServer } from "ws";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createPipeline } from "./pipeline.mjs";
 import { DEFAULT_TIER, MODEL_ROLES, TIERS } from "./config.mjs";
-import { addProject, loadProjects, resolveProject, SANDBOX_DIR } from "./projects.mjs";
+import { addProject, loadProjects, removeProject, resolveProject, SANDBOX_DIR } from "./projects.mjs";
 import { detectWebCapabilities, makeWebReaderTool, makeWebSearchTool } from "./webtools.mjs";
 import { newRunId, runsDir, saveState, appendEvent, listRuns, loadRun } from "./state.mjs";
 
@@ -166,6 +166,20 @@ const server = http.createServer(async (req, res) => {
         } catch (e) {
           return json(res, 400, { error: String(e?.message ?? e) });
         }
+      }
+    }
+
+    // Registry-only removal: files on disk and historical runs are untouched.
+    const projectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
+    if (projectMatch && req.method === "DELETE") {
+      const name = decodeURIComponent(projectMatch[1]);
+      if (pipeline.activeRunFor(name)) {
+        return json(res, 409, { ok: false, error: `a run is active on project "${name}" — wait for it to finish or cancel it first` });
+      }
+      try {
+        return json(res, 200, removeProject(name));
+      } catch (e) {
+        return json(res, 404, { error: String(e?.message ?? e) });
       }
     }
 

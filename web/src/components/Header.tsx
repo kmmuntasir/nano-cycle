@@ -8,6 +8,7 @@ export default function Header({
   project,
   setProject,
   onToggleAdd,
+  onRemoveProject,
   showAdd,
   onNewRun,
   connected,
@@ -17,6 +18,7 @@ export default function Header({
   project: string;
   setProject: (v: string) => void;
   onToggleAdd: () => void;
+  onRemoveProject: () => void;
   showAdd: boolean;
   onNewRun: () => void;
   connected: boolean;
@@ -70,6 +72,17 @@ export default function Header({
       </Box>
       <GhostButton onClick={onToggleAdd}>
         {showAdd ? "Close" : "+ Project"}
+      </GhostButton>
+      <GhostButton
+        disabled={project === "sandbox"}
+        onClick={onRemoveProject}
+        title={
+          project === "sandbox"
+            ? "The built-in sandbox cannot be removed."
+            : `Remove "${project}" from nano-cycle — registry-only: nothing on disk is deleted, and run history is kept.`
+        }
+      >
+        − Remove
       </GhostButton>
       <Box flex="1" />
       <Flex alignItems="center" gap={2}>

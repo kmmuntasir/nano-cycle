@@ -63,6 +63,7 @@ export default function App() {
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [starting, setStarting] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [confirmRemoveProject, setConfirmRemoveProject] = useState(false);
 
   const refreshRuns = useCallback(() => {
     api.listRuns().then(setRuns).catch(() => {});
@@ -163,6 +164,17 @@ export default function App() {
     }
   };
 
+  const doRemoveProject = async () => {
+    setConfirmRemoveProject(false);
+    try {
+      const updated = await api.removeProject(project);
+      setProjects(updated);
+      if (!updated.some((p) => p.name === project)) setProject("sandbox");
+    } catch (e) {
+      alert(String(e));
+    }
+  };
+
   const gateRound = state?.gate?.round;
   const gateType = state?.gate?.type;
   useEffect(() => {
@@ -257,6 +269,7 @@ export default function App() {
         project={project}
         setProject={setProject}
         onToggleAdd={() => setShowAdd((v) => !v)}
+        onRemoveProject={() => setConfirmRemoveProject(true)}
         showAdd={showAdd}
         onNewRun={() => setShowNew(true)}
         connected={connected}
@@ -432,6 +445,14 @@ export default function App() {
         confirmLabel="Cancel Run"
         onConfirm={doCancel}
         onClose={() => setConfirmCancel(false)}
+      />
+      <ConfirmDialog
+        open={confirmRemoveProject}
+        title={`Remove Project "${project}"?`}
+        body="Registry-only removal — the folder on disk is untouched and historical runs remain viewable. Runs cannot be started on it until it is added again."
+        confirmLabel="Remove Project"
+        onConfirm={doRemoveProject}
+        onClose={() => setConfirmRemoveProject(false)}
       />
     </Box>
   );

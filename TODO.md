@@ -115,3 +115,8 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 ## 18. Bundled markdown-writer skill (2026-09-16)
 - [x] Vendored under skills/ (validator paths made location-independent); loaded via loadSkillsFromDir for EVERY node in EVERY project through skillsOverride — repo/system skills stay ignored (driver owns context; bundled skills are the one exception)
 - [x] Verified: loader-level unit checks + live sandbox run (skill-free repo) — coder read the vendored SKILL.md and ran validate_md.cjs by absolute path, unprompted
+
+## 19. Project removal (2026-09-16)
+- [x] removeProject in projects.mjs (registry-only; sandbox guarded) + DELETE /api/projects/:name (409 when a run is active on it)
+- [x] GUI: "− Remove" header button (disabled for sandbox) + confirm dialog; selection falls back to sandbox
+- [x] Live-tested: add → remove ✓, sandbox/unknown guards ✓, registry intact

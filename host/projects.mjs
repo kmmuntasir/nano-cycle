@@ -42,8 +42,22 @@ export function addProject({ name, path: dir }) {
   return projects;
 }
 
-export function resolveProject(nameOrPath) {
+/** Remove a project from the registry. Registry-only: nothing on disk is
+ *  touched, and historical runs keep working (they load from runs/ by id).
+ *  The built-in sandbox cannot be removed. Throws when the name is unknown. */
+export function removeProject(name) {
+  const cleanName = String(name ?? "").trim();
+  if (!cleanName) throw new Error("name is required");
+  if (cleanName === "sandbox") throw new Error("the built-in sandbox project cannot be removed");
   const projects = loadProjects();
+  if (!projects.some((p) => p.name === cleanName)) {
+    throw new Error(`unknown project: ${cleanName}`);
+  }
+  persist(projects.filter((p) => p.name !== cleanName));
+  return loadProjects();
+}
+
+export function resolveProject(nameOrPath) {  const projects = loadProjects();
   const byName = projects.find((p) => p.name === nameOrPath);
   if (byName) return byName;
   // Allow passing a raw absolute path directly — register-on-the-fly is the GUI's job,

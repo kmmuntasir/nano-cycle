@@ -137,6 +137,8 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name, path }),
     }),
+  removeProject: (name: string) =>
+    jfetch<Project[]>(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" }),
   listRuns: () => jfetch<RunSummary[]>(`/api/runs?_=${Date.now()}`),
   getRun: (id: string) => jfetch<{ state: RunState; events: RunEvent[] }>(`/api/runs/${id}`),
   start: (

@@ -49,7 +49,9 @@ npm start          # http://127.0.0.1:4177
 ```
 
 1. **Add a project** — an absolute path to any local folder (a built-in `sandbox/`
-   exists for scratch work).
+   exists for scratch work). **− Remove** drops the selected project from the
+   registry (registry-only: files on disk and run history are untouched; the
+   sandbox can't be removed; active runs block removal).
 2. **Pick a tier + per-node models** — any model your pi auth can reach
    (`provider/model` or `provider/model:thinking`).
 3. **Start** — watch text, tool calls, and token usage stream per node.
