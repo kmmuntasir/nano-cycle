@@ -10,7 +10,9 @@ judgment calls inside a node. Built on the [pi SDK](https://pi.dev/docs/latest/s
 inspects the project (read-only + `investigate` analyst sessions + optional web tools),
 asks the owner high-leverage questions in batches (answered in the GUI), and repeats
 until it locks a **spec**: refined summary, decisions, and acceptance criteria. The spec
-is written to `<project>/.nano-cycle/spec-<runid>.md` and is THE contract.
+is THE contract. It is stored outside the project it describes — persisted with the run
+(`runs/<id>/state.json`) and served per project at `GET /api/specs/<project>`
+(`?format=md` for markdown); nothing is written into the target repo.
 
 **Step 2 — Build.** plan → *(owner approves the compiled plan — M/L tiers, on by
 default)* → parallel coders → verify, fully autonomous. The spec's acceptance
@@ -112,6 +114,7 @@ Before **every** verify pass the driver itself runs, in the project tree:
 | `i18n-parity` | `en.json`/`bn.json` locale pairs with different key sets (both directions) |
 | `env-wiring` | `.env.example` keys vs `process.env`/`import.meta.env` reads, both directions |
 | `readme-commands` | README-documented `npm run <x>` / `./scripts/<y>` that don't resolve |
+| `compose-env` | *(warn)* a project-dir `.env` that docker compose auto-loads — stale values break fresh-volume first boot while warm tests stay green |
 
 Failures gate the run even if the verify model passes the criterion; skips never
 gate. Results land in the verify prompt as ground truth, in `state.mechanicalChecks`

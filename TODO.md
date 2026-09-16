@@ -85,3 +85,8 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 - [x] deps-declared config scan: real import/require + `plugins:` entries only (eslint `ignores:` globs no longer count as imports)
 - [x] no-cdn-fonts: docs/**-only hits → non-gating "warn" status (design sources); app-code hits still fail
 - [x] Fixture regression + real omni-isp tree verified (the three false-positive classes that burned fix rounds in run 20260916-014301453 are gone)
+
+## 14. Specs out of projects + D1 countermeasures (2026-09-16)
+- [x] writeSpecFile removed — nothing is written into target repos; specs persist in runs/ and are served per project via GET /api/specs/:project (?format=md)
+- [x] compose-env driver check (warn): project-dir .env auto-loaded by compose → first-boot drift warning (the D1 class)
+- [x] verifySystem: COLD-boot guidance for bootstrap criteria (fresh volume/project name — warm-container success hides first-boot breakage)

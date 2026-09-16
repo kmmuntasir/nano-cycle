@@ -548,6 +548,36 @@ async function checkReadmeCommands(projectPath) {
   return { id: "readme-commands", title: "README command truth", status: "pass", evidence: `every documented npm-run / scripts command resolves${npxNote}` };
 }
 
+/** Docker Compose auto-loads the project-dir `.env`. A stale one (leftover
+ *  layout, `change-me` values) silently diverges from compose defaults and
+ *  breaks fresh-volume first boot — the exact defect class that slipped past
+ *  warm-container verification. Warning, not a gate: the file may be legit.
+ */
+async function checkComposeEnv(projectPath) {
+  const envPath = path.join(projectPath, ".env");
+  if (!fs.existsSync(envPath)) {
+    return { id: "compose-env", title: "Compose auto-loaded .env", status: "pass", evidence: "no project-dir .env — compose runs on its own defaults" };
+  }
+  let preview = "";
+  try {
+    preview = fs
+      .readFileSync(envPath, "utf8")
+      .split("\n")
+      .filter((l) => /^[A-Za-z_]/.test(l) && !l.trim().startsWith("#"))
+      .slice(0, 6)
+      .map((l) => l.split("=")[0])
+      .join(", ");
+  } catch {
+    /* unreadable — the existence warning still stands */
+  }
+  return {
+    id: "compose-env",
+    title: "Compose auto-loaded .env",
+    status: "warn",
+    evidence: `a project-dir .env exists (keys: ${preview || "unreadable"}) — docker compose AUTO-LOADS it, so its values override image defaults on every fresh volume; a stale file breaks first boot while warm-container tests stay green. Confirm it is intentional and aligned, or delete it`,
+  };
+}
+
 // ------------------------------------------------------------------ entry ---
 
 /** Run all mechanical checks. Never throws; each check returns
@@ -563,6 +593,7 @@ export async function runMechanicalChecks({ projectPath, runId, emit }) {
     guard("i18n-parity", "Locale key parity (en/bn)", () => checkI18nParity(projectPath)),
     guard("env-wiring", "Env template wiring", () => checkEnvWiring(projectPath)),
     guard("readme-commands", "README command truth", () => checkReadmeCommands(projectPath)),
+    guard("compose-env", "Compose auto-loaded .env", () => checkComposeEnv(projectPath)),
   ]);
   return results;
 }

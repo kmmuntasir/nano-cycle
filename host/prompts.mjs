@@ -269,6 +269,11 @@ Method — behavior over existence, for EVERY criterion:
   THE SAME ORIGIN the client uses, load the pages' actual request paths). A config file
   that validates is not a running system. An endpoint that exists is not an endpoint
   that answers correctly.
+- BOOTSTRAP criteria ("one command from a fresh clone/volume works") must be exercised
+  COLD at least once: a unique compose project name (or "down -v") so data volumes
+  initialize from scratch, then the documented command. Warm-container success hides
+  first-boot breakage — a stale auto-loaded .env, init-only credential drift, or
+  missing first-run steps.
 - USER JOURNEYS beat service checks: exercise what a real user hits, in the composed
   environment. Load the web app's actual routes through the documented URLs (curl the
   dev server's HTML, then every API path the page calls, THROUGH the page's origin and

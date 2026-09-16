@@ -127,49 +127,6 @@ function sourceDocsFor(run, emit) {
   return run.sourceDocCache || null;
 }
 
-// Requirements are durable: the finalized spec lands inside the project it describes.
-function writeSpecFile(run, emit) {
-  try {
-    const spec = run.spec;
-    const dir = path.join(run.projectPath, ".nano-cycle");
-    fs.mkdirSync(dir, { recursive: true });
-    const md = [
-      `# Spec — ${run.task}`,
-      "",
-      `Run: ${run.id} · Tier: ${run.tier} · Date: ${run.state.createdAt}`,
-      ...(spec.source_docs?.length
-        ? [`Source docs (their requirements OUTRANK this spec): ${spec.source_docs.join(", ")}`]
-        : []),
-      "",
-      "## Summary",
-      "",
-      spec.summary,
-      "",
-      "## Locked decisions",
-      "",
-      ...((spec.decisions ?? []).map((d) => `- **${d.topic}**: ${d.decision}`) || ["- (none)"]),
-      "",
-      "## Acceptance criteria",
-      "",
-      ...((spec.acceptance_criteria ?? []).map((c) => `- [ ] ${c}`) || ["- (none)"]),
-      ...(spec.ac_verification?.length
-        ? [
-            "",
-            "## Verification environments",
-            "",
-            ...spec.ac_verification.map((a) => `- [${a.env}] ${a.criterion}`),
-          ]
-        : []),
-      ...(spec.out_of_scope?.length ? ["", "## Out of scope", "", ...spec.out_of_scope.map((o) => `- ${o}`)] : []),
-      "",
-    ].join("\n");
-    fs.writeFileSync(path.join(dir, `spec-${run.id}.md`), md);
-    emit.event(run.id, "clarify", { t: "notice", s: `spec written: .nano-cycle/spec-${run.id}.md` });
-  } catch (e) {
-    emit.event(run.id, "clarify", { t: "notice", s: `spec file write failed: ${e.message}` });
-  }
-}
-
 export function createPipeline({ modelRuntime, emit, webTools }) {
   const runs = new Map(); // runId -> controller
 
@@ -1505,7 +1462,6 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         const spec = await clarifyPhase(run);
         run.spec = spec;
         run.state.artifacts.spec = spec;
-        writeSpecFile(run, emit);
       }
 
       // Step 2 — build: plan → parallel coders → verify → audit, verdict-gated.

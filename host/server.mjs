@@ -206,6 +206,57 @@ const server = http.createServer(async (req, res) => {
       return json(res, 201, state);
     }
 
+    // Specs live OUTSIDE the projects they describe — runs/ is the per-project
+    // spec store (state.json → artifacts.spec). This endpoint surfaces them.
+    const specMatch = url.pathname.match(/^\/api\/specs\/([\w.-]+)$/);
+    if (specMatch && req.method === "GET") {
+      const projectName = specMatch[1];
+      const found = [];
+      for (const entry of fs.readdirSync(runsDir(), { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        try {
+          const st = JSON.parse(fs.readFileSync(path.join(runsDir(), entry.name, "state.json"), "utf8"));
+          if (st.project === projectName && st.artifacts?.spec) {
+            found.push({ runId: st.id, createdAt: st.createdAt, tier: st.tier, status: st.status, spec: st.artifacts.spec });
+          }
+        } catch {
+          /* unreadable run — skip */
+        }
+      }
+      if (found.length === 0) return json(res, 404, { error: `no specs for project "${projectName}"` });
+      found.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      const latest = found[0];
+      if (url.searchParams.get("format") === "md") {
+        const spec = latest.spec;
+        const md = [
+          `# Spec — ${latest.runId}`,
+          "",
+          `Project: ${projectName} · Tier: ${latest.tier} · Date: ${latest.createdAt}`,
+          ...(spec.source_docs?.length ? [`Source docs (their requirements OUTRANK this spec): ${spec.source_docs.join(", ")}`] : []),
+          "",
+          "## Summary",
+          "",
+          spec.summary,
+          "",
+          "## Locked decisions",
+          "",
+          ...((spec.decisions ?? []).map((d) => `- **${d.topic}**: ${d.decision}`) || ["- (none)"]),
+          "",
+          "## Acceptance criteria",
+          "",
+          ...((spec.acceptance_criteria ?? []).map((c) => `- [ ] ${c}`) || ["- (none)"]),
+          ...(spec.ac_verification?.length
+            ? ["", "## Verification environments", "", ...spec.ac_verification.map((a) => `- [${a.env}] ${a.criterion}`)]
+            : []),
+          ...(spec.out_of_scope?.length ? ["", "## Out of scope", "", ...spec.out_of_scope.map((o) => `- ${o}`)] : []),
+          "",
+        ].join("\n");
+        res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
+        return res.end(md);
+      }
+      return json(res, 200, { project: projectName, total: found.length, latest });
+    }
+
     const runMatch = url.pathname.match(/^\/api\/runs\/([\w-]+)(\/(gate|cancel|answers|model|resume))?$/);
     if (runMatch) {
       const [, id, , action] = runMatch;
