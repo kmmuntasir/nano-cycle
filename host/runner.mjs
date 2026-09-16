@@ -1,15 +1,36 @@
 // Node runner — one pi SDK AgentSession per node. The driver owns 100% of the
 // context: system prompt override, zero context-file/skill discovery, explicit
 // tool allowlists, schema'd report_artifact for structured output.
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createAgentSession,
   DefaultResourceLoader,
   defineTool,
   getAgentDir,
+  loadSkillsFromDir,
   resolveCliModel,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+
+// Nano-cycle's bundled skills — vendored under <root>/skills and loaded for
+// EVERY node in EVERY project, regardless of what the system or the target
+// repo has. The session appends them to the driver's system prompt whenever
+// the node has a file-read tool (all nodes do).
+const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const BUNDLED_SKILLS_DIR = path.join(ROOT_DIR, "skills");
+let bundledSkillsCache = null;
+function bundledSkills() {
+  if (bundledSkillsCache === null) {
+    try {
+      bundledSkillsCache = loadSkillsFromDir({ dir: BUNDLED_SKILLS_DIR, source: "nano-cycle" });
+    } catch {
+      bundledSkillsCache = { skills: [], diagnostics: [] };
+    }
+  }
+  return bundledSkillsCache;
+}
 
 function resolveModel(spec, modelRuntime) {
   if (!spec || spec === "auto") return { model: undefined, thinking: undefined };
@@ -88,13 +109,18 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
     throw new Error(`model "${modelSpec}" did not resolve`);
   }
 
+  const bundled = bundledSkills();
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
-    // The driver owns the context — no runtime discovery of anything.
+    // The driver owns the context — no runtime discovery of anything EXCEPT
+    // nano-cycle's own bundled skills, which every node gets everywhere.
     systemPromptOverride: () => systemPrompt,
     agentsFilesOverride: () => ({ agentsFiles: [] }),
-    skillsOverride: (current) => ({ skills: [], diagnostics: current?.diagnostics ?? [] }),
+    skillsOverride: (current) => ({
+      skills: bundled.skills,
+      diagnostics: [...(current?.diagnostics ?? []), ...bundled.diagnostics],
+    }),
   });
   await loader.reload();
 

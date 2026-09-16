@@ -102,6 +102,16 @@ uses the node's configured level.
 | Ground truth | driver-side mechanical checks before every verify — the model cannot overrule them |
 | Resume/cancel | `session.abort()` per node; run state persists under `runs/` |
 
+## Bundled skills
+
+Nano-cycle vendors its own skills under `skills/` and loads them for **every
+node in every project** — regardless of what the system or the target repo
+has. Currently: **markdown-writer** (hard-breaks, table escaping, nested
+fences, ASCII alignment — with its deterministic `validate_md.cjs`
+validator, which coders are instructed to run after writing Markdown).
+Repo-local skills are still ignored by design: the driver owns the context;
+bundled skills are the one deliberate exception.
+
 ## Deterministic ground truth — driver checks (`host/checks.mjs`)
 
 Before **every** verify pass the driver itself runs, in the project tree:

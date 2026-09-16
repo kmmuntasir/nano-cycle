@@ -171,3 +171,8 @@ Constraint: nano-cycle may reference only common conventions (`.claude`, `.pi`, 
 - **README + spec schema descriptions** updated to the same language.
 
 Verified against three trees (omni-isp regression unchanged; the new extension+CLI project resolves its `.pi` ruleset, passes deps-declared via discovered manifests; a bare repo skips cleanly) plus locale-set fixtures (en/fr pair and en/de/es triple, drift caught in every direction). Bonus: the genericized suite immediately flagged two REAL states in the new project — its intentionally-local token-bearing `index.html` (gitignored, never committed — the secrets check working as designed) and genuine README↔manifest drift (`npm run dev`/`build` documented, no scripts yet).
+
+
+## 13. Bundled markdown-writer skill, always loaded (2026-09-16, ninth commit)
+
+Nano-cycle's pi sessions previously loaded ZERO skills by design (`skillsOverride` wiped them). Now the pipeline vendors `skills/markdown-writer` (SKILL.md + `validate_md.cjs`, validator invocation rewritten to be location-independent) and injects it for every node in every project via `loadSkillsFromDir` + `skillsOverride` — regardless of the system or repo, which stay ignored per the driver-owns-context principle (bundled skills are the one deliberate exception; the session appends them after the driver's system prompt whenever a read tool exists, which every node has). Verified at the loader level (skill resolves in a skill-less repo; the prompt listing points at the vendored path) and live: a sandbox demo run (a repo with no skills) had its coder read the vendored SKILL.md three times and invoke the validator twice by absolute path, unprompted.

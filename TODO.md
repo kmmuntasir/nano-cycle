@@ -111,3 +111,7 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 - [x] checks.mjs: deps-declared discovers package.json anywhere (was hardcoded backend/frontend/apps); i18n-parity = any ISO-coded locale SET (was en/bn hardcoded); feature-status check REMOVED (verify-prompt guidance instead); not_for_ai_models dropped, NANO_EXCLUDE_DIRS env added
 - [x] prompts: functional lane definitions (backend=system/non-UI incl. CLIs/workers/CI; frontend=UI/client; single-sided normal), conditional web/i18n examples, pointer-following source-doc discovery, backlog-staleness verify guidance, multi-location governance wording
 - [x] Verified: .pi-only project resolves full ruleset; .claude precedence; locale sets catch drift in any language pair/triple; bare repo skips cleanly; new project runs deps-declared green
+
+## 18. Bundled markdown-writer skill (2026-09-16)
+- [x] Vendored under skills/ (validator paths made location-independent); loaded via loadSkillsFromDir for EVERY node in EVERY project through skillsOverride — repo/system skills stay ignored (driver owns context; bundled skills are the one exception)
+- [x] Verified: loader-level unit checks + live sandbox run (skill-free repo) — coder read the vendored SKILL.md and ran validate_md.cjs by absolute path, unprompted
