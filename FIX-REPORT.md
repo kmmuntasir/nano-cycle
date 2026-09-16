@@ -148,3 +148,14 @@ Run cost note (Z.ai list API prices: GLM-5.3 $1.40/$4.40/$0.26 per M in/out/cach
 ## 10. Specs stored outside projects + D1 countermeasures (2026-09-16, sixth commit)
 
 The `.nano-cycle/spec-*.md` write into target projects is gone — it was never consumed by the pipeline and both audits flagged the tree pollution (D8). Specs live in the runs store and are served per project: `GET /api/specs/<project>` (latest + count; `?format=md` for markdown). No new storage engine: `runs/` already is the per-project spec database. Plus the two D1 countermeasures from the audit discussion: a `compose-env` driver check (warn) that flags a compose-auto-loaded project-dir `.env` — the exact stale-file class that broke fresh-volume first boot — and COLD-boot guidance in the verifier prompt ("bootstrap criteria must be exercised on a fresh volume at least once; warm-container success hides first-boot breakage").
+
+
+## 11. Git fixes: resume branch restore + conventional commit format (2026-09-16, seventh commit)
+
+**Resume bug (found by inspection during the git-lifecycle walkthrough):** after a failed/cancelled git-on run settles, `integrate()` has checked out the base branch — a resume then committed straight onto the base. `execute()` now checks out the run branch before anything else, which also restores the branch's committed files into the working tree for the resumed coders; a failed checkout (dirty tree, missing branch) fails the run loudly with guidance instead of silently mis-committing.
+
+**Commit format:** `commitCoderOutput` now writes `<type>: <subject> (<ticket>)` — the ticket id (`OMNI-###`, `F##`, `####`) is extracted from the task text per the project git-guidelines convention, falling back to `(nano <runId>)`; fix-round re-runs type the commit `fix:`; the 72-char line cap truncates the subject, never the type prefix or ticket suffix.
+
+**Live verification** (scratch repo, four runs): commits read `(OMNI-101)`…`(OMNI-104)` with the suffix intact under truncation; a run cancelled mid-verify settled on `main` with its branch kept, and its resume checked the branch back out (files restored into the tree), completed, and ff-merged cleanly into `main`.
+
+**Incidental finding (not fixed here):** `GET /api/runs/:id` returns the full state plus the entire event log, and every streamed event does a synchronous `appendFileSync` + state `writeFileSync` — during high-thinking verify streams the REST endpoint can starve for minutes (the GUI is unaffected; it rides the WebSocket). A lean status endpoint or async/throttled persistence is a worthwhile follow-up.

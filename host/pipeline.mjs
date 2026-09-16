@@ -92,9 +92,17 @@ function pathTokensIn(text) {
   return out;
 }
 
+// Commit suffix honors the project git-guidelines convention: cite the ticket
+// id the task names (OMNI-###, F##, ###); fall back to the run id.
+const COMMIT_ID_RE = /\b(OMNI-\d{1,4}|F\d{1,3}|#\d+)\b/i;
+function commitSuffixFor(task, runId) {
+  const m = String(task ?? "").match(COMMIT_ID_RE);
+  return m ? `(${m[1].toUpperCase()})` : `(nano ${runId})`;
+}
+
 // Exported for unit testing (fix-round targeting + AC-env matching are the
 // two behaviors most worth locking down as the pipeline evolves).
-export const __internals = { fileKey, matchAcVerification, ENV_LIMIT_RE, pathTokensIn };
+export const __internals = { fileKey, matchAcVerification, ENV_LIMIT_RE, pathTokensIn, commitSuffixFor };
 
 // Source-doc loader: the spec's source_docs paths are resolved inside the
 // project and their raw text is handed to verify/audit so the ORIGINAL
@@ -584,12 +592,21 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
           emit.event(run.id, nodeId, { t: "notice", s: "git: nothing staged to commit" });
           return;
         }
-        const title = run.nodeWork[nodeId]?.title ?? nodeId;
-        const hash = await git.commit(run.projectPath, `feat: ${title} (nano ${run.id})`);
-        run.state.git.commits.push({ node: nodeId, hash, files });
+        // Conventional format with the task's ticket id (OMNI-### / F## when
+        // the task names one) — the project git-guidelines convention; a
+        // fix-round re-run of this node types the commit `fix:`. The TITLE is
+        // capped so the whole line stays ≤72 chars WITHOUT ever truncating
+        // the type prefix or the ticket suffix.
+        const title = String(run.nodeWork[nodeId]?.title ?? nodeId).replace(/\s+/g, " ").trim();
+        const type = run.state.feedbackByNode?.[nodeId] ? "fix" : "feat";
+        const suffix = commitSuffixFor(run.task, run.id);
+        const maxTitle = Math.max(16, 72 - type.length - 2 - suffix.length - 1);
+        const subject = `${type}: ${title.slice(0, maxTitle)} ${suffix}`;
+        const hash = await git.commit(run.projectPath, subject);
+        run.state.git.commits.push({ node: nodeId, hash, files, subject });
         emit.event(run.id, nodeId, {
           t: "notice",
-          s: `git: committed ${files.length} file(s) (${hash.slice(0, 7)}) on ${run.git.runBranch}`,
+          s: `git: committed ${files.length} file(s) (${hash.slice(0, 7)}) on ${run.git.runBranch} — "${subject}"`,
         });
         emit.state(run);
       } catch (e) {
@@ -1446,6 +1463,20 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
 
   async function execute(run) {
     try {
+      // Git-on runs must ALWAYS execute on their own branch. After a
+      // failed/cancelled run settles, integrate() checks out the base branch —
+      // without this, a resume would commit straight onto main. The checkout
+      // also restores the branch's committed files into the working tree for
+      // the resumed coders.
+      if (run.git?.enabled) {
+        try {
+          await git.checkout(run.projectPath, run.git.runBranch);
+        } catch (e) {
+          throw new Error(
+            `git: could not restore run branch ${run.git.runBranch} (${e?.message ?? e}) — resolve the working tree (clean or stash) and resume again`,
+          );
+        }
+      }
       // Resume after cancel-at-plan-gate: the plan node is already done, so
       // runDag would skip planPhase entirely — re-present the approval gate
       // BEFORE any coder runs. Without this, resume bypasses approval.

@@ -100,3 +100,8 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 - [x] Observability contract added to clarify delivery-shape questions
 - [x] gitleaks.toml allowlist: agreed NOT needed (audits disproved the false-positive risk)
 - Verified on fixtures + the real omni-isp tree: the three new warns flag exactly the three open audit items (stale .env, RedisInsight :latest, F01 🔴)
+
+## 16. Git fixes (2026-09-16)
+- [x] Fix: resumed git-on runs committed to the base branch — execute() now checks out the run branch first (also restores the branch's committed files into the tree); checkout failure = loud run failure with guidance
+- [x] Commit format honors project conventions: `<type>: <subject> (<OMNI-###|F##|#id>)` extracted from the task (fallback `(nano <runId>)`); fix-round re-commits type as `fix:`; 72-char cap never truncates the ticket suffix
+- [x] Live-verified on a scratch repo: cancel-during-verify → settled on main + branch kept → resume → branch restored + files back in tree → verify → ff-merge into main; commits read (OMNI-101..104)
