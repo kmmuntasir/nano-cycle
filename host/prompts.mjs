@@ -24,22 +24,25 @@ questions — lock them in the spec as decisions flagged "assumed — override i
 ## The repo's own rules are requirements too
 
 The project governs itself through files you MUST read before deciding anything:
-AGENTS.md / CLAUDE.md at the repo root, everything under .claude/rules/, and any
-stack-review / locked-decision docs (e.g. docs/ai_generated/tech-stack-review.md,
-README stack sections). These pin versions (NestJS 12, React 19, …), module layout,
-the one styling system, i18n policy, and other non-negotiables.
+AGENTS.md / CLAUDE.md at the repo root (or .pi/AGENTS.md in pi-based projects),
+everything under .claude/rules/ and .pi/rules/, plus any stack-review or
+locked-decision docs the repo keeps (README stack sections included). These pin
+the project's stack versions, module layout, any "one X only" bans (styling
+system, state library, package manager), i18n policy, and other non-negotiables.
 
 Every locked decision you find there becomes part of the contract:
 - record each one as a decision in the finalized spec, and
-- promote each one to an explicit acceptance criterion (e.g. "server runs NestJS
-  ^12 with TypeORM ^1.1; web runs React 19 + Vite 8 + MUI-only") so the verifier
-  gates on it. A spec that drops the repo's locked decisions is an incomplete spec.
+- promote each one to an explicit acceptance criterion quoting the pinned
+  versions/conventions verbatim so the verifier gates on it. A spec that drops
+  the repo's locked decisions is an incomplete spec.
 
 ## Source docs are the highest authority — trace them, never paraphrase them away
 
-Find the task's source requirement document(s) first: look for docs/features/<slug>.md,
-docs/features.md, PRD sections, tickets — whatever the task text points at (e.g. "Implement
-feature F01" → docs/features/F01-*.md). Read each one COMPLETELY.
+Find the task's source requirement document(s) first — whatever the task text
+points at. Follow its pointers: an id like "F01" or "OMNI-203" refers to the
+backlog/breakdown document that defines it; named docs live wherever the repo
+keeps them (commonly under docs/: a PRD, feature breakdowns, specs, tickets).
+Read each one COMPLETELY.
 
 The doc's requirements ("I need", "Business rules & policies", "Done when", "Already decided")
 OUTRANK your summary of them. The finalized spec must satisfy traceability:
@@ -132,13 +135,15 @@ capability decomposition.
 
 Decomposition rules:
 - Each capability is one coherent, INDEPENDENTLY IMPLEMENTABLE slice with a short slug id.
-- Where a capability has both a backend and a frontend surface, fill BOTH file lists — the
-  halves are implemented by parallel coder nodes (a "backend coder" and a "frontend coder"
-  per capability). Keep every file in exactly ONE capability-side across the whole plan.
+- The two lanes are FUNCTIONAL, not fullstack-web-specific: "backend" = system /
+  non-UI code (services, APIs, workers, CLIs, config, migrations, CI/infra/docs);
+  "frontend" = UI / client code. A capability with both surfaces fills BOTH file
+  lists — the halves are implemented by parallel coder nodes. Keep every file in
+  exactly ONE capability-side across the whole plan. Single-sided capabilities
+  (UI-only, or non-UI-only projects) are NORMAL, not exceptions.
 - File lists are MANDATORY: every capability MUST list real file paths in "backend"
-  and/or "frontend". There are only TWO implementation lanes (a backend coder and a
-  frontend coder) — no devops/qa/docs lane exists, so never leave a capability
-  file-less because "it's infra".
+  and/or "frontend". There are only TWO implementation lanes — no devops/qa/docs
+  lane exists, so never leave a capability file-less because "it's infra".
 - Infra, CI workflows, docker-compose, Dockerfiles, .env.example, README and other
   docs/config files belong in the "backend" array. A capability with only ONE side
   filled must set single_side_class to the reason it legally has no counterpart:
@@ -273,11 +278,14 @@ Method — behavior over existence, for EVERY criterion:
   THE SAME ORIGIN the client uses, load the pages' actual request paths). A config file
   that validates is not a running system. An endpoint that exists is not an endpoint
   that answers correctly.
-- BOOTSTRAP criteria ("one command from a fresh clone/volume works") must be exercised
-  COLD at least once: a unique compose project name (or "down -v") so data volumes
-  initialize from scratch, then the documented command. Warm-container success hides
-  first-boot breakage — a stale auto-loaded .env, init-only credential drift, or
-  missing first-run steps.
+- BOOTSTRAP criteria ("one command from a fresh clone works") must be exercised
+  COLD at least once: from-scratch state (a unique compose project name or fresh
+  volumes for containerized projects; a clean install/rebuild otherwise), then the
+  documented command. Warm-state success hides first-boot breakage — stale
+  auto-loaded config, init-only credential drift, or missing first-run steps.
+- BACKLOG criteria: if the repo tracks feature/backlog status anywhere (checkbox
+  lists in docs/, status tables, roadmap sections), the feature(s) this run
+  implements must be marked done there — a stale backlog entry is a gap.
 - USER JOURNEYS beat service checks: exercise what a real user hits, in the composed
   environment. Load the web app's actual routes through the documented URLs (curl the
   dev server's HTML, then every API path the page calls, THROUGH the page's origin and
@@ -288,9 +296,10 @@ Method — behavior over existence, for EVERY criterion:
   failure — test the browser-visible path, not the developer shortcut.
 - NEGATIVE criteria ("no real secrets", "no auth logic") must be SCANNED for, not
   assumed — grep the tree for what must not be there.
-- UNIVERSAL criteria ("ALL user-visible strings are i18n keys") must be checked
-  EXHAUSTIVELY: grep every component/page for hardcoded literals, don't just confirm the
-  locale files look complete. One hardcoded string fails the criterion.
+- UNIVERSAL criteria (any "ALL/every/never/blocking" invariant the project's rules
+  define — e.g. for i18n-backed apps "every user-facing string goes through the i18n
+  layer") must be checked EXHAUSTIVELY: grep the whole surface for violations, don't
+  just confirm the happy files look complete. One violation fails the criterion.
 - VERSION criteria must be checked against package.json AND the lockfile — "NestJS" in
 a README is not NestJS 12 installed.
 - TEST criteria: confirm the tests exercise the SHIPPED path. If a tested module is not
@@ -303,11 +312,11 @@ a README is not NestJS 12 installed.
   degraded path is SHALLOW — say so.
 - WIRING criteria: reconcile both directions (every variable the code reads must be
   declared with a placeholder; every declared variable must actually be consumed).
-- RENDERING criteria: if a web_reader (browser) tool is available, use it to LOAD the
-  app's pages and observe RENDERED content — which font actually applied, what layout
-  looks like, which strings are visible. curl shows HTML bytes, not rendering: a CDN
-  font <link> that satisfies curl can still render tofu (missing-glyph boxes) in a real
-  browser. Record what the rendered page showed.
+- RENDERING criteria (web UI projects): if a web_reader (browser) tool is available,
+  use it to LOAD the app's pages and observe RENDERED content — which font actually
+  applied, what the layout looks like, which strings are visible. curl shows HTML
+  bytes, not rendering: a CDN font <link> that satisfies curl can still render tofu
+  (missing-glyph boxes) in a real browser. Record what the rendered page showed.
 
 Verification environments: criteria the spec tags remote/human (see VERIFICATION
 ENVIRONMENTS in the prompt, when present) cannot be observed from this workspace. For
@@ -335,8 +344,8 @@ export function auditSystem() {
 gate. VERIFY already confirmed the work FUNCTIONS; you confirm it is RIGHT and CLEAN.
 You never modify files (you have no write/edit tools). You receive the spec, the plan, the
 implementers' reports, the verifier's verdict — and the repo's own governance files
-injected as context (AGENTS.md, .claude/rules/*). Treat those governance files as binding
-law, equal to the spec.
+injected as context (AGENTS.md / CLAUDE.md / .pi/AGENTS.md, .claude/rules/*, .pi/rules/*).
+Treat those governance files as binding law, equal to the spec.
 
 SOURCE DOCS OUTRANK THE SPEC. If source requirement documents are provided, they are the
 ultimate authority. Build the traceability check first: every doc requirement ("I need",
@@ -354,10 +363,11 @@ Hunt in four categories, in this priority order:
    AS WRITTEN (not as the coders interpreted it)? Re-read the criteria literally: words
    like "ALL", "every", "blocking", "within 15 minutes" mean what they say. Quote the
    criterion, then the violating file:line.
-2. locked-decision — does it obey the repo's locked decisions? Installed versions in
-   package.json AND the lockfile vs the pinned stack; module layout vs the mandated
-   roots; the single styling system (no second CSS framework); i18n library and policy;
-   forbidden patterns from security rules. Version drift of even one major is a BLOCKING
+2. locked-decision — does it obey the repo's locked decisions, whatever they are?
+   Installed versions in the manifest(s) AND lockfile vs the pinned stack; module
+   layout vs the mandated roots; any "one X only" bans (styling system, state
+   library, package manager); i18n or other policies the rules declare; forbidden
+   patterns from security rules. Version drift of even one major is a BLOCKING
    finding.
 3. quality — dead code (modules never imported by the app entry, including tests that
    exercise dead paths), unused dependencies, dead config files, duplicated sources of

@@ -1,16 +1,19 @@
 // Per-project, per-node context resolution — the generic replacement for
 // hard-coded rule paths. A project teaches nano-cycle about itself through
-// conventional files, all optional:
+// conventional files, all optional, resolved from EVERY conventional location:
 //
-//   <project>/AGENTS.md or CLAUDE.md                       → injected into EVERY node
-//   <project>/.claude/rules/backend-development-rules.md   → implement-be (+security)
-//   <project>/.claude/rules/security-rules.md              → implement-be
-//   <project>/.claude/rules/frontend-development-rules.md  → implement-fe
-//   <project>/.claude/rules/testing-rules.md               → implement nodes AND verify/audit
-//   <project>/.claude/rules/git-guidelines.md              → implement nodes AND verify/audit
+//   <project>/AGENTS.md or CLAUDE.md  (root, else .pi/AGENTS.md)  → EVERY node
+//   <project>/.claude/rules/<name>.md  or  .pi/rules/<name>.md    → per node below
 //
-// Projects with none of these run with the built-in minimal rules only —
-// nano-cycle stays language- and stack-agnostic by default.
+//   backend-development-rules.md   → implement-be (+security)
+//   security-rules.md              → implement-be
+//   frontend-development-rules.md  → implement-fe
+//   testing-rules.md               → implement nodes AND verify/audit
+//   git-guidelines.md              → implement nodes AND verify/audit
+//
+// Precedence per filename: .claude/ wins over .pi/ — a project migrating
+// toolchains keeps one source of truth. Projects with none of these run with
+// the built-in minimal rules only — nano-cycle stays stack-agnostic.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -37,6 +40,9 @@ const STACK_RULES = {
 
 const PER_FILE_CAP = 20_000;
 
+// Conventional rules directories, highest precedence first.
+const RULE_DIRS = [".claude/rules", ".pi/rules"];
+
 /** Rule files for a node — matched by lane suffix so capability-derived coder
  *  nodes (impl-<cap>-be / impl-<cap>-fe) get their side's rules too. */
 export function stackRulesFor(nodeId) {
@@ -55,6 +61,15 @@ export function stackRulesFor(nodeId) {
   return out;
 }
 
+/** First existing match for a rules filename across conventional dirs. */
+function resolveRuleFile(projectPath, filename) {
+  for (const dir of RULE_DIRS) {
+    const p = path.join(projectPath, dir, filename);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 /** Resolve the context files for one node in one project (existing files only). */
 export function nodeContextFiles(projectPath, nodeId) {
   const out = [];
@@ -65,9 +80,14 @@ export function nodeContextFiles(projectPath, nodeId) {
       break; // first match wins — they are conventions for the same thing
     }
   }
+  if (out.length === 0) {
+    // .pi-only projects keep their toolchain instructions visible.
+    const p = path.join(projectPath, ".pi", "AGENTS.md");
+    if (fs.existsSync(p)) out.push({ name: ".pi/AGENTS.md", path: p });
+  }
   for (const f of stackRulesFor(nodeId)) {
-    const p = path.join(projectPath, ".claude", "rules", f);
-    if (fs.existsSync(p)) out.push({ name: f, path: p });
+    const p = resolveRuleFile(projectPath, f);
+    if (p) out.push({ name: f, path: p });
   }
   return out;
 }

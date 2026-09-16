@@ -159,3 +159,15 @@ The `.nano-cycle/spec-*.md` write into target projects is gone — it was never 
 **Live verification** (scratch repo, four runs): commits read `(OMNI-101)`…`(OMNI-104)` with the suffix intact under truncation; a run cancelled mid-verify settled on `main` with its branch kept, and its resume checked the branch back out (files restored into the tree), completed, and ff-merged cleanly into `main`.
 
 **Incidental finding (not fixed here):** `GET /api/runs/:id` returns the full state plus the entire event log, and every streamed event does a synchronous `appendFileSync` + state `writeFileSync` — during high-thinking verify streams the REST endpoint can starve for minutes (the GUI is unaffected; it rides the WebSocket). A lean status endpoint or async/throttled persistence is a worthwhile follow-up.
+
+
+## 12. Project-agnosticism pass (2026-09-16, eighth commit)
+
+Constraint: nano-cycle may reference only common conventions (`.claude`, `.pi`, README, CLAUDE.md, AGENTS.md, gh, docker compose) — nothing Omni-ISP-shaped. Violations found and fixed:
+
+- **`rules.mjs`** resolved context only from `.claude/rules/*` + root `AGENTS.md|CLAUDE.md` — a `.pi`-only project (the new `glm-coding-plan-usage-monitor`) injected NOTHING. Now: `.claude/rules` and `.pi/rules` both honored (`.claude` wins per filename), `.pi/AGENTS.md` is the agents-file fallback. Verified: the new project's full `.pi` ruleset reaches the right nodes; omni-isp unchanged with `.claude` precedence.
+- **`checks.mjs`**: `deps-declared` discovers `package.json` anywhere (was hardcoded root/backend/frontend/apps); `i18n-parity` requires parity across ANY set of ISO-coded locale JSONs in a directory (was hardcoded `en.json`/`bn.json` — an Omni-ISP bilingual policy); the `feature-status` check is removed per owner decision (the verifier now carries BACKLOG guidance — stale backlog entries are gaps); `not_for_ai_models` dropped from walk exclusions; `NANO_EXCLUDE_DIRS` env adds per-project exclusions.
+- **`prompts.mjs`**: lanes defined functionally ("backend = system/non-UI code: services, workers, CLIs, config, CI; frontend = UI/client code; single-sided is normal"); web/i18n-flavored mandates reframed as conditional examples; source-doc discovery follows the task's pointers (an `F01`/`OMNI-203` id → the backlog doc defining it) instead of `docs/features.md`-shaped paths; stack examples genericized.
+- **README + spec schema descriptions** updated to the same language.
+
+Verified against three trees (omni-isp regression unchanged; the new extension+CLI project resolves its `.pi` ruleset, passes deps-declared via discovered manifests; a bare repo skips cleanly) plus locale-set fixtures (en/fr pair and en/de/es triple, drift caught in every direction). Bonus: the genericized suite immediately flagged two REAL states in the new project — its intentionally-local token-bearing `index.html` (gitignored, never committed — the secrets check working as designed) and genuine README↔manifest drift (`npm run dev`/`build` documented, no scripts yet).

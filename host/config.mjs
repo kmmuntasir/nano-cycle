@@ -100,7 +100,7 @@ export const ARTIFACT_SCHEMAS = {
     summary: Type.String({ description: "The refined task, fully decided" }),
     source_docs: Type.Optional(
       Type.Array(Type.String(), {
-        description: "Paths of the source requirement documents this spec traces (docs/features/*.md, PRD sections). Their requirements OUTRANK this spec's wording",
+        description: "Paths of the source requirement documents this spec traces (PRD, feature breakdowns, backlog, tickets — wherever the repo keeps them). Their requirements OUTRANK this spec's wording",
       }),
     ),
     decisions: Type.Array(

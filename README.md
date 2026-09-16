@@ -109,20 +109,22 @@ Before **every** verify pass the driver itself runs, in the project tree:
 | Check | Catches |
 |---|---|
 | `secrets-gitleaks` | real secrets in the tree (gitleaks binary → pinned docker → skip) |
-| `deps-declared` | imports/configs referencing packages no `package.json` declares (per-manifest scope, tsconfig-alias aware) |
+| `deps-declared` | imports/configs referencing packages no `package.json` declares (manifests discovered anywhere; per-manifest scope, tsconfig-alias aware) |
 | `no-cdn-fonts` | `fonts.googleapis.com`/`gstatic` references — the tofu failure mode |
-| `i18n-parity` | `en.json`/`bn.json` locale pairs with different key sets (both directions) |
+| `i18n-parity` | any locale set the project defines (2+ ISO-coded JSONs in one dir) with key drift, every direction |
 | `env-wiring` | `.env.example` keys vs `process.env`/`import.meta.env` reads, both directions |
 | `readme-commands` | README-documented `npm run <x>` / `./scripts/<y>` that don't resolve |
 | `compose-env` | *(warn)* a project-dir `.env` that docker compose auto-loads — stale values break fresh-volume first boot while warm tests stay green |
 | `compose-pins` | *(warn)* floating compose image refs (`:latest` / tag-less) — silent stack drift |
-| `feature-status` | *(warn)* the task's feature id still marked not-started (🔴) in `docs/features.md` |
+
 
 Failures gate the run even if the verify model passes the criterion; skips never
 gate. Results land in the verify prompt as ground truth, in `state.mechanicalChecks`
 (visible in the GUI's Artifacts tab), and in the event feed. Disable with
 `NANO_CHECKS=off` (or a comma list of ids); pin the gitleaks image with
-`NANO_GITLEAKS_IMAGE`.
+`NANO_GITLEAKS_IMAGE`; add per-project walk exclusions with `NANO_EXCLUDE_DIRS="dir1,dir2"`.
+Backlog/feature status is deliberately NOT a mechanical check — the verifier is
+prompted to catch stale backlog entries.
 
 ## Remote CI verification (opt-in)
 

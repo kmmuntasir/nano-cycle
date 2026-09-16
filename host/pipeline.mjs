@@ -1034,7 +1034,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   // env wiring, README command truth. Failures gate; skips never do.
   async function runMechanicalGate(run) {
     emit.event(run.id, "_run", { t: "notice", s: "mechanical checks: running (driver-deterministic)" });
-    const checks = await runMechanicalChecks({ projectPath: run.projectPath, runId: run.id, emit, task: run.task });
+    const checks = await runMechanicalChecks({ projectPath: run.projectPath, runId: run.id, emit });
     run.state.mechanicalChecks = { round: run.round ?? 0, at: new Date().toISOString(), checks };
     for (const c of checks) {
       emit.event(run.id, "_run", {

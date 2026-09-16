@@ -16,8 +16,9 @@ const execFileAsync = promisify(execFile);
 const EVIDENCE_CAP = 2000;
 const WALK_OPTS = {
   // Product code only. Toolchain mirrors (.pi/.opencode/.kilo/.claude skill
-  // and agent files), workflow state (.context), and non-AI product assets
-  // are NOT product code — scanning them produced false-positive gaps.
+  // and agent files) and workflow state (.context) are NOT product code —
+  // scanning them produced false-positive gaps. Extra per-project exclusions:
+  // NANO_EXCLUDE_DIRS="dir1,dir2".
   excludeDirs: new Set([
     "node_modules",
     ".git",
@@ -33,11 +34,13 @@ const WALK_OPTS = {
     ".kilo",
     ".claude",
     ".context",
-    "not_for_ai_models",
   ]),
   maxFiles: 5000,
   maxFileBytes: 1_000_000,
 };
+for (const d of (process.env.NANO_EXCLUDE_DIRS ?? "").split(/[,;]/).map((x) => x.trim()).filter(Boolean)) {
+  WALK_OPTS.excludeDirs.add(d);
+}
 
 const CODE_EXTS = new Set([
   ".js",
@@ -236,20 +239,16 @@ function tsconfigAliasPrefixes(pkgDir) {
  *  Each manifest's scope = its own subtree minus subtrees with their own
  *  package.json (the monorepo false-positive guard). */
 async function checkDepsDeclared(projectPath) {
-  const manifestDirs = [projectPath];
-  for (const sub of ["backend", "frontend"]) {
-    const p = path.join(projectPath, sub);
-    if (fs.existsSync(path.join(p, "package.json"))) manifestDirs.push(p);
-  }
-  const appsDir = path.join(projectPath, "apps");
-  if (fs.existsSync(appsDir)) {
-    for (const e of fs.readdirSync(appsDir, { withFileTypes: true })) {
-      if (e.isDirectory() && fs.existsSync(path.join(appsDir, e.name, "package.json"))) {
-        manifestDirs.push(path.join(appsDir, e.name));
-      }
-    }
-  }
-  const manifests = manifestDirs.filter((d) => fs.existsSync(path.join(d, "package.json")));
+  // Layout-agnostic: every package.json in the tree (walk already excludes
+  // node_modules/toolchain dirs) governs its own subtree minus deeper
+  // manifests — monorepo shapes are discovered, never hardcoded.
+  const manifests = [
+    ...new Set(
+      walk(projectPath, { exts: new Set([".json"]) })
+        .filter((abs) => path.basename(abs) === "package.json")
+        .map((abs) => path.dirname(abs)),
+    ),
+  ];
   if (manifests.length === 0) {
     return { id: "deps-declared", title: "Dependency declarations", status: "skipped", evidence: "no package.json found" };
   }
@@ -415,37 +414,46 @@ function flattenKeys(obj, prefix = "") {
   return out;
 }
 
-/** en/bn locale JSON pairs must cover the same key set. */
+/** Locale JSON sets must cover the same key set — any language set the
+ *  project itself defines (en+bn, en+fr, …). A directory holding 2+ files
+ *  named with ISO-639 codes is treated as one locale set; parity is required
+ *  across ALL of its members, in every direction.
+ */
+const LOCALE_FILE_RE = /^([a-z]{2})(?:[-_][A-Za-z]{2,4})?\.json$/;
 async function checkI18nParity(projectPath) {
-  const pairs = new Map(); // dir -> {en: Set, bn: Set}
+  const sets = new Map(); // dir -> Map(lang -> Set(keys))
   for (const abs of walk(projectPath, { exts: new Set([".json"]) })) {
-    const base = path.basename(abs).toLowerCase();
-    if (base !== "en.json" && base !== "bn.json") continue;
-    const lang = base.slice(0, 2);
+    const m = path.basename(abs).match(LOCALE_FILE_RE);
+    if (!m) continue;
+    const lang = m[1];
     const dir = path.dirname(abs);
-    if (!pairs.has(dir)) pairs.set(dir, {});
+    if (!sets.has(dir)) sets.set(dir, new Map());
     try {
       const j = JSON.parse(fs.readFileSync(abs, "utf8"));
-      pairs.get(dir)[lang] = new Set(flattenKeys(j));
+      sets.get(dir).set(lang, new Set(flattenKeys(j)));
     } catch {
-      /* unparsable locale file — skip the pair */
+      /* unparsable locale file — skip it */
     }
   }
-  const usable = [...pairs.entries()].filter(([, v]) => v.en && v.bn);
+  const usable = [...sets.entries()].filter(([, langs]) => langs.size >= 2);
   if (usable.length === 0) {
-    return { id: "i18n-parity", title: "Locale key parity (en/bn)", status: "skipped", evidence: "no en.json/bn.json pairs found" };
+    return { id: "i18n-parity", title: "Locale key parity", status: "skipped", evidence: "no locale file sets found (2+ ISO-coded JSONs in one directory)" };
   }
   const problems = [];
-  for (const [dir, { en, bn }] of usable) {
-    const missingBn = [...en].filter((k) => !bn.has(k));
-    const missingEn = [...bn].filter((k) => !en.has(k));
-    if (missingBn.length) problems.push(`${path.relative(projectPath, dir)}: missing in bn — ${missingBn.slice(0, 8).join(", ")}${missingBn.length > 8 ? " …" : ""}`);
-    if (missingEn.length) problems.push(`${path.relative(projectPath, dir)}: missing in en — ${missingEn.slice(0, 8).join(", ")}${missingEn.length > 8 ? " …" : ""}`);
+  for (const [dir, langs] of usable) {
+    const names = [...langs.keys()];
+    const union = new Set(names.flatMap((l) => [...langs.get(l)]));
+    for (const l of names) {
+      const missing = [...union].filter((k) => !langs.get(l).has(k));
+      if (missing.length) {
+        problems.push(`${path.relative(projectPath, dir)}: missing in ${l} — ${missing.slice(0, 8).join(", ")}${missing.length > 8 ? " …" : ""}`);
+      }
+    }
   }
   if (problems.length > 0) {
-    return { id: "i18n-parity", title: "Locale key parity (en/bn)", status: "fail", evidence: cap(problems.join(" | ")) };
+    return { id: "i18n-parity", title: "Locale key parity", status: "fail", evidence: cap(problems.join(" | ")) };
   }
-  return { id: "i18n-parity", title: "Locale key parity (en/bn)", status: "pass", evidence: `${usable.length} locale pair(s) with identical key sets` };
+  return { id: "i18n-parity", title: "Locale key parity", status: "pass", evidence: `${usable.length} locale set(s) with identical key sets across all languages` };
 }
 
 const PUBLIC_PREFIXES = ["VITE_", "NEXT_PUBLIC_", "REACT_APP_", "EXPO_PUBLIC_", "NUXT_ENV_", "GATSBY_"];
@@ -620,43 +628,12 @@ async function checkComposePins(projectPath) {
   return { id: "compose-pins", title: "Compose image pins", status: "pass", evidence: `all image references pinned across ${composeFiles.length} compose file(s)` };
 }
 
-/** Feature backlog hygiene: if the task names a feature id (F01, OMNI-203, …)
- *  and docs/features.md still marks it not-started (🔴), warn — BOTH F01 trees
- *  (reference included) shipped with a stale backlog status.
- */
-async function checkFeatureStatus(projectPath, task) {
-  const ids = [...String(task ?? "").matchAll(/\b(F\d{1,3}|OMNI-\d{1,4})\b/gi)].map((m) => m[1].toUpperCase());
-  const uniqueIds = [...new Set(ids)];
-  if (uniqueIds.length === 0) {
-    return { id: "feature-status", title: "Feature backlog status", status: "skipped", evidence: "task names no feature id (F## / OMNI-###)" };
-  }
-  const backlog = path.join(projectPath, "docs", "features.md");
-  if (!fs.existsSync(backlog)) {
-    return { id: "feature-status", title: "Feature backlog status", status: "skipped", evidence: "no docs/features.md backlog" };
-  }
-  const lines = readFileLines(backlog) ?? [];
-  const stale = [];
-  for (const id of uniqueIds) {
-    const row = lines.find((l) => new RegExp(`\\|\\s*${id}\\s*\\|`, "i").test(l) || new RegExp(`^#+.*\\b${id}\\b`, "i").test(l));
-    if (row && /🔴/.test(row)) stale.push(id);
-  }
-  if (stale.length > 0) {
-    return {
-      id: "feature-status",
-      title: "Feature backlog status",
-      status: "warn",
-      evidence: `docs/features.md still marks ${stale.join(", ")} as not-started (🔴) — flip the status when this work lands so the backlog stays truthful`,
-    };
-  }
-  return { id: "feature-status", title: "Feature backlog status", status: "pass", evidence: `${uniqueIds.join(", ")} not stale in docs/features.md` };
-}
-
 // ------------------------------------------------------------------ entry ---
 
 /** Run all mechanical checks. Never throws; each check returns
  *  { id, title, status: "pass"|"warn"|"fail"|"skipped", evidence }.
  *  Only "fail" gates; "warn" is recorded for the owner without a fix round. */
-export async function runMechanicalChecks({ projectPath, runId, emit, task }) {
+export async function runMechanicalChecks({ projectPath, runId, emit }) {
   void runId;
   void emit; // reserved for per-check progress if ever needed
   const results = await Promise.all([
@@ -668,7 +645,6 @@ export async function runMechanicalChecks({ projectPath, runId, emit, task }) {
     guard("readme-commands", "README command truth", () => checkReadmeCommands(projectPath)),
     guard("compose-env", "Compose auto-loaded .env", () => checkComposeEnv(projectPath)),
     guard("compose-pins", "Compose image pins", () => checkComposePins(projectPath)),
-    guard("feature-status", "Feature backlog status", () => checkFeatureStatus(projectPath, task)),
   ]);
   return results;
 }

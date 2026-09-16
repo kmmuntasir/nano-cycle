@@ -105,3 +105,9 @@ Tracking the approved plan (`~/.claude/plans/drifting-giggling-toucan.md`; analy
 - [x] Fix: resumed git-on runs committed to the base branch — execute() now checks out the run branch first (also restores the branch's committed files into the tree); checkout failure = loud run failure with guidance
 - [x] Commit format honors project conventions: `<type>: <subject> (<OMNI-###|F##|#id>)` extracted from the task (fallback `(nano <runId>)`); fix-round re-commits type as `fix:`; 72-char cap never truncates the ticket suffix
 - [x] Live-verified on a scratch repo: cancel-during-verify → settled on main + branch kept → resume → branch restored + files back in tree → verify → ff-merge into main; commits read (OMNI-101..104)
+
+## 17. Project-agnosticism pass (2026-09-16)
+- [x] rules.mjs: context resolved from .claude/rules AND .pi/rules (.claude wins per filename); .pi/AGENTS.md fallback when no root AGENTS/CLAUDE — .pi-only projects now fully visible to every node
+- [x] checks.mjs: deps-declared discovers package.json anywhere (was hardcoded backend/frontend/apps); i18n-parity = any ISO-coded locale SET (was en/bn hardcoded); feature-status check REMOVED (verify-prompt guidance instead); not_for_ai_models dropped, NANO_EXCLUDE_DIRS env added
+- [x] prompts: functional lane definitions (backend=system/non-UI incl. CLIs/workers/CI; frontend=UI/client; single-sided normal), conditional web/i18n examples, pointer-following source-doc discovery, backlog-staleness verify guidance, multi-location governance wording
+- [x] Verified: .pi-only project resolves full ruleset; .claude precedence; locale sets catch drift in any language pair/triple; bare repo skips cleanly; new project runs deps-declared green
