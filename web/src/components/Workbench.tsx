@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Box, Flex, Text } from "@chakra-ui/react";
 import { GhostButton } from "../ui/buttons";
-import { pretty } from "../lib/format";
-import type { RunState } from "../api";
+import { fmtTimestamp, pretty } from "../lib/format";
+import type { QaRound, RunState } from "../api";
 
 function groupOf(name: string, kind: string): string {
   if (kind === "input") return "Inputs";
@@ -11,6 +11,29 @@ function groupOf(name: string, kind: string): string {
   if (n.includes("plan")) return "Plans";
   if (n.includes("verif")) return "Verify";
   return "Outputs";
+}
+
+// Human-readable transcript of the clarify rounds: what was asked, which
+// options were offered (★ = recommended), and what the owner answered.
+function formatQa(qa: QaRound[]): string {
+  return qa
+    .map((r) => {
+      const head = `── Round ${r.round} · answered ${r.at ? fmtTimestamp(r.at) : "─"} ──`;
+      const body = r.questions
+        .map((q) => {
+          const lines = [`Q: ${q.question}`];
+          if (q.why) lines.push(`   why asked: ${q.why}`);
+          for (const o of q.options ?? []) {
+            lines.push(`   ○ ${o.label}${o.recommended ? " ★" : ""}${o.tradeoff ? ` — ${o.tradeoff}` : ""}`);
+          }
+          if (q.suggested) lines.push(`   suggested: ${q.suggested}`);
+          lines.push(`A: ${r.answers[q.id] ?? "(no answer)"}`);
+          return lines.join("\n");
+        })
+        .join("\n\n");
+      return `${head}\n\n${body}`;
+    })
+    .join("\n\n\n");
 }
 
 export default function Workbench({ state }: { state: RunState }) {
@@ -23,6 +46,9 @@ export default function Workbench({ state }: { state: RunState }) {
       out.push({ name: `input:${k}`, kind: "input", content: v, group: groupOf(k, "input") });
     }
     // Driver-side ground truth + deferred verification, surfaced as pseudo-artifacts.
+    if (state.qa?.length) {
+      out.push({ name: "clarifications", kind: "artifact", content: formatQa(state.qa), group: groupOf("clarifications", "artifact") });
+    }
     if (state.mechanicalChecks?.checks?.length) {
       out.push({ name: "checks:mechanical", kind: "artifact", content: pretty(state.mechanicalChecks), group: "Verify" });
     }
@@ -34,7 +60,7 @@ export default function Workbench({ state }: { state: RunState }) {
     }
     const order = ["Spec", "Plans", "Outputs", "Verify", "Inputs"];
     return out.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group) || a.name.localeCompare(b.name));
-  }, [state.artifacts, state.prompts, state.mechanicalChecks, state.deferredChecks]);
+  }, [state.artifacts, state.prompts, state.qa, state.mechanicalChecks, state.deferredChecks]);
 
   const [activeName, setActiveName] = useState<string | null>(null);
   useEffect(() => {

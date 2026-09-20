@@ -41,6 +41,10 @@ export default function App() {
   const [runId, setRunId] = useState<string | null>(null);
   const [state, setState] = useState<RunState | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  // Server caps the initial event payload (host/state.mjs EVENT_CAP); the
+  // total lets the console say "latest N of M" instead of silently hiding.
+  const [eventsTotal, setEventsTotal] = useState<number | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("pipeline");
   const [showNew, setShowNew] = useState(false);
@@ -74,15 +78,30 @@ export default function App() {
   }, [modelPick]);
 
   const loadRun = useCallback(async (id: string) => {
-    const { state: s, events: evs } = await api.getRun(id);
+    const { state: s, events: evs, totalEvents } = await api.getRun(id);
     setRunId(id);
     setState(s);
     setEvents(evs);
+    setEventsTotal(totalEvents ?? evs.length);
     setSelectedNode(s.nodes[0]?.id ?? null);
     if (s.gate?.type === "answers" || s.gate?.type === "plan-approval") setTab("qa");
     else setTab((t) => (t === "qa" ? "pipeline" : t));
     history.replaceState(null, "", `?run=${id}`);
   }, []);
+
+  // Selection entry points (sidebar, deep link, pickers) share this wrapper —
+  // a failed load surfaces as a banner instead of a silent no-op.
+  const openRun = useCallback(
+    async (id: string) => {
+      setLoadErr(null);
+      try {
+        await loadRun(id);
+      } catch (e) {
+        setLoadErr(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [loadRun],
+  );
 
   useEffect(() => {
     api.models().then(setModels).catch(() => {});
@@ -97,8 +116,8 @@ export default function App() {
     }).catch(() => {});
     refreshRuns();
     const deepLink = new URLSearchParams(location.search).get("run");
-    if (deepLink) loadRun(deepLink).catch(() => {});
-  }, [refreshRuns, loadRun]);
+    if (deepLink) openRun(deepLink);
+  }, [refreshRuns, openRun]);
 
   useEffect(() => {
     const ws = openWs((msg) => {
@@ -305,7 +324,7 @@ export default function App() {
           <Text fontSize="10px" color="muted" letterSpacing="widest" mb={2} fontFamily="system-ui, sans-serif">
             Runs · {runs.length}
           </Text>
-          <RunsSidebar runs={runs} runId={runId} onSelect={loadRun} />
+          <RunsSidebar runs={runs} runId={runId} onSelect={openRun} />
         </Box>
 
         {/* main */}
@@ -318,7 +337,7 @@ export default function App() {
                 value={runId ?? ""}
                 onChange={(e) => {
                   const v = (e.target as HTMLSelectElement).value;
-                  if (v) loadRun(v);
+                  if (v) openRun(v);
                 }}
               >
                 <option value="">— Select A Run —</option>
@@ -331,6 +350,23 @@ export default function App() {
             )}
           </Box>
 
+          {loadErr && (
+            <Box
+              border="1px solid"
+              borderColor="bad"
+              bg="rgba(241,106,106,0.08)"
+              color="bad"
+              borderRadius="md"
+              px={3}
+              py={2}
+              mb={3}
+              fontSize="12px"
+              fontFamily="system-ui, sans-serif"
+            >
+              Failed to load run — {loadErr}
+            </Box>
+          )}
+
           {!state ? (
             <Box border="1px dashed" borderColor="line" borderRadius="lg" p={8} textAlign="center" bg="surface">
               <Text fontSize="18px" fontWeight={800} fontFamily="system-ui, sans-serif" mb={2}>
@@ -342,13 +378,13 @@ export default function App() {
               <Flex gap={2} justifyContent="center" flexWrap="wrap">
                 <PrimaryButton onClick={() => setShowNew(true)}>＋ New Run</PrimaryButton>
                 {runs[0] && (
-                  <OutlineButton onClick={() => loadRun(runs[0].id)}>
+                  <OutlineButton onClick={() => openRun(runs[0].id)}>
                     Open {runs[0].id}
                   </OutlineButton>
                 )}
               </Flex>
               <Box mt={6} display={{ base: "block", lg: "none" }}>
-                <RunsSidebar runs={runs} runId={runId} onSelect={loadRun} />
+                <RunsSidebar runs={runs} runId={runId} onSelect={openRun} />
               </Box>
             </Box>
           ) : (
@@ -408,6 +444,7 @@ export default function App() {
                     nodeId={selectedNode}
                     setNodeId={setSelectedNode}
                     runStart={runStart}
+                    eventsTotal={eventsTotal}
                   />
                 </Box>
               )}

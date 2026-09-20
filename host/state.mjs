@@ -57,17 +57,32 @@ export function listRuns() {
   return out;
 }
 
-export function loadRun(runId) {
+// GUI runs get the most recent window of events, not the full journal — long
+// runs can reach hundreds of thousands of events, and shipping all of them
+// made /api/runs/:id return 60+ MB payloads the browser choked on. Matches
+// the client-side buffer cap (web/src/App.tsx slices to the last 3000).
+const EVENT_CAP = 3000;
+
+export function loadRun(runId, eventCap = EVENT_CAP) {
   const dir = path.join(runsDir(), runId);
   const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
   let events = [];
+  let totalEvents = 0;
   const evFile = path.join(dir, "events.jsonl");
   if (fs.existsSync(evFile)) {
-    events = fs
-      .readFileSync(evFile, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => JSON.parse(l));
+    const buf = fs.readFileSync(evFile);
+    // Scan line-start offsets first (cheap byte pass, no JSON parsing), then
+    // parse only the trailing `eventCap` lines.
+    const starts = [0];
+    for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) starts.push(i + 1);
+    if (starts[starts.length - 1] === buf.length) starts.pop(); // trailing newline
+    totalEvents = starts.length;
+    const first = Math.max(0, starts.length - eventCap);
+    for (let j = first; j < starts.length; j++) {
+      const end = j + 1 < starts.length ? starts[j + 1] - 1 : buf.length;
+      const line = buf.toString("utf8", starts[j], end);
+      if (line.trim()) events.push(JSON.parse(line));
+    }
   }
-  return { state, events };
+  return { state, events, totalEvents };
 }

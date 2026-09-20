@@ -673,9 +673,11 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
   }
 
   async function clarifyPhase(run) {
-    const rounds = [];
+    // Q&A history persists in state — the GUI shows it as an artifact, and a
+    // resumed clarify phase keeps its earlier rounds in the prompt context.
+    const rounds = (run.state.qa ?? []).map((r) => ({ questions: r.questions, answers: r.answers }));
     let emptyRounds = 0;
-    let round = 0;
+    let round = rounds.length;
     // UNCAPPED: the PM decides when nothing essential remains unknown. The
     // owner can cancel from the GUI at any point.
     while (true) {
@@ -725,6 +727,8 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
       gateClose(run);
       if (answers === "cancel") throw new Error("cancelled at answers gate");
       rounds.push({ questions: qs, answers });
+      // Record for the GUI (Artifacts → clarifications) and clarify-prompt history.
+      run.state.qa = [...(run.state.qa ?? []), { round, at: Date.now(), questions: qs, answers }];
       run.state.gate = null;
       run.state.status = "running";
       emit.state(run);
@@ -1743,6 +1747,7 @@ export function createPipeline({ modelRuntime, emit, webTools }) {
         feedbackByNode: {},
         writtenFiles: {},
         deferredChecks: [],
+        qa: [],
         mechanicalChecks: null,
         remoteChecks: null,
       };

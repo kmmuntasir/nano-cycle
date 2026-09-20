@@ -11,6 +11,23 @@ export interface NodeState {
   error: string | null;
 }
 
+export interface ClarifyQuestion {
+  id: string;
+  question: string;
+  type?: "multiple-choice" | "boolean" | "text";
+  options?: { label: string; recommended?: boolean; tradeoff?: string }[];
+  why?: string;
+  suggested?: string;
+}
+
+/** One answered clarification round — the record of what was asked and what the owner answered. */
+export interface QaRound {
+  round: number;
+  at: number;
+  questions: ClarifyQuestion[];
+  answers: Record<string, string>;
+}
+
 export interface RunState {
   id: string;
   task: string;
@@ -34,14 +51,7 @@ export interface RunState {
     type?: "divergence" | "answers" | "plan-approval";
     nodeId: string;
     divergence?: string;
-    questions?: {
-      id: string;
-      question: string;
-      type?: "multiple-choice" | "boolean" | "text";
-      options?: { label: string; recommended?: boolean; tradeoff?: string }[];
-      why?: string;
-      suggested?: string;
-    }[];
+    questions?: ClarifyQuestion[];
     round?: number;
     plan?: PlanApproval;
   } | null;
@@ -53,6 +63,7 @@ export interface RunState {
   feedbackByNode?: Record<string, string>;
   writtenFiles?: Record<string, string[]>;
   deferredChecks?: { criterion: string; env: string; evidence?: string }[];
+  qa?: QaRound[];
   tickets?: { id: string; title: string; implIds: string[]; verifyId: string }[];
   remoteChecks?: {
     round: number;
@@ -140,7 +151,8 @@ export const api = {
   removeProject: (name: string) =>
     jfetch<Project[]>(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" }),
   listRuns: () => jfetch<RunSummary[]>(`/api/runs?_=${Date.now()}`),
-  getRun: (id: string) => jfetch<{ state: RunState; events: RunEvent[] }>(`/api/runs/${id}`),
+  getRun: (id: string) =>
+    jfetch<{ state: RunState; events: RunEvent[]; totalEvents?: number }>(`/api/runs/${id}`),
   start: (
     task: string,
     tier: string,
