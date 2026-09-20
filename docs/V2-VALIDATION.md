@@ -37,6 +37,7 @@ rm -rf sandbox && mkdir sandbox && printf '{ "name": "nano-cycle-sandbox", "priv
 - ✅ **V2** owner re-run after the fix (run `20260920-204148298`) — completed; 4 real PM questions; spec locked (7 ACs, 7 decisions, all env-tagged); 0 spec ACs missing from the plan; verify 7/7; audit clean; all 5 skills in phase order.
 - ✅ **V3** plan reject-with-comments (run `20260920-210752155`) — owner rejection fed back into the SAME build session; plan resubmitted with the null-handling criterion; final code + tests cover `shout(null)`; verify 6/6, audit clean.
 - ✅ **V5** mechanical→fix round (owner run `20260920-213826032`) — `deps-declared` failed at round 0 with file:line precision (`legacy/old.js:1`); fix round resumed the SAME build session (`rounds: 1`, one session file); the builder declared the dep and left `legacy/` intact; impl-delta notes confirm untouched files stayed byte-identical; round 1 green → completed.
+- ⚠️→🔧 **V6 first attempt** (run `20260920-215309256`) — PM locked the spec without asking anything (legitimate for this task text); no round to steer → audit had nothing to block on → completed 7/7. Led to the **PM Must Ask** GUI toggle (`requireQuestions` — existed in the engine since v1, never exposed). Re-run V6 with it on.
 - ✅ **V4** divergence (run `20260920-211555646`) — outcome worth reading: the builder did NOT declare divergence; it resolved the contradiction (from-scratch, API-compatible left-pad semantics — dependency-free), the plan made both sides explicit criteria, and verify probed BOTH (semantics match + no deps + no vendored code) → 7/7. A model of this class prefers resolving over escalating — the divergence GATE path remains harness-covered; to force it live you'd need a genuinely impossible constraint.
 - ✅ Security override gate (part of run `20260920-161038752`) — out-of-scope secret classified honestly `fixable_in_scope:false`, routed to the owner.
 
@@ -174,13 +175,20 @@ builder fixes it in the SAME session (`steps[build].sessionFile` unchanged,
 
 ## V6 — audit blocking finding → fix round
 
+> **Owner finding (run `20260920-215309256`):** with Clarify merely ON, the PM
+> judged this task self-contained and locked the spec WITHOUT asking anything —
+> no round to steer, audit had nothing to block on, run completed 7/7. That's
+> legitimate PM behavior; the counter is the **PM Must Ask** toggle (forces ≥1
+> question round by withholding finalize — engine option `requireQuestions`,
+> now in the GUI). Use it below.
+
 | | |
 |---|---|
-| **Options** | Clarify **on** · Security: Off · Git off · Remote CI off · Audit **on** · Plan Approval on · Fix Rounds: 2 |
+| **Options** | Clarify **on** · **PM Must Ask on** · Security: Off · Git off · Remote CI off · Audit **on** · Plan Approval on · Fix Rounds: 2 |
 | **Fixture** | clean sandbox |
-| **Actions** | When the PM asks how invalid input should be handled, answer with the text below; Approve the plan gate |
+| **Actions** | The PM now MUST ask ≥1 round. Whatever it asks, also paste the steering text below into one of the answers; Approve the plan gate |
 
-**Answer to paste when the PM asks about invalid input:**
+**Steering text to paste into an answer (the null + README requirements are what audit should block on):**
 
 ```text
 toF and toC must return null for non-numeric input, and README.md must gain a

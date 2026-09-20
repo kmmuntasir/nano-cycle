@@ -62,6 +62,7 @@ export default function App() {
     }
   });
   const [clarify, setClarify] = useState(false);
+  const [requireQuestions, setRequireQuestions] = useState(false);
   const [useGit, setUseGit] = useState(true);
   const [useAudit, setUseAudit] = useState(true);
   const [approvePlan, setApprovePlan] = useState(true);
@@ -159,7 +160,7 @@ export default function App() {
   const start = async () => {
     setStarting(true);
     try {
-      const s = await api.start(task, project, modelPick, { clarify, maxFixRounds, git: useGit, audit: useAudit, approvePlan, remoteChecks: remoteChecks && useGit, security });
+      const s = await api.start(task, project, modelPick, { clarify, requireQuestions: clarify && requireQuestions, maxFixRounds, git: useGit, audit: useAudit, approvePlan, remoteChecks: remoteChecks && useGit, security });
       setShowNew(false);
       setTask("");
       await loadRun(s.id);
@@ -256,6 +257,8 @@ export default function App() {
       setModelPick={setModelPick}
       clarify={clarify}
       setClarify={setClarify}
+      requireQuestions={requireQuestions}
+      setRequireQuestions={setRequireQuestions}
       maxFixRounds={maxFixRounds}
       setMaxFixRounds={setMaxFixRounds}
       git={useGit}

@@ -19,6 +19,8 @@ export default function StartForm({
   setModelPick,
   clarify,
   setClarify,
+  requireQuestions,
+  setRequireQuestions,
   maxFixRounds,
   setMaxFixRounds,
   git,
@@ -45,6 +47,8 @@ export default function StartForm({
   setModelPick: (m: Record<string, string>) => void;
   clarify: boolean;
   setClarify: (v: boolean) => void;
+  requireQuestions: boolean;
+  setRequireQuestions: (v: boolean) => void;
   maxFixRounds: number;
   setMaxFixRounds: (n: number) => void;
   git: boolean;
@@ -147,6 +151,14 @@ export default function StartForm({
           <HStack gap={2} flexWrap="wrap">
             <OutlineButton active={clarify} onClick={() => setClarify(!clarify)}>
               {clarify ? "✓ Clarify First" : "Clarify First"}
+            </OutlineButton>
+            <OutlineButton
+              active={clarify && requireQuestions}
+              disabled={!clarify}
+              title="Force at least one PM question round before the spec may lock — finalize is withheld until questions were asked."
+              onClick={() => setRequireQuestions(!requireQuestions)}
+            >
+              {clarify && requireQuestions ? "✓ PM Must Ask" : "PM Must Ask"}
             </OutlineButton>
             <OutlineButton
               active={git}

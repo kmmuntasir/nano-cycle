@@ -185,7 +185,7 @@ export const api = {
     task: string,
     project: string,
     models: Record<string, string>,
-    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean; approvePlan?: boolean; remoteChecks?: boolean; security?: SecurityMode },
+    opts?: { clarify?: boolean; requireQuestions?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean; approvePlan?: boolean; remoteChecks?: boolean; security?: SecurityMode },
   ) =>
     jfetch<RunState>("/api/runs", {
       method: "POST",
