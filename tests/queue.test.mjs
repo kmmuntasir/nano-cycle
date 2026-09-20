@@ -293,6 +293,37 @@ await test("Q7: retry resumes the parked run from disk and the queue learns the 
   assert.strictEqual(st.tickets[0].status, "done", "the retried run's settle reached the queue");
 });
 
+// --- Q8: the dependency cascade reverses on completion ---------------------------
+
+await test("Q8: completing a blocked ticket un-blocks its dependents (the cascade reverses)", async () => {
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, null);
+  await seedProject("q8", [
+    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "gates-exhausted", runId: "run-q8-F1" },
+    { id: "F2", title: "two", description: "d", dependsOn: ["F1"], status: "blocked", blockedReason: "depends on F1", runId: "run-q8-F2" },
+    { id: "F3", title: "three", description: "d", status: "blocked", blockedReason: "stale-spec", runId: "run-q8-F3" },
+  ], "idle");
+  // the runs exist on disk (a restart happened since the cascade)
+  engine.disk.set("run-q8-F1", { status: "failed" });
+  engine.disk.set("run-q8-F2", { status: "clarified" });
+  engine.disk.set("run-q8-F3", { status: "clarified" });
+  const out = await mgr.retry("q8", "F1");
+  assert.strictEqual(out.ok, true, out.error);
+  await sleep(10);
+  await engine.finishBuild("run-q8-F1", "completed");
+  const st = await store("q8");
+  const byId = Object.fromEntries(st.tickets.map((t) => [t.id, t]));
+  assert.strictEqual(byId.F1.status, "done");
+  assert.strictEqual(byId.F2.status, "running", "dependency-blocked dependent requeued AND pumped once the blocker completed");
+  assert.strictEqual(byId.F2.blockedReason, null);
+  assert.strictEqual(byId.F3.status, "blocked", "own-gate blocks stay parked for the owner");
+  assert.strictEqual(byId.F3.blockedReason, "stale-spec");
+  await engine.finishBuild("run-q8-F2", "completed");
+  const st2 = await store("q8");
+  assert.ok(st2.tickets.filter((t) => t.id !== "F3").every((t) => t.status === "done"));
+  assert.strictEqual(st2.queue.state, "idle", "blocked-but-not-pumpable work parks the TICKET, never the queue");
+});
+
 process.on("exit", () => { try { fs.rmSync(path.join(ROOT, "tickets"), { recursive: true, force: true }); } catch {} });
 
 const failed = results.filter(([, ok]) => !ok).length;

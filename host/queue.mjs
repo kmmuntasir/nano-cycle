@@ -214,6 +214,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (status === "completed") {
       setTicketStatus(project, ticketId, "done", { runId });
       flipBacklog(project, t);
+      unblockDependents(project);
     } else if (status === "failed") {
       setTicketStatus(project, ticketId, "blocked", { reason: "gates-exhausted", runId });
     } else if (status === "cancelled") {
@@ -239,6 +240,21 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (status !== "completed") blockedOn(ticketId);
     broadcastQueue(project);
     pump(project);
+  }
+
+  // A completed ticket releases its dependents: dependency-blocked tickets
+  // whose deps are ALL done return to queued (their own gates never failed —
+  // the blocker did). Own-gate blocks (stale-spec, gates-exhausted, …) stay
+  // parked for the owner. The pump that follows picks them up in order.
+  function unblockDependents(project) {
+    const store = loadTickets(project);
+    const byId = new Map(store.tickets.map((x) => [x.id, x]));
+    for (const x of store.tickets) {
+      if (x.status !== "blocked" || !String(x.blockedReason ?? "").startsWith("depends on")) continue;
+      if ((x.dependsOn ?? []).every((d) => byId.get(d)?.status === "done")) {
+        setTicketStatus(project, x.id, "queued", { runId: x.runId });
+      }
+    }
   }
 
   function flipBacklog(project, ticket) {
