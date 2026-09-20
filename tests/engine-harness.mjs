@@ -86,7 +86,7 @@ const auditArtifact = (blocking) => ({
 
 // --- harness ------------------------------------------------------------------------
 
-async function runEngine({ scripts, autoGate = ["approve"], mechanical, security = "off", approvePlan = true, maxFixRounds = 2, project = "sandbox", adaptersOverride }) {
+async function runEngine({ scripts, autoGate = ["approve"], mechanical, security = "off", approvePlan = true, maxFixRounds = 2, project = "sandbox", adaptersOverride, extraStart = {} }) {
   const events = [];
   const state = { latest: null };
   const emit = {
@@ -108,7 +108,12 @@ async function runEngine({ scripts, autoGate = ["approve"], mechanical, security
     webTools: {},
     adapters: {
       openStepSession: makeFakeOpen(scripts),
-      runNode: adaptersOverride?.runNode ?? (async () => {}),
+      runNode: adaptersOverride?.runNode ?? (async (opts) => {
+        if (opts.nodeId === "clarify") {
+          const fin = (opts.customTools ?? []).find((t) => t.name === "finalize_spec");
+          await fin?.execute("x", { summary: "s", decisions: [], acceptance_criteria: ["AC"] });
+        }
+      }),
       runMechanicalChecks: async () => {
         const checks = mechanical ? mechanical(mechState.round) : [];
         mechState.round += 1;
@@ -141,9 +146,10 @@ async function runEngine({ scripts, autoGate = ["approve"], mechanical, security
     approvePlan,
     remoteChecks: false,
     security,
+    ...extraStart,
   });
   const deadline = Date.now() + 20_000;
-  while (!["completed", "failed", "cancelled"].includes(st.status) && Date.now() < deadline) {
+  while (!["completed", "failed", "cancelled", "clarified"].includes(st.status) && Date.now() < deadline) {
     await sleep(10);
   }
   clearInterval(poll);
@@ -600,6 +606,142 @@ await test("dispatch_coder: spawns a scoped child, merges its report into the tu
   assert.match(cp, /src\/health\/controller\.ts/);
   assert.match(cp, /200 on GET \/health/, "task ACs in child prompt");
   assert.ok(childCalls[0].tools.includes("write"), "child has write tools");
+});
+
+await test("v3: stopAfterClarify settles 'clarified' with the spec; no build session", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const scripts = { build: [async () => { throw new Error("build must not run before promotion"); }] };
+  const { state } = await runEngine({
+    scripts,
+    extraStart: { clarify: true, stopAfterClarify: true },
+  });
+  assert.strictEqual(state.status, "clarified", `status=${state.status}`);
+  assert.ok(state.artifacts.spec, "spec artifact present");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "build").length, 0, "no build session created");
+});
+
+await test("v3: promote continues into build→verify→completed; onSettled fires on both settles", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_verify", verifyArtifact(true));
+        await callTool(tools, "submit_audit", auditArtifact(false));
+      },
+    ],
+  };
+  const emit = { state: () => {}, event: () => {} };
+  const clarifyRunNode = async (opts) => {
+    if (opts.nodeId === "clarify") {
+      const fin = (opts.customTools ?? []).find((t) => t.name === "finalize_spec");
+      await fin?.execute("x", { summary: "s", decisions: [], acceptance_criteria: ["AC1"] });
+      return;
+    }
+    throw new Error("unexpected clarify child");
+  };
+  const engine = createEngine({
+    modelRuntime: {}, emit, webTools: {},
+    adapters: { openStepSession: makeFakeOpen(scripts), runNode: clarifyRunNode, runMechanicalChecks: async () => [] },
+  });
+  const id = `v3p-${Date.now()}`;
+  const settledStatuses = [];
+  const st = await engine.start({
+    id, task: "t", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: true, maxFixRounds: 2, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
+    stopAfterClarify: true, onSettled: (status) => settledStatuses.push(status),
+  });
+  const deadline = Date.now() + 15_000;
+  while (st.status !== "clarified" && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "clarified");
+  assert.deepStrictEqual(settledStatuses, ["clarified"]);
+  const out = engine.promote(id);
+  assert.strictEqual(out.ok, true, out.error);
+  while (!["completed", "failed", "cancelled"].includes(st.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.deepStrictEqual(settledStatuses, ["clarified", "completed"], "onSettled fired on both settles");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "build").length, 1, "one build session across promote");
+});
+
+await test("v3: tree lock — tree-holding run blocks starts/promotes; released after settle", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  let releaseHolder;
+  const holderGate = new Promise((r) => (releaseHolder = r));
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [
+      async ({ tools }) => {
+        await holderGate; // holder parked mid-verify until released
+        await callTool(tools, "submit_verify", verifyArtifact(true));
+        await callTool(tools, "submit_audit", auditArtifact(false));
+      },
+      async ({ tools }) => {
+        await callTool(tools, "submit_verify", verifyArtifact(true));
+        await callTool(tools, "submit_audit", auditArtifact(false));
+      },
+    ],
+  };
+  const emit = { state: () => {}, event: () => {} };
+  const clarifyRunNode = async (opts) => {
+    if (opts.nodeId === "clarify") {
+      const fin = (opts.customTools ?? []).find((t) => t.name === "finalize_spec");
+      await fin?.execute("x", { summary: "s2", decisions: [], acceptance_criteria: ["AC2"] });
+      return;
+    }
+    throw new Error("stop");
+  };
+  const engine = createEngine({
+    modelRuntime: {}, emit, webTools: {},
+    adapters: { openStepSession: makeFakeOpen(scripts), runNode: clarifyRunNode, runMechanicalChecks: async () => [] },
+  });
+  const holder = await engine.start({
+    id: "lock-holder", task: "t", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: false, maxFixRounds: 2, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
+  });
+  const deadline = Date.now() + 15_000;
+  while (engine.treeLockHolder(FIXTURE) !== "lock-holder" && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(engine.treeLockHolder(FIXTURE), "lock-holder", "holder holds the tree");
+  await assert.rejects(
+    () => engine.start({ id: "lock-c", task: "t", project: { name: "sandbox", path: FIXTURE }, models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" }, clarify: false, maxFixRounds: 0, git: false, audit: false, approvePlan: false, remoteChecks: false, security: "off" }),
+    /holds the working tree/,
+  );
+  const second = await engine.start({
+    id: "lock-b", task: "t2", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: true, maxFixRounds: 2, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
+    stopAfterClarify: true,
+  });
+  while (second.status !== "clarified" && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(second.status, "clarified", "clarify-only run settles alongside the holder");
+  const rejected = engine.promote("lock-b");
+  assert.strictEqual(rejected.ok, false, "promote rejected while tree held");
+  assert.match(rejected.error, /working tree is held/);
+  releaseHolder();
+  while (!["completed", "failed", "cancelled"].includes(holder.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(holder.status, "completed", holder.error);
+  const out = engine.promote("lock-b");
+  assert.strictEqual(out.ok, true, out.error);
+  while (!["completed", "failed", "cancelled"].includes(second.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(second.status, "completed", second.error);
 });
 
 // --- summary ---------------------------------------------------------------------------

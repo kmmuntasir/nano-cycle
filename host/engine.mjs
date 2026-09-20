@@ -1362,6 +1362,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     } catch {
       /* already resolved */
     }
+    try {
+      run.onSettled?.(run.state.status);
+    } catch {
+      /* observer errors never break the run */
+    }
   }
 
   async function execute(run) {
@@ -1431,6 +1436,23 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         run.state.artifacts.spec = spec;
         run.sourceDocCache = undefined; // re-resolve against the real spec
         emit.state(run);
+      }
+
+      // Queue mode (stopAfterClarify): the spec is locked — park here as
+      // "clarified". The ticket queue later promotes this run into the
+      // build/verify/security phases when the project's tree is free.
+      if (run.options.stopAfterClarify) {
+        run.holdsTree = false;
+        run.state.status = "clarified";
+        emit.event(run.id, "_run", {
+          t: "notice",
+          s: run.spec
+            ? "clarification complete — spec locked; run parked as clarified (awaiting queue promotion)"
+            : "clarify disabled — run parked as clarified (awaiting queue promotion)",
+        });
+        await integrate(run, false);
+        settle(run);
+        return;
       }
 
       // STEP 2 — build (initial turn only when no impl-delta milestone yet;
@@ -1608,11 +1630,18 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       approvePlan,
       remoteChecks: remoteChecksRequested,
       security: securityRequested,
+      stopAfterClarify,
+      ticketId,
+      onSettled,
     }) {
+      const options0 = { stopAfterClarify: !!stopAfterClarify };
+      // Phase-aware tree lock: clarify-only runs (stopAfterClarify) are
+      // read-only — many may overlap; only tree-holding runs exclude each other.
       for (const other of runs.values()) {
-        if (other.projectPath === project.path && !other.done.promiseSettled) {
+        if (other.projectPath !== project.path || other.done.promiseSettled) continue;
+        if (!options0.stopAfterClarify && other.holdsTree) {
           throw new Error(
-            `a run is already active on project "${project.name}" (${other.id}) — wait for it to finish or cancel it`,
+            `a run is already active on project "${project.name}" (${other.id}) and holds the working tree — wait for it to finish or cancel it`,
           );
         }
       }
@@ -1631,6 +1660,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
       const securityMode = ["off", "scan", "scan+vapt"].includes(securityRequested) ? securityRequested : "off";
       const options = {
+        stopAfterClarify: !!stopAfterClarify,
         clarify: !!clarify,
         requireQuestions: clarify && requireQuestions === true,
         maxFixRounds: Number.isFinite(maxFixRounds) ? Math.min(Math.max(maxFixRounds, 0), 5) : MAX_FIX_ROUNDS,
@@ -1639,6 +1669,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         approvePlan: approvePlan !== false,
         remoteCi: remoteChecksRequested === true && !!gitInfo,
         security: securityMode,
+        ticketId: ticketId ?? null,
       };
       const state = {
         version: 2,
@@ -1702,6 +1733,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         cancelRequested: false,
         finalized: false,
         ciCapability: undefined,
+        holdsTree: !options.stopAfterClarify,
+        onSettled: typeof onSettled === "function" ? onSettled : null,
         git: gitInfo,
         __emit: emit,
         done: (() => {
@@ -1828,6 +1861,36 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         }
       }
       return restartExecute(run, `resumed by owner — ${requeued} step(s) requeued, milestones/artifacts kept (build session resumes from disk)`);
+    },
+
+    // v3: continue a "clarified" run (queue mode) into build/verify/security.
+    // Rejects while another run holds the project's working tree.
+    promote(id) {
+      const run = runs.get(id);
+      if (!run) return { ok: false, error: "run not active in this server session" };
+      if (run.state.status !== "clarified") {
+        return { ok: false, error: `run status is "${run.state.status}" — only clarified runs can be promoted` };
+      }
+      if (!run.done.promiseSettled) {
+        return { ok: false, error: "run is still settling — try again in a moment" };
+      }
+      const holder = [...runs.values()].find(
+        (r) => r !== run && r.projectPath === run.projectPath && !r.done.promiseSettled && r.holdsTree,
+      );
+      if (holder) {
+        return { ok: false, error: `the working tree is held by run ${holder.id} — the queue will retry when it finishes` };
+      }
+      run.holdsTree = true;
+      run.options.stopAfterClarify = false; // persists via state.options (same object)
+      return restartExecute(run, "promoted by the ticket queue — continuing into build/verify/security");
+    },
+
+    // v3: does any active run hold this project's working tree?
+    treeLockHolder(projectPath) {
+      for (const r of runs.values()) {
+        if (r.projectPath === projectPath && !r.done.promiseSettled && r.holdsTree) return r.id;
+      }
+      return null;
     },
 
     // Restart recovery: rebuild the controller from runs/<id>/state.json. The
