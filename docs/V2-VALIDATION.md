@@ -29,11 +29,15 @@ which the model will read as project context). Use:
 rm -rf sandbox && mkdir sandbox && printf '{ "name": "nano-cycle-sandbox", "private": true, "version": "0.0.0", "type": "commonjs" }\n' > sandbox/package.json
 ```
 
-**Already validated during development (2026-09-20, glm-5.3-flash):**
+**Validated — development runs (2026-09-20, glm-5.3-flash):**
 
 - ✅ **V1** happy path (run `20260920-154407664`) — plan→tasks→impl→verify 7/7→audit accepted; all 5 skills observed loaded; sandbox tests green.
 - ✅ **V2** clarify loop (run `20260920-155539141`) — 3 real owner questions, answers via GUI, spec locked, all gates green.
 - ✅ Security override gate (part of run `20260920-161038752`) — out-of-scope secret classified honestly `fixable_in_scope:false`, routed to the owner.
+
+**Validated — owner manual runs:**
+
+- ✅ **V1** happy path (run `20260920-194320256`, 2026-09-20, glm-5.3-flash) — completed; verify accepted **11/11** with observed probe evidence; audit accepted (0 findings); all 5 skills loaded in phase order; plan-approval gate exercised; build session persisted.
 
 **Fixture lesson:** plant violations INSIDE `sandbox/` — files outside the
 project are invisible to mechanical checks (by design) and land in the
@@ -41,7 +45,7 @@ security-override path instead of a fix round.
 
 ---
 
-## V1 — happy path (re-run optional; already passed)
+## V1 — happy path ✅ (dev run `20260920-154407664` + owner run `20260920-194320256`)
 
 | | |
 |---|---|
