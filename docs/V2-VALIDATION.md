@@ -38,6 +38,7 @@ rm -rf sandbox && mkdir sandbox && printf '{ "name": "nano-cycle-sandbox", "priv
 - ✅ **V3** plan reject-with-comments (run `20260920-210752155`) — owner rejection fed back into the SAME build session; plan resubmitted with the null-handling criterion; final code + tests cover `shout(null)`; verify 6/6, audit clean.
 - ✅ **V5** mechanical→fix round (owner run `20260920-213826032`) — `deps-declared` failed at round 0 with file:line precision (`legacy/old.js:1`); fix round resumed the SAME build session (`rounds: 1`, one session file); the builder declared the dep and left `legacy/` intact; impl-delta notes confirm untouched files stayed byte-identical; round 1 green → completed.
 - ⚠️→🔧 **V6 first attempt** (run `20260920-215309256`) — PM locked the spec without asking anything (legitimate for this task text); no round to steer → audit had nothing to block on → completed 7/7. Led to the **PM Must Ask** GUI toggle + the discovery that `requireQuestions` was a v1 no-op (finalize was never structurally withheld — fixed + regression-tested).
+- ✅ **V11** git-on run (owner run `20260921-010740145`) — branch `nano-cycle/<id>` from master; one `feat: … (F41)` milestone commit citing the task's ticket id; ff-merged into master on acceptance, branch deleted; verify 10/10, audit clean.
 - ✅ **V10** cancel at plan gate → resume (owner run `20260921-001538062`) — 19 min at the gate pre-cancel with NO watchdog abort (fix confirmed under real conditions); on resume the gate was re-presented before any model work; both approvals honored; completed.
 - ✅ **V9** cancel mid-build → resume (owner run `20260920-231317629`) — cancelled 13s into the build (mid-investigation), resumed 3s later: "build session resumed from disk (context intact)", SAME session file reused, plan→tasks→impl continued, verify 5/5 → completed.
 - ✅ **V7** security scan (owner run `20260920-225451373`) — the planted secret was caught EARLIER than predicted: by the mechanical gitleaks gate at verify round 0 (not the security step — defense in depth: gitleaks runs at both layers). Fix round resumed the build session; the builder replaced the credential with a placeholder instead of deleting the pre-existing file; security step then passed cleanly with two honest manual LOW findings (placeholder note, 0777 modes). Completed.
@@ -330,7 +331,7 @@ node --test test/text.test.js and make sure the tests pass.
 model work; approving continues to completion. (This was a v1 bug — it must
 stay fixed.)
 
-## V11 — git-on run: branch, milestone commits, ff-merge
+## V11 — git-on run: branch, milestone commits, ff-merge ✅ (owner run `20260921-010740145`)
 
 | | |
 |---|---|
