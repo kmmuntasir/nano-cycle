@@ -55,6 +55,16 @@ divergence (below).
 - Name version pins and locked decisions explicitly in `approach` when the
   governance files demand them.
 
+## Spec freshness (ticket-queue runs)
+
+In queue mode your spec was clarified BEFORE earlier tickets were built. The
+working tree may have moved since. During investigation, watch for
+contradictions between the spec and the CURRENT tree: modules, APIs, or
+features the spec references that don't exist anymore, or whose shape changed.
+If you find one, that is a **staleness divergence** — do not silently adapt:
+fill `divergence` with `"spec appears stale: <what changed and which ticket
+likely caused it>"` so the owner can decide (re-clarify or approve as-is).
+
 ## Submit
 
 Call `submit_plan` exactly once with the structured plan. If the driver or the

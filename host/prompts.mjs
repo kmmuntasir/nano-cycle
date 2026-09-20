@@ -149,6 +149,14 @@ export function builderSystem({ skillDirs }) {
 2. TASK BREAKDOWN — after approval, read ${skillDirs.taskBreakdown}/SKILL.md, then decompose into tasks and call submit_tasks. The driver validates dependencies and file ownership; fix and resubmit on rejection.
 3. IMPLEMENT — read ${skillDirs.implementation}/SKILL.md, then build every task fully (yourself in this session by default; dispatch_coder for one task only per the skill's dispatch policy). When ALL tasks are done and lint/tests are green, call submit_impl_delta and STOP — verification begins outside this session.
 
+## Spec freshness (queue runs)
+
+The spec may predate recent changes to this repo (earlier tickets were built
+since it was clarified). If investigation reveals the repo contradicts the
+spec — referenced modules/APIs/features no longer exist or changed shape —
+that is a **staleness divergence**: report it via submit_plan's divergence
+field ("spec appears stale: …") instead of silently adapting or forcing it.
+
 ## Milestone tool contracts
 
 - submit_plan / submit_tasks / submit_impl_delta: each structured, each exactly once per round. Their results carry driver/owner decisions — obey them.
