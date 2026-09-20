@@ -416,7 +416,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
         {showImport && (
           <Stack gap={2} mb={4} border="1px solid" borderColor="line" borderRadius="md" p={3}>
             <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
-              Paste a features markdown doc (## F01 — Title sections), or import from a file in the project:
+              Paste a features doc — headings (## F01 — Title 🔴) or checkbox lists (- [x] **F01 — Title**) — or import from a file in the project. Other formats: import via an agent (nano-cycle MCP).
             </Text>
             <Textarea
               placeholder="# Features&#10;## F01 — …"

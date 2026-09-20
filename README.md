@@ -77,9 +77,11 @@ skills stay ignored by design; the driver owns context.
 
 Beyond single runs, each project has a **ticket backlog** (the "☰ Tickets & Queue" view):
 
-- **Backlog** — create tickets or import the project's own `docs/features.md`
-  (F##/OMNI-### sections; 🔴/🟢 markers understood). Tickets live outside the
-  target repo.
+- **Backlog** — create tickets or import the project's own `docs/features.md`.
+  The lenient parser understands both common shapes — heading style
+  (`## F01 — Title 🔴`) and checkbox-list style (`- [x] **F00 — Title**` with
+  `Builds on: F05.` dependency lines) — with any ticket-id prefix (F##,
+  OMNI-###, GM-##…). Tickets live outside the target repo.
 - **Clarify wave** — start PM clarification runs for every draft ticket at once;
   answer all of them in one **PM Inbox** screen.
 - **Release gate** — review the locked specs in a batch (rendered exactly as
@@ -97,6 +99,27 @@ Beyond single runs, each project has a **ticket backlog** (the "☰ Tickets & Qu
 
 The engine stays a four-step state machine; the queue (`host/queue.mjs`) sits
 above it and drives the existing run API.
+
+### Agent access — the nano-cycle MCP server
+
+No parser covers every features-doc shape. For anything unusual, let your
+agent be the parser: it reads the project's docs with its own file tools,
+structures the tickets, and pushes them in — the reliable import path.
+
+```bash
+# with the host server running (npm start):
+claude mcp add nano-cycle -- node /path/to/nano-cycle/host/mcp-tickets.mjs
+# any other MCP client: command `node`, args [<repo>/host/mcp-tickets.mjs]
+# base URL: env NANO_CYCLE_URL (default http://127.0.0.1:4177)
+```
+
+11 tools: `nano_list_projects`, `nano_get_tickets`, `nano_create_ticket`,
+`nano_bulk_create_tickets` (the agent import — arbitrary formats, deps in one
+batch, idempotent), `nano_import_features_file` (the lenient parser, by path),
+`nano_update_ticket`, `nano_delete_ticket`, `nano_queue` (clarify / release /
+pause / resume / retry / reclarify / reorder / config), `nano_inbox`,
+`nano_answer`, `nano_get_run` (specs, gates, artifacts). The GUI stays the
+primary surface; the MCP makes the same API scriptable.
 
 ## Run
 
