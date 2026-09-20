@@ -53,13 +53,16 @@ export default function Workbench({ state }: { state: RunState }) {
       out.push({ name: "clarifications", kind: "artifact", content: formatQa(state.qa), group: groupOf("clarifications", "artifact") });
     }
     if (state.mechanicalChecks?.checks?.length) {
-      out.push({ name: "checks:mechanical", kind: "artifact", content: pretty(state.mechanicalChecks), group: "Verify" });
+      out.push({ name: "checks:mechanical", kind: "artifact", content: pretty(state.mechanicalChecks), group: "Verify", data: state.mechanicalChecks });
     }
     if (state.remoteChecks) {
-      out.push({ name: "checks:remote-ci", kind: "artifact", content: pretty(state.remoteChecks), group: "Verify" });
+      out.push({ name: "checks:remote-ci", kind: "artifact", content: pretty(state.remoteChecks), group: "Verify", data: state.remoteChecks });
+    }
+    if (state.scannerResults?.scanners?.length) {
+      out.push({ name: "checks:scanners", kind: "artifact", content: pretty(state.scannerResults), group: "Security", data: state.scannerResults });
     }
     if (state.deferredChecks?.length) {
-      out.push({ name: "checks:deferred", kind: "artifact", content: pretty(state.deferredChecks), group: "Spec" });
+      out.push({ name: "checks:deferred", kind: "artifact", content: pretty(state.deferredChecks), group: "Spec", data: state.deferredChecks });
     }
     const order = ["Spec", "Plans", "Outputs", "Verify", "Inputs"];
     return out.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group) || a.name.localeCompare(b.name));

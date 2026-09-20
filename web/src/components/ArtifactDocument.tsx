@@ -2,7 +2,7 @@
 // security, plan, tasks, implDelta, spec) rendered as readable documents with
 // a floating raw-JSON toggle, instead of raw JSON blobs.
 import { useMemo, useState } from "react";
-import { Box, Flex, HStack, Stack, Text } from "@chakra-ui/react";
+import { Box, Flex, HStack, Link, Stack, Text } from "@chakra-ui/react";
 import { CheckCircle, XCircle, Circle, AlertTriangle } from "lucide-react";
 
 const INK = "#e4e4e7";
@@ -15,7 +15,19 @@ const ACCENT = "#7aa2f7";
 const FAIL_BG = "rgba(241,106,106,0.10)";
 const PASS_BG = "rgba(79,214,168,0.12)";
 
-export const DOCUMENTED = new Set(["verify", "audit", "security", "plan", "tasks", "implDelta", "spec"]);
+export const DOCUMENTED = new Set([
+  "verify",
+  "audit",
+  "security",
+  "plan",
+  "tasks",
+  "implDelta",
+  "spec",
+  "checks:mechanical",
+  "checks:remote-ci",
+  "checks:scanners",
+  "checks:deferred",
+]);
 
 // --- shared pieces -----------------------------------------------------------
 
@@ -97,28 +109,26 @@ function FilterButton({ label, count, active, onClick }: { label: string; count:
 
 function Stamp({ verdict }: { verdict: string }) {
   const ok = verdict === "accepted" || verdict === "pass";
-  const warn = verdict === "gaps-found" || verdict === "findings";
-  const color = ok ? GOOD : warn ? WARN : INK;
+  const failed = verdict === "gaps-found" || verdict === "findings";
+  const label = ok ? "Passed" : failed ? "Gaps Found" : verdict;
+  const color = ok ? GOOD : failed ? BAD : MUTED;
+  const bg = ok ? PASS_BG : failed ? FAIL_BG : "transparent";
   return (
     <Box
       display="inline-block"
       px={4}
-      py={1}
-      border="3px solid"
+      py={2}
+      borderRadius="sm"
+      border="1px solid"
       borderColor={color}
-      outline="1px solid"
-      outlineOffset="3px"
-      outlineColor={color}
-      borderRadius="md"
       color={color}
-      bg={ok ? PASS_BG : warn ? "rgba(240,180,41,0.10)" : "transparent"}
-      fontSize="clamp(20px, 4vw, 30px)"
+      bg={bg}
+      fontSize="18px"
       fontWeight={700}
-      lineHeight={1.1}
-      transform="rotate(-2deg)"
-      fontFamily="ui-monospace, monospace"
+      letterSpacing="0.02em"
+      fontFamily="system-ui, sans-serif"
     >
-      {verdict}
+      {label}
     </Box>
   );
 }
@@ -570,6 +580,160 @@ function SpecDoc({ data }: { data: any }) {
   );
 }
 
+// --- driver pseudo-artifacts (mechanical / remote CI / scanners / deferred) ---
+
+const DRIVER_STATUS_COLOR: Record<string, string> = { pass: GOOD, fail: BAD, skip: MUTED };
+
+function StatusRows({ rows }: { rows: { id: string; title?: string; status: string; evidence: string }[] }) {
+  return (
+    <>
+      {rows.map((c, i) => (
+        <Flex key={c.id ?? i} gap={3} alignItems="flex-start" py={2.5} borderBottom="1px solid" borderColor={RULE}>
+          <Tag color={DRIVER_STATUS_COLOR[c.status] ?? MUTED} bg="transparent">{c.status}</Tag>
+          <Box flex="1" minW={0}>
+            <Text fontSize="12.5px" fontWeight={600} color={INK} fontFamily="ui-monospace, monospace">
+              {c.id}
+              {c.title ? <Text as="span" color={MUTED} fontWeight={400} fontFamily="system-ui, sans-serif"> — {c.title}</Text> : null}
+            </Text>
+            <Text fontSize="11.5px" color="#c9cdd8" mt={0.5} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap" wordBreak="break-word">
+              {c.evidence}
+            </Text>
+          </Box>
+        </Flex>
+      ))}
+    </>
+  );
+}
+
+function MechanicalDoc({ data }: { data: any }) {
+  const checks: any[] = data?.checks ?? [];
+  const failed = checks.filter((c) => c.status === "fail").length;
+  return (
+    <>
+      <Box mb={6} pb={4} borderBottom="1px solid" borderColor={RULE}>
+        <Text fontSize="12px" fontStyle="italic" color={MUTED} mb={2} fontFamily="system-ui, sans-serif">
+          driver ground truth — round {data?.round ?? "?"}
+        </Text>
+        <Stamp verdict={failed > 0 ? "gaps-found" : "pass"} />
+        <Text fontSize="11px" color={MUTED} mt={2} fontFamily="system-ui, sans-serif">
+          {failed} failure(s) · deterministic — these gate regardless of any model verdict
+        </Text>
+      </Box>
+      <DocSection title={`checks (${checks.length})`}>
+        <StatusRows rows={checks} />
+      </DocSection>
+    </>
+  );
+}
+
+function RemoteCiDoc({ data }: { data: any }) {
+  const runs: any[] = data?.runs ?? [];
+  const ok = data?.status === "pass";
+  return (
+    <>
+      <Box mb={6} pb={4} borderBottom="1px solid" borderColor={RULE}>
+        <Text fontSize="12px" fontStyle="italic" color={MUTED} mb={2} fontFamily="system-ui, sans-serif">
+          driver-observed hosted CI — round {data?.round ?? "?"}
+        </Text>
+        <Stamp verdict={ok ? "pass" : data?.status === "fail" ? "gaps-found" : "skipped"} />
+        <Text fontSize="11.5px" color="#c9cdd8" mt={2} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+          {data?.evidence}
+        </Text>
+      </Box>
+      {runs.length > 0 && (
+        <DocSection title={`runs (${runs.length})`}>
+          {runs.map((r, i) => (
+            <Box key={i} py={2.5} borderBottom="1px solid" borderColor={RULE}>
+              <Flex alignItems="center" gap={2} flexWrap="wrap">
+                <Tag color={r.conclusion === "success" ? GOOD : BAD} bg="transparent">
+                  {r.conclusion ?? r.status}
+                </Tag>
+                <Text fontSize="12px" color={INK} fontFamily="system-ui, sans-serif">
+                  {r.name}
+                </Text>
+                {r.url && (
+                  <Link href={r.url} target="_blank" rel="noreferrer" fontSize="11px" color={ACCENT} fontFamily="ui-monospace, monospace">
+                    ↗
+                  </Link>
+                )}
+              </Flex>
+              {r.log && (
+                <Text fontSize="11.5px" color="#c9cdd8" mt={1} pl={3} borderLeft="2px solid" borderLeftColor={BAD} whiteSpace="pre-wrap" fontFamily="system-ui, sans-serif">
+                  {String(r.log).slice(0, 1200)}
+                </Text>
+              )}
+            </Box>
+          ))}
+        </DocSection>
+      )}
+    </>
+  );
+}
+
+function ScannersDoc({ data }: { data: any }) {
+  const scanners: any[] = data?.scanners ?? [];
+  const failed = scanners.filter((x) => x.status === "fail").length;
+  return (
+    <>
+      <Box mb={6} pb={4} borderBottom="1px solid" borderColor={RULE}>
+        <Text fontSize="12px" fontStyle="italic" color={MUTED} mb={2} fontFamily="system-ui, sans-serif">
+          deterministic scanner suite — round {data?.round ?? "?"}
+        </Text>
+        <Stamp verdict={failed > 0 ? "gaps-found" : "pass"} />
+      </Box>
+      <DocSection title={`scanners (${scanners.length})`}>
+        <StatusRows rows={scanners} />
+      </DocSection>
+      {scanners.some((x: any) => ((x.findings ?? []) as any[]).length > 0) && (
+        <DocSection title="scanner findings">
+          {scanners.flatMap((x) => x.findings ?? []).map((f: any, i: number) => (
+            <Box key={f.id ?? i} mb={2} p={3} borderRadius="md" bg={FAIL_BG} borderLeft="4px solid" borderLeftColor={BAD}>
+              <Flex alignItems="center" gap={2} flexWrap="wrap">
+                <Tag color={BAD} bg="transparent">{f.severity ?? "high"}</Tag>
+                <Text fontSize="12.5px" fontWeight={600} color={INK} fontFamily="system-ui, sans-serif">
+                  {f.title}
+                </Text>
+              </Flex>
+              <Text fontSize="11.5px" color="#c9cdd8" mt={1} fontFamily="system-ui, sans-serif">
+                {f.evidence}
+              </Text>
+            </Box>
+          ))}
+        </DocSection>
+      )}
+    </>
+  );
+}
+
+function DeferredDoc({ data }: { data: any }) {
+  const list: any[] = Array.isArray(data) ? data : [];
+  return (
+    <DocSection title={`deferred to owner (${list.length})`}>
+      {list.length === 0 ? (
+        <Text fontSize="12px" color={GOOD} fontStyle="italic" fontFamily="system-ui, sans-serif">
+          Nothing deferred — every criterion was verifiable in this environment.
+        </Text>
+      ) : (
+        list.map((d, i) => (
+          <Box key={i} py={2.5} borderBottom="1px solid" borderColor={RULE}>
+            <Flex alignItems="center" gap={2} flexWrap="wrap">
+              <Tag color={WARN} bg="transparent">[{d.env}]</Tag>
+              <Text fontSize="12px" color={INK} fontFamily="system-ui, sans-serif">
+                {d.criterion}
+              </Text>
+            </Flex>
+            {d.evidence && (
+              <Text fontSize="11.5px" color={MUTED} mt={1} fontFamily="system-ui, sans-serif">
+                {d.evidence}
+              </Text>
+            )}
+          </Box>
+        ))
+      )}
+    </DocSection>
+  );
+}
+
 const RENDERERS: Record<string, (p: { data: any }) => React.ReactElement> = {
   verify: VerifyDoc,
   audit: AuditDoc,
@@ -578,6 +742,10 @@ const RENDERERS: Record<string, (p: { data: any }) => React.ReactElement> = {
   tasks: TasksDoc,
   implDelta: ImplDeltaDoc,
   spec: SpecDoc,
+  "checks:mechanical": MechanicalDoc,
+  "checks:remote-ci": RemoteCiDoc,
+  "checks:scanners": ScannersDoc,
+  "checks:deferred": DeferredDoc,
 };
 
 /** Document view with a floating raw-JSON toggle (top right). */
