@@ -1465,6 +1465,9 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         return;
       }
       gateClose(run);
+      for (const st of run.state.steps) {
+        if (st.status === "running") endStep(run, st.id, { status: "failed", error: String(err?.message ?? err).slice(0, 200) });
+      }
       await integrate(run, false);
       if (run.cancelRequested) {
         run.state.status = "cancelled";
@@ -1715,7 +1718,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
       let requeued = 0;
       for (const s of run.state.steps) {
-        if (s.status === "cancelled" || s.status === "failed") {
+        if (["cancelled", "failed", "running"].includes(s.status)) {
           s.status = "queued";
           s.error = null;
           s.startedAt = null;

@@ -125,9 +125,13 @@ const preview = (v, max = 160) => {
 
 // --- shared session plumbing (v1 runNode + v2 openStepSession) ----------------
 
-/** Normalize SDK session events into GUI events; returns { unsubscribe, touch }. */
+/** Normalize SDK session events into GUI events; returns { unsubscribe, touch, toolDepthRef }.
+ *  toolDepthRef counts tool executions in flight — a LONG-RUNNING tool (a human
+ *  gate, a dispatched coder subagent, an analyst) is not a stall; the watchdog
+ *  skips its check while it is > 0. */
 function attachEventBridge(session, nodeId, onEvent) {
   let lastActivity = Date.now();
+  let toolDepth = 0;
   const touch = () => (lastActivity = Date.now());
   const unsubscribe = session.subscribe((evt) => {
     touch();
@@ -139,9 +143,11 @@ function attachEventBridge(session, nodeId, onEvent) {
         break;
       }
       case "tool_execution_start":
+        toolDepth += 1;
         onEvent(nodeId, { t: "tool", name: evt.toolName, args: preview(evt.args ?? evt.input) });
         break;
       case "tool_execution_end":
+        toolDepth = Math.max(0, toolDepth - 1);
         onEvent(nodeId, { t: "tool_end", ok: !evt.isError, name: evt.toolName });
         break;
       case "turn_end": {
@@ -156,21 +162,26 @@ function attachEventBridge(session, nodeId, onEvent) {
         break;
     }
   });
-  return { unsubscribe, touch, lastActivityRef: () => lastActivity };
+  return { unsubscribe, touch, lastActivityRef: () => lastActivity, toolDepthRef: () => toolDepth };
 }
 
 /** Stall watchdog: abort the session if nothing arrives for stallMs. Returns a
  *  clearer; the caller checks didStall() after prompt() settles. */
 const STALL_MS = Number(process.env.NANO_STALL_TIMEOUT_MS ?? 300_000);
-function startStallWatchdog(lastActivityRef, onAbort) {
+function startStallWatchdog(bridge, onAbort) {
   let stalled = false;
   if (STALL_MS <= 0) return { clear: () => {}, didStall: () => false };
+  // Check at min(5s, STALL_MS/3) so short stall budgets are honored promptly.
+  const interval = Math.max(100, Math.min(5_000, Math.floor(STALL_MS / 3)));
   const timer = setInterval(() => {
-    if (Date.now() - lastActivityRef() >= STALL_MS) {
+    // A tool execution in flight (human gate, coder subagent, analyst) is not
+    // a provider stall — pause detection until it returns.
+    if (bridge.toolDepthRef() > 0) return;
+    if (Date.now() - bridge.lastActivityRef() >= STALL_MS) {
       stalled = true;
       onAbort();
     }
-  }, 5_000);
+  }, interval);
   return { clear: () => clearInterval(timer), didStall: () => stalled };
 }
 
@@ -217,7 +228,7 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
   });
 
   const bridge = attachEventBridge(session, nodeId, onEvent);
-  const watchdog = startStallWatchdog(bridge.lastActivityRef, () => session.abort().catch(() => {}));
+  const watchdog = startStallWatchdog(bridge, () => session.abort().catch(() => {}));
 
   if (signal) {
     signal.addEventListener(
@@ -302,7 +313,7 @@ export async function openStepSession({ stepId, sessionFile, sessionsDir, tools,
 
   let lastStall = null;
   const prompt = async (text) => {
-    const watchdog = startStallWatchdog(bridge.lastActivityRef, () => {
+    const watchdog = startStallWatchdog(bridge, () => {
       lastStall = STALL_MS;
       onAbort();
     });
@@ -334,3 +345,6 @@ export async function openStepSession({ stepId, sessionFile, sessionsDir, tools,
 }
 
 export { addUsage };
+
+// Test seam — watchdog/bridge regression coverage (tests/watchdog.test.mjs).
+export const __testInternals = { attachEventBridge, startStallWatchdog };
