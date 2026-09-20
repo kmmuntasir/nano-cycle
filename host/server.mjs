@@ -196,6 +196,13 @@ const server = http.createServer(async (req, res) => {
       }
       const securityRaw = String(body.security ?? "off");
       const security = ["off", "scan", "scan+vapt"].includes(securityRaw) ? securityRaw : "off";
+      // The sandbox lives INSIDE nano-cycle's own repo — git on it is only safe
+      // when the owner made it its own repository (git init); otherwise branch/
+      // commit operations would hit nano-cycle's .git.
+      let gitRequested = body.git === true;
+      if (gitRequested && project.path === SANDBOX_DIR) {
+        gitRequested = await (await import("./git.mjs")).isRepo(project.path);
+      }
       const id = newRunId();
       const state = await pipeline.start({
         id,
@@ -205,7 +212,7 @@ const server = http.createServer(async (req, res) => {
         clarify: !!body.clarify,
         requireQuestions: body.requireQuestions === true,
         maxFixRounds: Number(body.maxFixRounds),
-        git: body.git === true && project.path !== SANDBOX_DIR,
+        git: gitRequested,
         audit: body.audit !== false,
         approvePlan: body.approvePlan !== false,
         remoteChecks: body.remoteChecks === true,

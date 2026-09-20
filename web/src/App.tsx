@@ -260,7 +260,7 @@ export default function App() {
       setMaxFixRounds={setMaxFixRounds}
       git={useGit}
       setGit={setUseGit}
-      gitAvailable={project !== "sandbox"}
+      gitAvailable={true}
       audit={useAudit}
       setAudit={setUseAudit}
       approvePlan={approvePlan}

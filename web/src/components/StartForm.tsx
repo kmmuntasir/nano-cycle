@@ -151,7 +151,7 @@ export default function StartForm({
             <OutlineButton
               active={git}
               disabled={!gitAvailable}
-              title={gitAvailable ? "Branch per run, commits per coder, ff-merge on acceptance." : "The scratch sandbox is not version-controlled."}
+              title={"Branch per run, milestone commits, ff-merge on acceptance. For the sandbox: run \"git init && git add -A && git commit -m init\" inside sandbox/ first — it must be its own repository."}
               onClick={() => setGit(!git)}
             >
               {git ? "✓ Git" : "Git Off"}

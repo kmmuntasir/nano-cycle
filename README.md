@@ -82,8 +82,8 @@ npm start          # http://127.0.0.1:4177
 npm test           # engine unit harness (fake sessions, 13 scenarios)
 ```
 
-1. **Add a project** — any local folder (built-in `sandbox/` for scratch; git
-   features need a repo).
+1. **Add a project** — any local folder (built-in `sandbox/` for scratch — run
+   `git init && git add -A && git commit -m init` inside it to enable git features there).
 2. **Pick models per step** — PM (clarify), Builder, Verifier, Security — any
    model your pi auth reaches (`provider/model` or `provider/model:level`),
    plus a master chooser. Picks persist in the browser. Swaps apply to queued
