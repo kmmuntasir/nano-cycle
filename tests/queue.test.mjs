@@ -228,6 +228,8 @@ await test("Q5: backlog flip on completion (file write, commit skipped without a
   fs.rmSync(projDir, { recursive: true, force: true });
 });
 
+process.on("exit", () => { try { fs.rmSync(path.join(ROOT, "tickets"), { recursive: true, force: true }); } catch {} });
+
 const failed = results.filter(([, ok]) => !ok).length;
 console.log(`\n${results.length - failed}/${results.length} queue tests passed`);
 process.exit(failed ? 1 : 0);

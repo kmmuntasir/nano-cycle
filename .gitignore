@@ -2,5 +2,6 @@ node_modules/
 web-dist/
 sandbox/
 runs/
+tickets/
 projects.json
 draft.md
