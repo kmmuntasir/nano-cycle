@@ -1,213 +1,148 @@
 # nano-cycle
 
-A deterministic agent pipeline with a live monitoring GUI. The script owns sequencing,
-spawning, context, tool allowlists, and structured outputs — the model only makes
-judgment calls inside a node. Built on the [pi SDK](https://pi.dev/docs/latest/sdk).
+A four-step agentic development workflow with a live monitoring GUI, built on the
+[pi SDK](https://pi.dev/docs/latest/sdk). One judgment-rich agent session per
+step; the driver owns the gates. **Skills own method, the driver owns law.**
 
-## The two-step flow
+## The workflow
 
-**Step 1 — Clarify (PM loop).** Toggle *Clarify first* on a run. The clarify node
-inspects the project (read-only + `investigate` analyst sessions + optional web tools),
-asks the owner high-leverage questions in batches (answered in the GUI), and repeats
-until it locks a **spec**: refined summary, decisions, and acceptance criteria. The spec
-is THE contract. It is stored outside the project it describes — persisted with the run
-(`runs/<id>/state.json`) and served per project at `GET /api/specs/<project>`
-(`?format=md` for markdown); nothing is written into the target repo.
+**Step 1 — Clarify (optional, default ON).** The PM loop, unchanged in spirit:
+a clarify session inspects the project (read-only + `investigate` analysts +
+optional web tools), asks the owner high-leverage questions in batches (answered
+in the GUI), repeats until it locks a **spec**: refined summary, decisions,
+acceptance criteria (each tagged `local` / `remote` / `human` by verification
+environment), and source-doc traceability. The spec is THE contract — stored
+with the run (`runs/<id>/state.json`), served per project at
+`GET /api/specs/<project>` (`?format=md` for markdown), never written into the
+target repo.
 
-**Step 2 — Build.** plan → *(owner approves the compiled plan — M/L tiers, on by
-default)* → parallel coders → verify, fully autonomous. The spec's acceptance
-criteria flow **verbatim into the plan AND into every coder's prompt** (with the
-source requirement docs and the repo's testing rules) — the builders see the same
-contract the verifier gates on. Verify rejects → only the coder nodes that **own
-the failing gaps** re-run, each with only its gaps (`maxFixRounds`, default 2) →
-accepted or honestly `failed`. Deterministic driver checks (below) run before
-every verify pass and cannot be argued away by the model.
+**Step 2 — Build. ONE persistent agent session** that walks three phases, each
+a skill + a milestone tool:
 
-## Web research (optional)
+- **2.1 Plan** (`submit_plan`) — investigate first; every file with a purpose;
+  every spec criterion carried verbatim. **Owner approval gate** (default ON)
+  blocks inside the tool: approve, or reject with comments — the same session
+  revises and resubmits. Divergence ("task impossible as specified") is its
+  own gate.
+- **2.2 Task breakdown** (`submit_tasks`) — 2–8 tasks with per-task ACs and
+  files. The driver validates dependencies, cycles, and the **file-overlap ⇒
+  dependency** rule (shared files must be ordered). The skill defines when
+  `dispatch_coder` subagents are worth it (file-disjoint, substantial tasks).
+- **2.3 Implement** (`submit_impl_delta`) — build everything, run lint/tests,
+  report honestly (per-task completion). Milestone commit on the run branch.
 
-Clarify nodes can use `web_search` (SearXNG) and `web_reader` (obscura) when available:
+**Step 3 — Verify. A FRESH session per round** (never the builder's own
+context): pre-flighted by the driver's mechanical ground truth, it runs
+**3.1 verify** (`submit_verify` — assume every criterion unmet until observed
+passing) and, only if accepted, **3.2 audit** (`submit_audit` — deliverables
+against requirements; mandated to re-read source docs BEFORE trusting its own
+verify results). Gaps (failing checks, blocking findings, mechanical/remote
+failures) trigger a fix round that **resumes the build session** with targeted
+feedback — the original builder context fixes its own work. Bounded
+(`maxFixRounds`, default 2), then honest failure with reasons.
 
-```bash
-docker run -d -p 8888:8080 searxng/searxng   # then:
-NANO_SEARXNG_URL=http://127.0.0.1:8888 npm start
-```
+**Step 4 — Security (optional: Off / Scan / Scan+VAPT). A fresh session** over
+driver-run deterministic scanners (gitleaks, dependency audit, semgrep/trivy
+when present — skips recorded, never silent). The model triages: severity +
+`fixable_in_scope` honesty. Critical/high fixable → one security fix round
+(resuming the build session); unfixable → **security-override gate**: you
+accept the risk (recorded) or cancel. VAPT adds running-app probes (boot the
+documented stack, headers/CORS/leakage/authz spot-checks) with observed
+evidence.
 
-`web_reader` needs `obscura` on PATH. Without these, clarify runs fine on project
-context alone.
+## The driver owns law (the model cannot overrule)
 
-## Run
+| Layer | Mechanism |
+|---|---|
+| Sequencing | four steps + milestones; the model cannot skip ahead (no milestone → no gate opens) |
+| Gates | spec answers, plan approval (approve / **reject-with-comments**), divergence, security override — blocking inside milestone tools |
+| Ground truth | driver-run mechanical checks before every verify round: gitleaks, deps-declared, no-cdn-fonts, i18n-parity, env-wiring, readme-commands, compose-env/pins |
+| Verdicts | reconciliation — checks over self-reported verdicts, blocking findings over verdicts, driver observations over everything |
+| Fix rounds | bounded; feedback targets owning tasks; the build session resumes (same context), never respawns |
+| Outputs | schema'd milestone tools, validated by the driver (`validatePlan` / `validateTasks` / severity gates) |
+| Deferral | remote/human-tagged criteria that fail for environment reasons are recorded, never burn rounds |
+| Git | branch per run, milestone commits (conventional format, ticket ids honored), verdict-gated ff-merge |
+| Remote CI | opt-in: push + watch hosted Actions before verify rounds — red CI is ground truth |
+| Persistence | step sessions stored under `runs/<id>/sessions/`; resume works across server restarts |
 
-Works on **any local project, any language**: register a folder, pick a tier and
-per-node models, watch every node stream live.
+## Skills (method, injected per step)
+
+`planning` · `task-breakdown` · `implementation` (build session) — `verification`
+· `audit-deliverables` (verify session) — `security-scan` (+`scripts/run-scanners.mjs`)
+· `vapt` (security session) — plus `markdown-writer` everywhere. Step system
+prompts FORCE loading the phase skill before its milestone tool. Repo-local
+skills stay ignored by design; the driver owns context.
 
 ## Run
 
 ```bash
 npm install
-npm run build      # builds the web GUI into web-dist/
+npm run build      # web GUI → web-dist/
 npm start          # http://127.0.0.1:4177
+npm test           # engine unit harness (fake sessions, 13 scenarios)
 ```
 
-1. **Add a project** — an absolute path to any local folder (a built-in `sandbox/`
-   exists for scratch work). **− Remove** drops the selected project from the
-   registry (registry-only: files on disk and run history are untouched; the
-   sandbox can't be removed; active runs block removal).
-2. **Pick a tier + per-node models** — any model your pi auth can reach
-   (`provider/model` or `provider/model:thinking`).
-3. **Start** — watch text, tool calls, and token usage stream per node.
+1. **Add a project** — any local folder (built-in `sandbox/` for scratch; git
+   features need a repo).
+2. **Pick models per step** — PM (clarify), Builder, Verifier, Security — any
+   model your pi auth reaches (`provider/model` or `provider/model:level`),
+   plus a master chooser. Picks persist in the browser. Swaps apply to queued
+   steps (a running step keeps its model — one session, one mind).
+3. **Choose options** — Clarify (ON/OFF), Plan approval, Audit, Security
+   (Off/Scan/Scan+VAPT), Git, Remote CI, fix rounds.
+4. **Start** — live step timeline (four steps, fix-round counters, gate
+   banners), streaming console per step, artifacts tab (spec, plan, tasks,
+   impl-delta, verify, audit, security, mechanical/remote/scanner results,
+   deferred checks, Q&A history).
 
-## Tiers
-
-```txt
-demo  plan → implement → verify                                (+fix rounds, divergence gate)
-S     implement → verify                                       (no planning)
-M     plan → implement-be ∥ implement-fe → verify              (one slice, two parallel lanes)
-L     plan → ticket₁(coders → verify) → ticket₂(…) → final verify   (ticket pipeline)
-```
-
-**L is ticket-shaped, wave-scheduled.** The plan decomposes the task into 2–6
-*capabilities*; the engine compiles them into **tickets**. A ticket is admitted
-when its dependency tickets are all **accepted** AND its effective file set
-(planned ∪ written) is **disjoint** from every in-flight ticket's — so
-independent, non-overlapping tickets run in parallel waves, each ticket keeping
-its own verify gate (`verify-<capId>`, scoped to that capability's files) and
-scoped fix rounds. Verify gates always serialize against each other (parallel
-verifies would race compose stacks and test runs in the one tree). A final
-cross-ticket verify (+ audit) sweeps the whole tree at the end. Small,
-deeply-verified diffs without artificial serialization; a failing ticket fails
-the run with its reasons and is resumable.
-
-The **counterpart rule is a compiler check**: a capability with only one side must
-declare why it legally has no counterpart (`plumbing` / `devops` / `qa` /
-`no-counterpart`) or the plan is rejected and the planner retries with the reason.
-Verify is an independent gate that must run the code before it may accept.
-
-Model selection is **role-based** — `PM (clarify)`, `Plan`, `Backend coder`,
-`Frontend coder`, `Verify` — so a dynamic graph with any number of coder nodes inherits
-the right model per role. Picks persist in the browser (localStorage) until changed;
-a master chooser fills every role at once. Mid-run swaps are live: a queued node picks
-up the new model when it starts, a running node stops and restarts with it. Beside
-every picker, a second dropdown sets the **thinking level** (`provider/model:level`)
-from the levels that model actually supports (via pi's model catalog); "(default)"
-uses the node's configured level.
-
-## How nodes are constrained
-
-| Layer | Mechanism |
-|---|---|
-| Spawning | the graph walks nodes; the model cannot spawn anything |
-| Tools | per-node allowlists (`plan`/`verify` are read-only); verify gets a browser (`web_reader`) when obscura is on PATH |
-| Context | driver-assembled system prompt; zero runtime discovery |
-| Outputs | schema'd `report_artifact` tool call, validated by the driver |
-| Models | per-node `provider/model:thinking` from run config (GUI picker) |
-| Effort | thinking level `high` for every role |
-| Ground truth | driver-side mechanical checks before every verify — the model cannot overrule them |
-| Resume/cancel | `session.abort()` per node; run state persists under `runs/` |
-
-## Bundled skills
-
-Nano-cycle vendors its own skills under `skills/` and loads them for **every
-node in every project** — regardless of what the system or the target repo
-has. Currently: **markdown-writer** (hard-breaks, table escaping, nested
-fences, ASCII alignment — with its deterministic `validate_md.cjs`
-validator, which coders are instructed to run after writing Markdown).
-Repo-local skills are still ignored by design: the driver owns the context;
-bundled skills are the one deliberate exception.
-
-## Deterministic ground truth — driver checks (`host/checks.mjs`)
-
-Before **every** verify pass the driver itself runs, in the project tree:
-
-| Check | Catches |
-|---|---|
-| `secrets-gitleaks` | real secrets in the tree (gitleaks binary → pinned docker → skip) |
-| `deps-declared` | imports/configs referencing packages no `package.json` declares (manifests discovered anywhere; per-manifest scope, tsconfig-alias aware) |
-| `no-cdn-fonts` | `fonts.googleapis.com`/`gstatic` references — the tofu failure mode |
-| `i18n-parity` | any locale set the project defines (2+ ISO-coded JSONs in one dir) with key drift, every direction |
-| `env-wiring` | `.env.example` keys vs `process.env`/`import.meta.env` reads, both directions |
-| `readme-commands` | README-documented `npm run <x>` / `./scripts/<y>` that don't resolve |
-| `compose-env` | *(warn)* a project-dir `.env` that docker compose auto-loads — stale values break fresh-volume first boot while warm tests stay green |
-| `compose-pins` | *(warn)* floating compose image refs (`:latest` / tag-less) — silent stack drift |
-
-
-Failures gate the run even if the verify model passes the criterion; skips never
-gate. Results land in the verify prompt as ground truth, in `state.mechanicalChecks`
-(visible in the GUI's Artifacts tab), and in the event feed. Disable with
-`NANO_CHECKS=off` (or a comma list of ids); pin the gitleaks image with
-`NANO_GITLEAKS_IMAGE`; add per-project walk exclusions with `NANO_EXCLUDE_DIRS="dir1,dir2"`.
-Backlog/feature status is deliberately NOT a mechanical check — the verifier is
-prompted to catch stale backlog entries.
-
-## Remote CI verification (opt-in)
-
-The **Remote CI** start toggle (requires **Git** enabled) answers the
-"CI blocks merge on GitHub" class of criteria mechanically: before the final
-verify, the driver pushes the run branch to `origin` and watches the hosted
-GitHub Actions runs it triggers (`gh`, capped at `NANO_CI_TIMEOUT_MS`, default
-20 min). Green runs evidence "CI is green" criteria directly; a red run gates
-the fix loop with its failed-log excerpt — the next round's coders fix what CI
-actually reported, and the re-push re-validates. Results (run URLs,
-conclusions, logs) land in `state.remoteChecks`, the verify prompt, and the
-GUI's Artifacts tab.
-
-Unchecked — or Git off, or `gh`/origin unavailable (recorded skip) — the
-verifier is explicitly instructed NOT to reason about hosted CI: remote-tagged
-criteria are recorded as deferred, never gate, and never burn fix rounds.
-
-## Targeted fix rounds
-
-A rejected round maps each failing check / blocking finding to the coder node(s)
-whose planned-or-written files it cites (path matching against assignments) and
-**requeues only those nodes** — each gets its own gaps plus its previous artifact
-("build on it; do not undo what already passes"). If no gap matches any coder's
-files, the round falls back to requeueing everyone (the old behavior). Per-node
-feedback is persisted in `state.feedbackByNode`; files written so far in
-`state.writtenFiles` also feed lane packing — nodes whose effective file sets
-(planned ∪ written) overlap always serialize, killing hot-file collisions.
-
-## Verification environments (defers the unfixable)
-
-The clarify phase tags every acceptance criterion `local` / `remote` / `human`
-(`spec.ac_verification`). A failing check on a `remote`/`human` criterion whose
-evidence indicates an environment limit (no git remote, branch protection,
-hosted CI) is recorded in `state.deferredChecks` and surfaced to the owner — it
-never burns a fix round no coder could ever fix. Untagged specs keep the legacy
-`not verifiable…` evidence-prefix heuristic.
+Optional web research for clarify: `NANO_SEARXNG_URL=http://127.0.0.1:8888 npm start`
+(SearXNG docker) + `obscura` on PATH for `web_reader`.
 
 ## Project context (optional, conventional)
 
-Projects teach nano-cycle about themselves through files — all optional, injected when
-present, discovered at runtime never:
-
 ```txt
-<project>/AGENTS.md | CLAUDE.md                        → every node
-<project>/.claude/rules/backend-development-rules.md   → implement-be (with security-rules.md)
-<project>/.claude/rules/frontend-development-rules.md  → implement-fe
-<project>/.claude/rules/testing-rules.md               → implement nodes AND verify/audit
-<project>/.claude/rules/git-guidelines.md              → implement nodes AND verify/audit
+<project>/AGENTS.md | CLAUDE.md                        → every step
+<project>/.claude/rules/*.md  or  .pi/rules/*.md       → per step:
+  backend-development-rules.md + security-rules.md + frontend-development-rules.md
+  + testing-rules.md + git-guidelines.md               → build (one context; the lane split is gone) AND verify
+  security-rules.md                                    → security
 ```
 
-Coders also receive the **full contract** in their prompt: the spec's acceptance
-criteria verbatim, the plan's own criteria, the raw source requirement documents
-(`spec.source_docs`), and — on fix rounds — their previous artifact. The design
-goal: builders and verifiers judge against the same law.
+`.claude/` wins over `.pi/` per filename; a project with none of these runs on
+the built-in minimal rules.
 
-A project with none of these simply runs on the built-in minimal rules.
+## Environment variables
+
+`NANO_CHECKS` (off / comma list), `NANO_GITLEAKS_IMAGE`, `NANO_EXCLUDE_DIRS`,
+`NANO_STALL_TIMEOUT_MS`, `NANO_CI_TIMEOUT_MS` — plus v2:
+`NANO_SECURITY_FIX_ROUNDS` (default 1), `NANO_MAX_CODER_SUBAGENTS` (default 4).
 
 ## Layout
 
 ```txt
 host/
-  server.mjs     HTTP + WebSocket + static GUI; owns ModelRuntime + project registry
-  pipeline.mjs   the state machine: tier DAG, gates, fix rounds, parallel lanes
-  runner.mjs     one pi SDK AgentSession per node (createAgentSession)
-  prompts.mjs    per-node prompt assembly
-  rules.mjs      per-project, per-node context resolution (conventional files)
-  projects.mjs   project registry (projects.json, gitignored)
-  config.mjs     node profiles (tools, thinking, artifact schemas) + tiers
-  state.mjs      runs/<id>/state.json + events.jsonl (GUI replay)
+  server.mjs     HTTP + WebSocket + static GUI; ModelRuntime + project registry
+  engine.mjs     the four-step state machine: milestones, gates, fix loops, reconciliation
+  runner.mjs     per-step skill filtering + persistent step sessions (SessionManager)
+  prompts.mjs    step system prompts + prompt/feedback-turn builders
+  rules.mjs      per-step context resolution (conventional files)
+  config.mjs     milestone schemas, step profiles, model roles, validators
+  checks.mjs     driver-side mechanical ground truth (unchanged from v1)
+  ci.mjs         remote CI capability probe + run watching
+  git.mjs        branch / commit / ff-merge integration
+  state.mjs      runs/<id>/state.json + events.jsonl (+ sessions/)
+skills/          7 workflow skills + markdown-writer (+ scanner script)
+tests/           engine unit harness (npm test)
+docs/            PLAN-v2-step-workflow.md · SPIKE-NOTES.md · V2-VALIDATION.md
 web/             React 19 + Vite + MUI monitoring GUI
 ```
+
+## Design docs
+
+- `docs/PLAN-v2-step-workflow.md` — the redesign: rationale (RC1–RC10), the
+  five agreed amendments, architecture, and the sequenced implementation plan.
+- `docs/SPIKE-NOTES.md` — SDK session-persistence proofs the engine rests on.
+- `docs/V2-VALIDATION.md` — the manual validation runbook (V1–V12).
 
 ## License
 

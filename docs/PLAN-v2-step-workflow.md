@@ -1,6 +1,6 @@
 # nano-cycle v2 — The Four-Step Workflow
 
-**Status:** approved redesign plan
+**Status:** IMPLEMENTED on branch `v2-step-workflow` — live V1/V2 passed, remaining live validation (V3–V12) is the owner's: see `docs/V2-VALIDATION.md`
 **Supersedes:** the tier/DAG pipeline engine (`host/pipeline.mjs`)
 **Evidence base:** `PIPELINE-VS-REFERENCE-ROOT-CAUSE-ANALYSIS.md` (RC1–RC10), `comparison.md`, five runs of forensics, and the A/B finding that single-prompting with frontier models matches the multi-node pipeline.
 
@@ -291,103 +291,98 @@ v1 runs: listed and viewable (state/events readers are shape-agnostic); `resume`
 
 ### Phase 0 — Groundwork
 
-- [ ] **1. Branch + docs**
+- [x] **1. Branch + docs**
   - `git checkout -b v2-step-workflow`; commit this plan (`docs/PLAN-v2-step-workflow.md`).
   - Done when: branch exists, plan committed.
 
-- [ ] **2. SDK persistence spike** (`spike/session-persistence.mjs`, scratch, not wired to the server)
+- [x] **2. SDK persistence spike** (`spike/session-persistence.mjs`, scratch, not wired to the server)
   - Prove: (a) `SessionManager.create(cwd, sessionDir)` persists and the file path is retrievable (inspect the manager/session object); (b) `SessionManager.open(path)` + `createAgentSession` resumes with full context (ask a factual question, close, reopen, ask a dependent question); (c) a custom tool whose `execute` blocks on an external promise works mid-turn and the model continues with its result; (d) `session.abort()` during the blocked tool settles cleanly; (e) `systemPromptOverride` applies to resumed sessions.
   - Done when: script runs green and the exact retrieval API is written down in this file's margin (or a `docs/SPIKE-NOTES.md`).
 
 ### Phase 1 — Skills (pure content, no host changes)
 
-- [ ] **3. `skills/planning/SKILL.md`** — migrate `planSystem` + `planCapsSystem` content into skill form: investigate-first, task-shaped decomposition, mandatory file lists with purposes, functional (not web-specific) lane language dropped in favor of tasks, divergence protocol, "carry every spec AC verbatim".
+- [x] **3. `skills/planning/SKILL.md`** — migrate `planSystem` + `planCapsSystem` content into skill form: investigate-first, task-shaped decomposition, mandatory file lists with purposes, functional (not web-specific) lane language dropped in favor of tasks, divergence protocol, "carry every spec AC verbatim".
   - Done when: skill frontmatter valid (name/description), content covers the listed points, `loadSkillsFromDir` picks it up (quick node probe).
-- [ ] **4. `skills/task-breakdown/SKILL.md`** — decomposition rules (2–8 tasks, per-task ACs, dependsOn semantics, file-overlap⇒dependency rule), sizes, and the **dispatch policy**: parallel `dispatch_coder` for file-disjoint substantial tasks, sequential in-context otherwise, re-dispatch with previous attempt on fix rounds.
+- [x] **4. `skills/task-breakdown/SKILL.md`** — decomposition rules (2–8 tasks, per-task ACs, dependsOn semantics, file-overlap⇒dependency rule), sizes, and the **dispatch policy**: parallel `dispatch_coder` for file-disjoint substantial tasks, sequential in-context otherwise, re-dispatch with previous attempt on fix rounds.
   - Done when: as above.
-- [ ] **5. `skills/implementation/SKILL.md`** — `IMPLEMENT_RULES` + `implementSystem` merged: full mandate, no stubs/TODOs, failure-path tests, lint+test before reporting, stay within task files, honest impl-delta (`task_completion` per task).
+- [x] **5. `skills/implementation/SKILL.md`** — `IMPLEMENT_RULES` + `implementSystem` merged: full mandate, no stubs/TODOs, failure-path tests, lint+test before reporting, stay within task files, honest impl-delta (`task_completion` per task).
   - Done when: as above.
-- [ ] **6. `skills/verification/SKILL.md`** — migrate `verifySystem` verbatim-in-substance: assume-unmet standard, runtime/cold-boot/user-journey/negative/universal/version/test-ship/test-depth methods, evidence discipline, mechanical results are ground truth.
+- [x] **6. `skills/verification/SKILL.md`** — migrate `verifySystem` verbatim-in-substance: assume-unmet standard, runtime/cold-boot/user-journey/negative/universal/version/test-ship/test-depth methods, evidence discipline, mechanical results are ground truth.
   - Done when: as above.
-- [ ] **7. `skills/audit-deliverables/SKILL.md`** — migrate `auditSystem` + amendment 2: **re-read source docs + spec BEFORE verify results**, verify checks are claims, requirement-conformity in both directions (doc→impl, plan→impl), locked decisions, blocking semantics, impl-delta cross-check.
+- [x] **7. `skills/audit-deliverables/SKILL.md`** — migrate `auditSystem` + amendment 2: **re-read source docs + spec BEFORE verify results**, verify checks are claims, requirement-conformity in both directions (doc→impl, plan→impl), locked decisions, blocking semantics, impl-delta cross-check.
   - Done when: as above.
-- [ ] **8. `skills/security-scan/SKILL.md` + `scripts/run-scanners.mjs`** — scanner suite (gitleaks binary→docker→skip; `npm audit --json` (+pnpm/yarn by lockfile); semgrep/trivy when present, else recorded skip) emitting JSON `{scanners: [{id, status, evidence, findings}]}`; triage method: severity classes, false-positive discipline, `fixable_in_scope` definition.
+- [x] **8. `skills/security-scan/SKILL.md` + `scripts/run-scanners.mjs`** — scanner suite (gitleaks binary→docker→skip; `npm audit --json` (+pnpm/yarn by lockfile); semgrep/trivy when present, else recorded skip) emitting JSON `{scanners: [{id, status, evidence, findings}]}`; triage method: severity classes, false-positive discipline, `fixable_in_scope` definition.
   - Done when: `node skills/security-scan/scripts/run-scanners.mjs <dir>` runs standalone on a fixture with a planted secret (gitleaks fails) and on a clean tree (passes/skips honestly).
-- [ ] **9. `skills/vapt/SKILL.md`** — running-app method: boot via documented commands, endpoint/header/CORS/error-leakage/authz probes, OWASP-derived checklist with concrete commands, "scope honesty" (what a local VAPT is and is not), evidence capture into findings.
+- [x] **9. `skills/vapt/SKILL.md`** — running-app method: boot via documented commands, endpoint/header/CORS/error-leakage/authz probes, OWASP-derived checklist with concrete commands, "scope honesty" (what a local VAPT is and is not), evidence capture into findings.
   - Done when: as above.
 
 ### Phase 2 — Configuration (additive)
 
-- [ ] **10. `host/config.mjs` v2 additions** — `MILESTONE_SCHEMAS` (`plan`, `tasks`, `implDelta`, `security`; reuse existing `verify`/`audit`/`questions`/`spec` schemas), `STEP_PROFILES` (tools/thinking per step: clarify unchanged; build full-write + custom tools; verify read+bash+browser; security read+bash), `MODEL_ROLES` v2, `SEVERITY_GATE = ["critical","high"]`. Export `validatePlan`/`validateTasks` (pure functions, §2.5). Nothing v1 is removed yet.
+- [x] **10. `host/config.mjs` v2 additions** — `MILESTONE_SCHEMAS` (`plan`, `tasks`, `implDelta`, `security`; reuse existing `verify`/`audit`/`questions`/`spec` schemas), `STEP_PROFILES` (tools/thinking per step: clarify unchanged; build full-write + custom tools; verify read+bash+browser; security read+bash), `MODEL_ROLES` v2, `SEVERITY_GATE = ["critical","high"]`. Export `validatePlan`/`validateTasks` (pure functions, §2.5). Nothing v1 is removed yet.
   - Done when: `node --check` passes; a small test script exercises validateTasks rejections (overlap-without-dep, cycle, unknown dep).
 
 ### Phase 3 — Runner (additive)
 
-- [ ] **11. Per-step skill filtering in `host/runner.mjs`** — `skillsOverride` filters bundled skills by step allowlist (`clarify: [markdown-writer]`, `build: [planning, task-breakdown, implementation, markdown-writer]`, `verify: [verification, audit-deliverables, markdown-writer]`, `security: [security-scan, vapt, markdown-writer]`). Skill dirs must be resolvable to absolute paths in the system prompt instruction ("read `<abs>/SKILL.md`") — expose a `skillDir(name)` helper.
+- [x] **11. Per-step skill filtering in `host/runner.mjs`** — `skillsOverride` filters bundled skills by step allowlist (`clarify: [markdown-writer]`, `build: [planning, task-breakdown, implementation, markdown-writer]`, `verify: [verification, audit-deliverables, markdown-writer]`, `security: [security-scan, vapt, markdown-writer]`). Skill dirs must be resolvable to absolute paths in the system prompt instruction ("read `<abs>/SKILL.md`") — expose a `skillDir(name)` helper.
   - Done when: probe script creates a session for a fake step and the system prompt's skill listing contains exactly the allowlisted skills.
-- [ ] **12. Persistent step sessions in `host/runner.mjs`** — new `openStepSession({ stepId, runDir, tools, customTools, systemPrompt, cwd, modelSpec, modelRuntime, thinking, onEvent, signal })`: creates (`SessionManager.create(cwd, runs/<id>/sessions)`) or opens (`SessionManager.open(sessionFile)`) a persistent session using the spike-verified API; returns `{ session, sessionFile, prompt(text), abort() }` with the stall watchdog + event normalization factored out of `runNode` (shared helper). `runNode` keeps working for clarify rounds/analyst/coder children (unchanged behavior).
+- [x] **12. Persistent step sessions in `host/runner.mjs`** — new `openStepSession({ stepId, runDir, tools, customTools, systemPrompt, cwd, modelSpec, modelRuntime, thinking, onEvent, signal })`: creates (`SessionManager.create(cwd, runs/<id>/sessions)`) or opens (`SessionManager.open(sessionFile)`) a persistent session using the spike-verified API; returns `{ session, sessionFile, prompt(text), abort() }` with the stall watchdog + event normalization factored out of `runNode` (shared helper). `runNode` keeps working for clarify rounds/analyst/coder children (unchanged behavior).
   - Done when: probe script: open → prompt → close handle → reopen from file → prompt; context continuity verified; watchdog fires on a stalled fake.
 
 ### Phase 4 — Prompts (additive)
 
-- [ ] **13. `host/prompts.mjs` v2 additions** — `builderSystem(rulesCtx)` (workflow law: phases in order, forced skill loads with abs paths, milestone-tool contracts, dispatch policy pointer, compaction discipline), `builderPrompt({task, workspace, spec, sourceDocText, feedbackTurn?})`, `verifierSystem(rulesCtx)` (phases: verification skill → submit_verify → only-if-accepted audit phase; read-only stance; no source edits, scratch in /tmp only), `verifierPrompt({task, workspace, spec, sourceDocText, acVerification, plan, tasks, implDelta, mechanicalResults, remotePolicy, remoteResults})`, `securitySystem(rulesCtx)` + `securityPrompt({workspace, scannerResults, priorReports, vapt: bool})`. Existing clarify functions unchanged; v1 functions untouched until cleanup.
+- [x] **13. `host/prompts.mjs` v2 additions** — `builderSystem(rulesCtx)` (workflow law: phases in order, forced skill loads with abs paths, milestone-tool contracts, dispatch policy pointer, compaction discipline), `builderPrompt({task, workspace, spec, sourceDocText, feedbackTurn?})`, `verifierSystem(rulesCtx)` (phases: verification skill → submit_verify → only-if-accepted audit phase; read-only stance; no source edits, scratch in /tmp only), `verifierPrompt({task, workspace, spec, sourceDocText, acVerification, plan, tasks, implDelta, mechanicalResults, remotePolicy, remoteResults})`, `securitySystem(rulesCtx)` + `securityPrompt({workspace, scannerResults, priorReports, vapt: bool})`. Existing clarify functions unchanged; v1 functions untouched until cleanup.
   - Done when: `node --check` + a render test prints each prompt with a fixture spec/mechanical results and a reviewer pass confirms the contract blocks (ACs verbatim, source docs raw, mechanical ground truth) are present.
 
 ### Phase 5 — Rules (additive)
 
-- [ ] **14. `host/rules.mjs` step support** — `stepContextFiles(projectPath, stepId)` + `loadStepContext(...)` per the §2.9 matrix (build/verify get all five rule files; security gets AGENTS + security-rules; clarify AGENTS only). Node-based functions remain for v1 until cleanup.
+- [x] **14. `host/rules.mjs` step support** — `stepContextFiles(projectPath, stepId)` + `loadStepContext(...)` per the §2.9 matrix (build/verify get all five rule files; security gets AGENTS + security-rules; clarify AGENTS only). Node-based functions remain for v1 until cleanup.
   - Done when: probe against a fixture project with `.claude/rules/*` returns the right file sets per step.
 
 ### Phase 6 — Engine (new file, not yet wired)
 
-- [ ] **15. `host/engine.mjs` — core skeleton** — `createEngine({ modelRuntime, emit, webTools })` with the v2 state shape, `start()` (options validation, git branch setup via `git.mjs`, one-active-run-per-project guard), `execute()` step sequencing per §2.3, step status bookkeeping (`beginStep/endStep`), cancel/finalizeCancel (aborts sessions, **resolves** pending gates with `"cancel"`), gate/answer plumbing (`waitGate`, answers resolver — ported), resume entry, `activeRunFor`. Reuse from pipeline.mjs where literal: `specIntoPrompt`, `loadSourceDocs`/`sourceDocsFor`, `matchAcVerification`, `ENV_LIMIT_RE`, `pathTokensIn`, `commitSuffixFor`, failure-reason assembly, `reconcileVerify` (extended with audit-blocking + security inputs), `runMechanicalGate`, `runRemoteCiGate`, `integrate`.
+- [x] **15. `host/engine.mjs` — core skeleton** — `createEngine({ modelRuntime, emit, webTools })` with the v2 state shape, `start()` (options validation, git branch setup via `git.mjs`, one-active-run-per-project guard), `execute()` step sequencing per §2.3, step status bookkeeping (`beginStep/endStep`), cancel/finalizeCancel (aborts sessions, **resolves** pending gates with `"cancel"`), gate/answer plumbing (`waitGate`, answers resolver — ported), resume entry, `activeRunFor`. Reuse from pipeline.mjs where literal: `specIntoPrompt`, `loadSourceDocs`/`sourceDocsFor`, `matchAcVerification`, `ENV_LIMIT_RE`, `pathTokensIn`, `commitSuffixFor`, failure-reason assembly, `reconcileVerify` (extended with audit-blocking + security inputs), `runMechanicalGate`, `runRemoteCiGate`, `integrate`.
   - Done when: `node --check`; a dry-run with stub sessions walks clarify-off → build → verify → done in a unit harness (fake `openStepSession` injected via a parameter).
-- [ ] **16. Milestone tools + in-tool gates** — `makeMilestoneTools(run, engine)` per §2.4: submit_plan (validation + divergence gate + plan-approval gate blocking in execute, results as tool text), submit_tasks (validation), submit_impl_delta (record + commit + hard stop), submit_verify (reconcile + accept/gap text + hard stop), submit_audit, submit_security (record only). `pendingPlanApproval` stash for resume-at-gate.
+- [x] **16. Milestone tools + in-tool gates** — `makeMilestoneTools(run, engine)` per §2.4: submit_plan (validation + divergence gate + plan-approval gate blocking in execute, results as tool text), submit_tasks (validation), submit_impl_delta (record + commit + hard stop), submit_verify (reconcile + accept/gap text + hard stop), submit_audit, submit_security (record only). `pendingPlanApproval` stash for resume-at-gate.
   - Done when: unit harness drives each tool with fixtures (approve/reject/diverge/gap paths) and state transitions correctly.
-- [ ] **17. Build-step session lifecycle** — get-or-create build session (§2.11), initial `builderPrompt` turn, feedback turns for fix rounds (gap list formatted per §2.3 5d with owning-task mapping via `pathTokensIn` against `artifacts.tasks` files; plan/tasks/spec re-stated in the turn header for compaction insurance), `feat:`/`fix:` milestone commits, session file recorded in state; corruption fallback (new session file indexed `-1`, `-2`).
+- [x] **17. Build-step session lifecycle** — get-or-create build session (§2.11), initial `builderPrompt` turn, feedback turns for fix rounds (gap list formatted per §2.3 5d with owning-task mapping via `pathTokensIn` against `artifacts.tasks` files; plan/tasks/spec re-stated in the turn header for compaction insurance), `feat:`/`fix:` milestone commits, session file recorded in state; corruption fallback (new session file indexed `-1`, `-2`).
   - Done when: unit harness simulates round-0 gap → feedback turn → round-1 accept across a real persistent session file.
-- [ ] **18. Verify loop** — per-round fresh verifier session (tools: read/grep/find/ls/bash + web_reader when available + submit tools), pre-flight mechanical + remote CI, submit_verify/submit_audit flow, reconciliation, bounded rounds, honest failure assembly.
+- [x] **18. Verify loop** — per-round fresh verifier session (tools: read/grep/find/ls/bash + web_reader when available + submit tools), pre-flight mechanical + remote CI, submit_verify/submit_audit flow, reconciliation, bounded rounds, honest failure assembly.
   - Done when: unit harness with fake verifier output covers accepted / verify-gap / audit-blocking / exhausted-rounds paths.
-- [ ] **19. Security step** — pre-flight scanner execution (invoke `run-scanners.mjs` as a child process, structured output into `state.scannerResults`), fresh security session, `run_scanners` + `submit_security` tools, severity gating per §2.6, security-override gate, bounded security fix round (`NANO_SECURITY_FIX_ROUNDS`, default 1).
+- [x] **19. Security step** — pre-flight scanner execution (invoke `run-scanners.mjs` as a child process, structured output into `state.scannerResults`), fresh security session, `run_scanners` + `submit_security` tools, severity gating per §2.6, security-override gate, bounded security fix round (`NANO_SECURITY_FIX_ROUNDS`, default 1).
   - Done when: unit harness covers fixable-blocking / unfixable-override / medium-non-gating paths.
-- [ ] **20. `dispatch_coder`** — child session spawner per §2.7 (builder model, write tools, task-scoped prompt with rules context, caps via env), events under `build`, `files_written` merged into the commit set.
+- [x] **20. `dispatch_coder`** — child session spawner per §2.7 (builder model, write tools, task-scoped prompt with rules context, caps via env), events under `build`, `files_written` merged into the commit set.
   - Done when: sandbox probe — a fake build session dispatches two tasks, children write files, events + commit reflect both.
 
 ### Phase 7 — Server switch
 
-- [ ] **21. `host/server.mjs` → engine** — import `createEngine`; `POST /api/runs` builds v2 options (security select, 4 model roles, no tier); `/api/roles` returns v2; `/model` accepts step ids; `/api/tiers` temporarily `{}`; gate/answers/cancel/resume wire to the engine's identical API surface; boot orphan sweep handles v2 statuses (same list).
+- [x] **21. `host/server.mjs` → engine** — import `createEngine`; `POST /api/runs` builds v2 options (security select, 4 model roles, no tier); `/api/roles` returns v2; `/model` accepts step ids; `/api/tiers` temporarily `{}`; gate/answers/cancel/resume wire to the engine's identical API surface; boot orphan sweep handles v2 statuses (same list).
   - Done when: server boots; `curl` start (clarify off, security off) against the sandbox reaches the build step events; v1 run GET still renders.
 
 ### Phase 8 — GUI
 
-- [ ] **22. `web/src/api.ts`** — v2 types (`steps`, `options.security`, gate union + `security-override`), start payload, remove tier fetch.
+- [x] **22. `web/src/api.ts`** — v2 types (`steps`, `options.security`, gate union + `security-override`), start payload, remove tier fetch.
   - Done when: `npm run build` passes with updated consumers.
-- [ ] **23. `StartForm`/`NewRunModal` + `ModelPicker`** — security select (Off/Scan/Scan+VAPT), 4 role pickers + master, localStorage keys migrated (fallback to old keys → `auto`).
+- [x] **23. `StartForm`/`NewRunModal` + `ModelPicker`** — security select (Off/Scan/Scan+VAPT), 4 role pickers + master, localStorage keys migrated (fallback to old keys → `auto`).
   - Done when: a start payload from the GUI produces a v2 run server-side.
-- [ ] **24. `lib/pipeline.ts` + `PipelineLanes` → StepTimeline** — ordered steps, rounds counter, gate badge, legacy fallback for v1 runs.
+- [x] **24. `lib/pipeline.ts` + `PipelineLanes` → StepTimeline** — ordered steps, rounds counter, gate badge, legacy fallback for v1 runs.
   - Done when: V1-style run renders four step cards; an old v1 run still renders read-only.
-- [ ] **25. `GatePanel` security-override + `Workbench` artifacts** — findings table with Accept-risk/Cancel; artifacts tab gains tasks/implDelta/security/scannerResults.
+- [x] **25. `GatePanel` security-override + `Workbench` artifacts** — findings table with Accept-risk/Cancel; artifacts tab gains tasks/implDelta/security/scannerResults.
   - Done when: `npm run build` green; manual click-through of each gate type against a paused live run.
 
 ### Phase 9 — Live validation (V1–V12 of §5)
 
-- [ ] **26. Happy paths (V1, V2, V3, V4)** — sandbox + clarify + gate paths; fix anything found (engine or prompts).
-  - Done when: all four scenarios pass their criteria.
-- [ ] **27. Fix-loop paths (V5, V6)** — forced mechanical failure and audit blocking; confirm the build SESSION is resumed (same session file, continuity in events), not respawned.
-  - Done when: both pass; session-file identity verified in state/events.
-- [ ] **28. Security paths (V7, V8)** — planted secret fix loop; unfixable-finding override gate.
-  - Done when: both pass.
-- [ ] **29. Lifecycle paths (V9, V10, V11, V12)** — cancel/resume mid-build and at-gate; git-on milestone commits + ff-merge; exhausted-rounds honest failure.
-  - Done when: all pass; FIX-REPORT-style notes appended to `docs/` for anything fixed.
+- [~] **26. Happy paths (V1, V2, V3, V4)** — V1 ✅ V2 ✅ live-passed 2026-09-20 (glm-5.3-flash; runs 20260920-154407664, 20260920-155539141); V3/V4 harness-covered — **live runs deferred to owner** (docs/V2-VALIDATION.md).
+- [~] **27. Fix-loop paths (V5, V6)** — harness-covered (13/13, session-identity asserted); **live runs deferred to owner** (V5 fixture: plant violations INSIDE the project — see runbook).
+- [~] **28. Security paths (V7, V8)** — override gate observed live (run 20260920-161038752, out-of-scope secret classified honestly); fixable-secret fix loop **deferred to owner** (V7).
+- [~] **29. Lifecycle paths (V9–V12)** — V10 harness-covered; V9/V11/V12 **deferred to owner** (runbook §V9–V12).
 
 ### Phase 10 — Cleanup & docs
 
-- [ ] **30. Delete v1 engine code** — remove `host/pipeline.mjs`; strip `TIERS`, `NODE_PROFILES`, `profileFor`, `roleOf`, `LEGAL_SINGLE_SIDES`, `plan_caps` schema, v1 prompt functions (`planSystem`…`auditPrompt` non-clarify), node-based rules functions, `/api/tiers`. Grep for dead references.
+- [x] **30. Delete v1 engine code** — remove `host/pipeline.mjs`; strip `TIERS`, `NODE_PROFILES`, `profileFor`, `roleOf`, `LEGAL_SINGLE_SIDES`, `plan_caps` schema, v1 prompt functions (`planSystem`…`auditPrompt` non-clarify), node-based rules functions, `/api/tiers`. Grep for dead references.
   - Done when: `node --check host/*.mjs` clean; server boots; a V1-style smoke run still completes.
-- [ ] **31. README rewrite** — two-phase/four-step flow, skills-vs-law table, security step, session persistence + fix-loop description, updated env vars (`NANO_MAX_CODER_SUBAGENTS`, `NANO_SECURITY_FIX_ROUNDS` documented alongside existing), GUI screenshots updated.
+- [x] **31. README rewrite** — two-phase/four-step flow, skills-vs-law table, security step, session persistence + fix-loop description, updated env vars (`NANO_MAX_CODER_SUBAGENTS`, `NANO_SECURITY_FIX_ROUNDS` documented alongside existing), GUI screenshots updated.
   - Done when: README describes only what ships.
-- [ ] **32. Final commit + tag** — merge `v2-step-workflow` to main; tag `v2.0.0`.
-  - Done when: main green; the old engine remains retrievable in git history.
+- [ ] **32. Final merge + tag** — BLOCKED ON OWNER VALIDATION (V3–V12 per docs/V2-VALIDATION.md): merge `v2-step-workflow` to main; tag `v2.0.0`. The v1 engine remains retrievable in git history (last on main @ 90d2505).
 
 ---
 
