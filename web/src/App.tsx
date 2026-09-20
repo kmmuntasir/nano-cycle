@@ -418,7 +418,20 @@ export default function App() {
                         onClick={() => setTab(t.id)}
                       >
                         {gated ? "● " : ""}{t.label}
-                        <Text as="span" fontSize="9px" color="muted" ml={1}>{t.hint}</Text>
+                        <Text
+                          as="span"
+                          fontSize="9px"
+                          color={active ? "#7aa2f7" : "muted"}
+                          ml={1.5}
+                          px={1}
+                          borderRadius="3px"
+                          border="1px solid"
+                          borderColor={active ? "#2b3a5c" : "line"}
+                          fontFamily="ui-monospace, monospace"
+                          title={`Press ${t.hint} to switch to ${t.label}`}
+                        >
+                          {t.hint}
+                        </Text>
                       </Box>
                     );
                   })}
