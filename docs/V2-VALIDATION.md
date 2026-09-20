@@ -33,7 +33,8 @@ rm -rf sandbox && mkdir sandbox && printf '{ "name": "nano-cycle-sandbox", "priv
 
 - ✅ **V1** happy path (run `20260920-154407664`) — plan→tasks→impl→verify 7/7→audit accepted; all 5 skills observed loaded; sandbox tests green.
 - ✅ **V2** clarify loop (dev run `20260920-155539141`) — 3 real owner questions, answers via GUI, spec locked, all gates green.
-- ⚠️→✅ **V2 owner run `20260920-201117278`** failed at the plan gate: approving after >5 min at the gate tripped the stall watchdog (it treated the in-tool gate wait as a provider stall). **Fixed** — stall detection now pauses while any tool execution is in flight (gates, coder subagents, analysts); regression-tested in `tests/watchdog.test.mjs`. The failed run is resumable (click Resume after restarting the server).
+- ⚠️→✅ **V2 owner run `20260920-201117278`** failed at the plan gate: approving after >5 min at the gate tripped the stall watchdog (it treated the in-tool gate wait as a provider stall). **Fixed** — stall detection now pauses while any tool execution is in flight (gates, coder subagents, analysts); regression-tested in `tests/watchdog.test.mjs`.
+- ✅ **V2** owner re-run after the fix (run `20260920-204148298`) — completed; 4 real PM questions; spec locked (7 ACs, 7 decisions, all env-tagged); 0 spec ACs missing from the plan; verify 7/7; audit clean; all 5 skills in phase order.
 - ✅ Security override gate (part of run `20260920-161038752`) — out-of-scope secret classified honestly `fixable_in_scope:false`, routed to the owner.
 
 **Validated — owner manual runs:**
@@ -69,7 +70,7 @@ verdict accepted with every check evidenced by observed commands; Console shows
 the builder loading `planning` → `task-breakdown` → `implementation` and the
 verifier loading `verification` → `audit-deliverables`.
 
-## V2 — clarify loop (re-run optional; already passed)
+## V2 — clarify loop ✅ (dev run `20260920-155539141` + owner run `20260920-204148298` after the watchdog fix)
 
 | | |
 |---|---|
