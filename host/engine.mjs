@@ -333,11 +333,14 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         round: i + 1,
         qna: r.questions.map((q) => ({ question: q.question, answer: r.answers[q.id] ?? "(no answer)" })),
       }));
+      const mode = run.options.requireQuestions && rounds.length === 0 ? "questions-only" : "both";
       let prompt = clarifyPrompt(run.task, history, run.projectPath);
+      if (mode === "questions-only") {
+        prompt += "\n\nOWNER POLICY: at least one clarification round is REQUIRED before the spec may lock. finalize_spec is unavailable this round — investigate the project, then ask your highest-leverage questions via ask_questions.";
+      }
       if (emptyRounds > 0) {
         prompt += `\n\nYou have called ask_questions with no questions ${emptyRounds} time(s). Do NOT do that again — either ask real questions via ask_questions, or finalize via finalize_spec.`;
       }
-      const mode = run.options.requireQuestions && rounds.length === 0 ? "questions-only" : "both";
       const result = await clarifyNode(run, prompt, mode);
 
       if (result.type === "spec") {
@@ -448,15 +451,20 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         }),
       );
     }
-    tools.push(
-      makeTool({
-        name: "finalize_spec",
-        label: "Finalize spec",
-        description: "Finalize the requirements spec.",
-        schema: ARTIFACT_SCHEMAS.spec,
-        onCall: (p) => (store.result = { type: "spec", spec: p }),
-      }),
-    );
+    // Owner policy (requireQuestions): the spec cannot lock until at least one
+    // question round was asked — finalize_spec is structurally WITHHELD on the
+    // first round, not merely discouraged.
+    if (mode !== "questions-only") {
+      tools.push(
+        makeTool({
+          name: "finalize_spec",
+          label: "Finalize spec",
+          description: "Finalize the requirements spec.",
+          schema: ARTIFACT_SCHEMAS.spec,
+          onCall: (p) => (store.result = { type: "spec", spec: p }),
+        }),
+      );
+    }
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
     byName.investigate = makeInvestigateTool(run);
     if (webTools?.search) byName.web_search = webTools.search;
@@ -475,7 +483,13 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           requireArtifact: false,
           thinking: STEP_PROFILES.clarify.thinking,
           systemPrompt: clarifySystem(),
-          prompt: attempt === 0 ? prompt : prompt + "\n\nIMPORTANT: respond ONLY by calling the ask_questions tool or the finalize_spec tool — do not write your answer as text.",
+          prompt:
+            attempt === 0
+              ? prompt
+              : prompt +
+                (mode === "questions-only"
+                  ? "\n\nIMPORTANT: respond ONLY by calling the ask_questions tool — finalize_spec is unavailable this round (the owner requires at least one question round). Do not write your answer as text."
+                  : "\n\nIMPORTANT: respond ONLY by calling the ask_questions tool or the finalize_spec tool — do not write your answer as text."),
           cwd: run.projectPath,
           modelSpec: run.models.clarify ?? "auto",
           modelRuntime,

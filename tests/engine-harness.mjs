@@ -496,6 +496,49 @@ await test("cancel at plan gate → run cancelled; resume re-presents gate and c
   assert.strictEqual(buildOpens[1].resumed, true, "reopened FROM the persisted session file");
 });
 
+await test("requireQuestions: finalize_spec structurally withheld on round 1", async () => {
+  stepStores.clear();
+  const seen = { tools: null, custom: null };
+  const scripts = { build: [async () => {}], verify: [async () => {}] };
+  const { engine, id, state } = await runEngine({
+    scripts,
+    adaptersOverride: {
+      runNode: async (opts) => {
+        if (opts.nodeId === "clarify") {
+          seen.tools = opts.tools;
+          seen.custom = (opts.customTools ?? []).map((t) => t.name);
+        }
+        throw new Error("fake clarify stops here");
+      },
+    },
+  });
+  // start a clarify run manually (runEngine starts with clarify off — do a raw start)
+  const id2 = `test-cq-${Date.now()}`;
+  const events = [];
+  const eng2 = createEngine({
+    modelRuntime: {},
+    emit: { state: () => {}, event: (rid, n, ev) => events.push(ev) },
+    webTools: {},
+    adapters: { runNode: async (opts) => {
+      if (opts.nodeId === "clarify") {
+        seen.tools = opts.tools;
+        seen.custom = (opts.customTools ?? []).map((t) => t.name);
+      }
+      throw new Error("stop");
+    } },
+  });
+  await eng2.start({
+    id: id2, task: "t", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: true, requireQuestions: true, maxFixRounds: 0, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
+  });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(seen.custom, "clarify session was created");
+  assert.ok(seen.custom.includes("ask_questions"), "ask_questions available");
+  assert.ok(!seen.custom.includes("finalize_spec"), "finalize_spec WITHHELD on round 1 (structural)");
+  console.log("   tools seen:", seen.custom?.join(", "));
+});
+
 await test("setStepModel: queued step ok, running/done rejected", async () => {
   stepStores.clear();
   const scripts = {
