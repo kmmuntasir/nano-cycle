@@ -7,6 +7,8 @@
 
 **Verdict:** the architecture matches the plan (two-phase scheduler over the engine, park-don't-block, spec staleness via divergence, tickets outside repos) and the unit suites genuinely cover what they claim. But **six flows that the live validation W1–W8 depends on are broken end-to-end**, plus several §7 GUI contracts were never built. The gaps below are ordered by severity; each was fixed on this branch after this document was committed (fix commits reference the gap ids).
 
+**Outcome (same day, after the fixes):** every gap below marked FIXED is fixed on this branch — commits `14ebdca` (A1), `926170c` (A2, A3), `09858c8` (A4), `a8a76ae` (A5), `e59401e` (A6, C1, C2), `0e278ba` (B1, C3, C6), `b550e49` (C5), `3418da7` (B2–B7, C4). Suites grew from 36 to **47 checks** (19 engine + 3 watchdog + 6 tickets + 7 backlog + 12 queue), all green; GUI rebuilt. W1–W8 owner validation still pending, as the plan requires.
+
 ## A. Broken end-to-end flows
 
 ### A1 — Import creates nothing (W1 fails at step 1)
@@ -87,16 +89,16 @@ Also: the flip notice event is emitted under a bogus runId `"queue"` (creates a 
 
 ## Fix plan (executed after this file was committed)
 
-| Fix | Gaps | Touches |
+| Fix | Gaps | Status |
 | --- | --- | --- |
-| 1. Import creates tickets (done-flag aware, skip existing, `json` accepted) | A1 | `tickets.mjs`, `server.mjs`, `TicketsView.tsx`, `api.ts`, `tickets.test.mjs` |
-| 2. Promote/resume across restarts: `resumeFromDisk({onSettled, promote})`, pump fallback, retry wiring, `holdsTree`, phase-aware check | A2, A3 | `engine.mjs`, `queue.mjs`, `engine-harness.mjs`, `queue.test.mjs` |
-| 3. `finalizeCancel` fires `onSettled` | A4 | `engine.mjs`, `engine-harness.mjs` |
-| 4. Completion un-blocks dependents (dependency-blocked whose deps are all done → `queued`) | A5 | `queue.mjs`, `queue.test.mjs` |
-| 5. Flip safety: tree check before write, pump waits for the commit, heading preserved, `(F##)` suffix, real runId for notices | A6, C1, C2 | `queue.mjs`, `backlog.mjs`, `backlog.test.mjs`, `queue.test.mjs` |
-| 6. Re-clarify seeds old spec + reason; wave can't stick at `clarifying`; drop dead `failed` status | B1, C3, C6 | `queue.mjs`, `TicketsView.tsx`, `queue.test.mjs` |
-| 7. `POST /api/runs` passthrough + per-ticket Run now | B2 | `server.mjs`, `api.ts`, `TicketsView.tsx` |
-| 8. GUI: queue-config editor, batch spec review at release, inline edit + reorder, Inbox empty state, WS-driven refresh; server: config before wave, release ticket filter | B3, B4, B5, B6, B7, C4 | `TicketsView.tsx`, `App.tsx`, `server.mjs`, `queue.mjs`, `api.ts` |
-| 9. Provider-failure classification for failed builds | C5 | `queue.mjs`, `queue.test.mjs` |
+| 1. Import creates tickets (done-flag aware, skip existing, `json` accepted) | A1 | FIXED — `14ebdca` |
+| 2. Promote/resume across restarts: `resumeFromDisk({onSettled, promote})`, pump fallback, retry wiring, `holdsTree`, phase-aware check | A2, A3 | FIXED — `926170c` |
+| 3. `finalizeCancel` fires `onSettled` | A4 | FIXED — `09858c8` |
+| 4. Completion un-blocks dependents (dependency-blocked whose deps are all done → `queued`) | A5 | FIXED — `a8a76ae` |
+| 5. Flip safety: tree check before write, pump waits for the commit, heading preserved, `(F##)` suffix, real runId for notices | A6, C1, C2 | FIXED — `e59401e` |
+| 6. Re-clarify seeds old spec + reason; wave can't stick at `clarifying`; drop dead `failed` status | B1, C3, C6 | FIXED — `0e278ba` |
+| 7. `POST /api/runs` passthrough + per-ticket Run now | B2 | FIXED — `3418da7` |
+| 8. GUI: queue-config editor, batch spec review at release, inline edit + reorder, Inbox empty state, WS-driven refresh; server: config before wave, release ticket filter | B3, B4, B5, B6, B7, C4 | FIXED — `3418da7` |
+| 9. Provider-failure classification for failed builds | C5 | FIXED — `b550e49` |
 
 W1–W8 remain deferred to the owner exactly as the plan states — but with these fixes the runbook's steps are now actually executable (import creates tickets; reorder/edit/config exist in the GUI; retry unblocks the cascade; a restart no longer strands the queue).

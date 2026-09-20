@@ -1,6 +1,7 @@
 # nano-cycle v3 — Ticket Queue: backlog → batch clarification → sequential delivery
 
 **Status:** IMPLEMENTED on branch `v3-ticket-queue` — all suites green (17 engine scenarios + 3 watchdog + 5 tickets + 6 backlog + 5 queue = 36 checks). Live validation W1–W8 deferred to owner; merge + tag after.
+**Post-implementation audit (2026-09-21):** `docs/V3-GAP-AUDIT.md` — 6 broken flows + 7 GUI gaps found and fixed on this branch (suites now 47 checks); W1–W8 owner validation still pending.
 **Builds on:** v2.0.0 (four-step workflow — `docs/PLAN-v2-step-workflow.md`, fully owner-validated)
 **Branch:** `v3-ticket-queue`
 
