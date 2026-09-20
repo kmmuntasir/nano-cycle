@@ -38,6 +38,7 @@ rm -rf sandbox && mkdir sandbox && printf '{ "name": "nano-cycle-sandbox", "priv
 - ✅ **V3** plan reject-with-comments (run `20260920-210752155`) — owner rejection fed back into the SAME build session; plan resubmitted with the null-handling criterion; final code + tests cover `shout(null)`; verify 6/6, audit clean.
 - ✅ **V5** mechanical→fix round (owner run `20260920-213826032`) — `deps-declared` failed at round 0 with file:line precision (`legacy/old.js:1`); fix round resumed the SAME build session (`rounds: 1`, one session file); the builder declared the dep and left `legacy/` intact; impl-delta notes confirm untouched files stayed byte-identical; round 1 green → completed.
 - ⚠️→🔧 **V6 first attempt** (run `20260920-215309256`) — PM locked the spec without asking anything (legitimate for this task text); no round to steer → audit had nothing to block on → completed 7/7. Led to the **PM Must Ask** GUI toggle + the discovery that `requireQuestions` was a v1 no-op (finalize was never structurally withheld — fixed + regression-tested).
+- ✅ **V9** cancel mid-build → resume (owner run `20260920-231317629`) — cancelled 13s into the build (mid-investigation), resumed 3s later: "build session resumed from disk (context intact)", SAME session file reused, plan→tasks→impl continued, verify 5/5 → completed.
 - ✅ **V7** security scan (owner run `20260920-225451373`) — the planted secret was caught EARLIER than predicted: by the mechanical gitleaks gate at verify round 0 (not the security step — defense in depth: gitleaks runs at both layers). Fix round resumed the build session; the builder replaced the credential with a placeholder instead of deleting the pre-existing file; security step then passed cleanly with two honest manual LOW findings (placeholder note, 0777 modes). Completed.
 - ✅ **V6** owner re-run with PM Must Ask (run `20260920-222041658`) — the fix held: the PM asked 4 real questions (incl. non-numeric policy + README scope); the steering text entered the spec as 3 explicit ACs; the builder shipped ALL 10 ACs (null handling in code, `## Usage` in README) → verify 10/10, audit clean, no fix round needed. The audit-blocking→fix-round path remains harness-covered — a builder this diligent leaves audit nothing to block.
 - ✅ **V4** divergence (run `20260920-211555646`) — outcome worth reading: the builder did NOT declare divergence; it resolved the contradiction (from-scratch, API-compatible left-pad semantics — dependency-free), the plan made both sides explicit criteria, and verify probed BOTH (semantics match + no deps + no vendored code) → 7/7. A model of this class prefers resolving over escalating — the divergence GATE path remains harness-covered; to force it live you'd need a genuinely impossible constraint.
@@ -277,7 +278,7 @@ same. If the model misses it entirely, strengthen the fixture with an
 AWS-format key (V7's line) inside `vault/prod.env` and keep the "production,
 do not touch" framing.
 
-## V9 — cancel mid-build → resume with session continuity
+## V9 — cancel mid-build → resume with session continuity ✅ (owner run `20260920-231317629`)
 
 | | |
 |---|---|
