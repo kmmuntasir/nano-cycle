@@ -40,6 +40,19 @@ export default function RunHeader({
     (acc, n) => ({ input: acc.input + n.usage.input, output: acc.output + n.usage.output }),
     { input: 0, output: 0 },
   );
+  // The configuration this run started with — visible during AND after the run.
+  const o = state.options;
+  const chips: { label: string; on: boolean }[] = o
+    ? [
+        { label: o.clarify ? (o.requireQuestions ? "Clarify on · PM Must Ask" : "Clarify on") : "Clarify off", on: o.clarify },
+        { label: `Security: ${o.security === "scan+vapt" ? "Scan+VAPT" : o.security === "scan" ? "Scan" : "Off"}`, on: o.security !== "off" },
+        { label: o.git ? "Git on" : "Git off", on: o.git },
+        { label: o.remoteCi ? "Remote CI on" : "Remote CI off", on: o.remoteCi },
+        { label: o.audit ? "Audit on" : "Audit off", on: o.audit },
+        { label: o.approvePlan ? "Plan Approval on" : "Plan Approval off", on: o.approvePlan },
+        { label: `Fix Rounds: ${o.maxFixRounds}`, on: o.maxFixRounds > 0 },
+      ]
+    : [{ label: `tier ${state.tier ?? "legacy"}`, on: false }];
   return (
     <Box
       border="1px solid"
@@ -91,6 +104,23 @@ export default function RunHeader({
                 {state.error}
               </Text>
             )}
+          </HStack>
+          <HStack gap={1.5} mt={2} flexWrap="wrap">
+            {chips.map((c) => (
+              <Box
+                key={c.label}
+                px={2}
+                py={0.5}
+                borderRadius="sm"
+                border="1px solid"
+                borderColor={c.on ? "#2b3a5c" : "line"}
+                bg={c.on ? "#1b2130" : "transparent"}
+              >
+                <Text fontSize="10px" color={c.on ? "#7aa2f7" : "muted"} fontFamily="ui-monospace, monospace">
+                  {c.label}
+                </Text>
+              </Box>
+            ))}
           </HStack>
         </Box>
         {live && (
