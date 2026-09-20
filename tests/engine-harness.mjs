@@ -92,6 +92,7 @@ async function runEngine({ scripts, autoGate = ["approve"], mechanical, security
   const emit = {
     state: (run) => {
       state.latest = run.state;
+      state.lastSnapshot = JSON.parse(JSON.stringify(run.state)); // what would hit disk
       saveStateCapture(run.state);
     },
     event: (runId, nodeId, ev) => events.push({ runId, nodeId, ...ev }),

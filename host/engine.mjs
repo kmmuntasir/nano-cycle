@@ -1349,6 +1349,21 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       : null;
   }
 
+  // Every exit path MUST settle: persist the terminal state, unblock waiters,
+  // and release the project slot. (V12 owner run caught the missing settle on
+  // the failure early-returns — state.json stayed "running" forever.)
+  function settle(run) {
+    run.state.finishedAt = Date.now();
+    run.done.promiseSettled = true;
+    emit.state(run);
+    run.done.box.promiseSettled = true;
+    try {
+      run.done.resolve(run.state.status);
+    } catch {
+      /* already resolved */
+    }
+  }
+
   async function execute(run) {
     try {
       // Git-on runs ALWAYS execute on their own branch (v1 resume safety).
@@ -1521,6 +1536,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             run.state.error = `security findings not fixed after ${SECURITY_FIX_ROUNDS} round(s): ${assembleFailureReasons(run) ?? fixable.map((f) => f.title).join("; ")}`;
             emit.event(run.id, "_run", { t: "notice", s: `run failed: ${run.state.error}` });
             await integrate(run, false);
+            settle(run);
             return;
           }
         }
@@ -1566,11 +1582,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         emit.event(run.id, "_run", { t: "notice", s: `run failed: ${err.message}` });
       }
     }
-    run.state.finishedAt = Date.now();
-    run.done.promiseSettled = true;
-    emit.state(run);
-    run.done.box.promiseSettled = true;
-    run.done.resolve(run.state.status);
+    settle(run);
   }
 
   // --- controller API ---------------------------------------------------------------
