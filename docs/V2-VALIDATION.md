@@ -35,6 +35,7 @@ rm -rf sandbox && mkdir sandbox && printf '{ "name": "nano-cycle-sandbox", "priv
 - ✅ **V2** clarify loop (dev run `20260920-155539141`) — 3 real owner questions, answers via GUI, spec locked, all gates green.
 - ⚠️→✅ **V2 owner run `20260920-201117278`** failed at the plan gate: approving after >5 min at the gate tripped the stall watchdog (it treated the in-tool gate wait as a provider stall). **Fixed** — stall detection now pauses while any tool execution is in flight (gates, coder subagents, analysts); regression-tested in `tests/watchdog.test.mjs`.
 - ✅ **V2** owner re-run after the fix (run `20260920-204148298`) — completed; 4 real PM questions; spec locked (7 ACs, 7 decisions, all env-tagged); 0 spec ACs missing from the plan; verify 7/7; audit clean; all 5 skills in phase order.
+- ✅ **V3** plan reject-with-comments (run `20260920-210752155`) — owner rejection fed back into the SAME build session; plan resubmitted with the null-handling criterion; final code + tests cover `shout(null)`; verify 6/6, audit clean.
 - ✅ Security override gate (part of run `20260920-161038752`) — out-of-scope secret classified honestly `fixable_in_scope:false`, routed to the owner.
 
 **Validated — owner manual runs:**
@@ -89,7 +90,7 @@ prints a greeting. Also add a README.md section documenting usage.
 questions); after your answers the spec locks (6-ish ACs, tagged
 local/remote/human); run completes; spec ACs appear verbatim in the plan.
 
-## V3 — plan gate: reject with comments → in-session revision
+## V3 — plan gate: reject with comments → in-session revision ✅ (owner run `20260920-210752155`)
 
 | | |
 |---|---|

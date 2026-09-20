@@ -371,7 +371,7 @@ v1 runs: listed and viewable (state/events readers are shape-agnostic); `resume`
 
 ### Phase 9 — Live validation (V1–V12 of §5)
 
-- [~] **26. Happy paths (V1, V2, V3, V4)** — V1 ✅ (dev `20260920-154407664` + owner-validated `20260920-194320256`, 11/11) V2 ✅ (dev `20260920-155539141` + owner-validated `20260920-204148298` post-watchdog-fix) live-passed 2026-09-20 (glm-5.3-flash); V3/V4 harness-covered — **live runs deferred to owner** (docs/V2-VALIDATION.md).
+- [~] **26. Happy paths (V1, V2, V3, V4)** — V1 ✅ (dev `20260920-154407664` + owner-validated `20260920-194320256`, 11/11) V2 ✅ (dev `20260920-155539141` + owner-validated `20260920-204148298` post-watchdog-fix) live-passed 2026-09-20 (glm-5.3-flash); V3 ✅ owner-validated (`20260920-210752155` — reject→revise→approve in one session); V4 harness-covered — remaining live runs deferred to owner (docs/V2-VALIDATION.md).
 - [~] **27. Fix-loop paths (V5, V6)** — harness-covered (13/13, session-identity asserted); **live runs deferred to owner** (V5 fixture: plant violations INSIDE the project — see runbook).
 - [~] **28. Security paths (V7, V8)** — override gate observed live (run 20260920-161038752, out-of-scope secret classified honestly); fixable-secret fix loop **deferred to owner** (V7).
 - [~] **29. Lifecycle paths (V9–V12)** — V10 harness-covered; V9/V11/V12 **deferred to owner** (runbook §V9–V12).
