@@ -183,7 +183,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       broadcastQueue(project);
       return pump(project);
     }
-    const out = engine.promote(t.runId, (status) => onBuildSettled(project, t.id, t.runId, status));
+    const out = promoteRun(project, t);
     if (!out.ok) {
       // Holder appeared between checks (a direct run, another queue) — the
       // next settle re-pumps. Leave the ticket queued.
@@ -193,6 +193,18 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     setTicketStatus(project, t.id, "running", { runId: t.runId });
     setQueueState(project, { state: "running" });
     broadcastQueue(project);
+  }
+
+  // Promote a ticket's clarified run into build. In-session first; when the
+  // server restarted since the wave (the run exists only on disk), continue it
+  // from disk with promote semantics — restarts must not strand the queue.
+  function promoteRun(project, t) {
+    const cb = (status) => onBuildSettled(project, t.id, t.runId, status);
+    let out = engine.promote(t.runId, cb);
+    if (!out.ok && /not active in this server session/.test(String(out.error ?? ""))) {
+      out = engine.resumeFromDisk(t.runId, resolveProject(project), { promote: true, onSettled: cb });
+    }
+    return out;
   }
 
   function onBuildSettled(project, ticketId, runId, status) {
@@ -263,8 +275,16 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     const t = store.tickets.find((x) => x.id === ticketId);
     if (!t) return { ok: false, error: `unknown ticket "${ticketId}"` };
     if (t.status !== "blocked") return { ok: false, error: `ticket "${ticketId}" is not blocked` };
-    // resume the parked run from disk (gates/branch/session kept)
-    const out = engine.resumeFromDisk(t.runId, resolveProject(project));
+    if (!t.runId) return { ok: false, error: `ticket "${ticketId}" has no run to retry — re-clarify instead` };
+    // Resume the parked run (gates/branch/session kept). In-session first (the
+    // settle callback from its promote is still wired); after a restart the
+    // controller is rebuilt from disk WITH the queue's settle callback.
+    let out = engine.resume(t.runId);
+    if (!out.ok && !/only cancelled or failed runs can be resumed|still winding down/.test(String(out.error ?? ""))) {
+      out = engine.resumeFromDisk(t.runId, resolveProject(project), {
+        onSettled: (status) => onBuildSettled(project, ticketId, t.runId, status),
+      });
+    }
     if (out.ok) setTicketStatus(project, ticketId, "running", { runId: t.runId });
     return out;
   }

@@ -1897,7 +1897,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     // Restart recovery: rebuild the controller from runs/<id>/state.json. The
     // build session reopens from its persisted file (amendment 1); milestones
     // already recorded are never re-done.
-    resumeFromDisk(id, project) {
+    //
+    // opts.promote (queue): a run parked as "clarified" on disk (its server
+    // session is gone) continues into build/verify/security — the same law as
+    // promote(), from disk. opts.onSettled wires the queue's settle callback.
+    resumeFromDisk(id, project, opts = {}) {
       if (runs.has(id)) return { ok: false, error: "run is still active in this server session" };
       let state = null;
       try {
@@ -1908,8 +1912,9 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       if (state.version !== 2) {
         return { ok: false, error: "legacy (v1) run — not resumable by the step engine" };
       }
-      if (!["cancelled", "failed", "interrupted"].includes(state.status)) {
-        return { ok: false, error: `run status is "${state.status}" — only cancelled/failed/interrupted runs can be resumed` };
+      const allowed = ["cancelled", "failed", "interrupted", ...(opts.promote ? ["clarified"] : [])];
+      if (!allowed.includes(state.status)) {
+        return { ok: false, error: `run status is "${state.status}" — only ${allowed.join("/")} runs can be resumed` };
       }
       let projectPath = project?.path;
       if (!projectPath) {
@@ -1920,9 +1925,10 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           return { ok: false, error: `cannot resolve project "${state.project}" — register it first` };
         }
       }
+      // Phase-aware lock (same law as promote): only a tree-HOLDING run blocks.
       for (const other of runs.values()) {
-        if (other.projectPath === projectPath && !other.done.promiseSettled) {
-          return { ok: false, error: `a run is already active on project "${state.project}" — cancel it first` };
+        if (other.projectPath === projectPath && !other.done.promiseSettled && other.holdsTree) {
+          return { ok: false, error: `the working tree is held by run ${other.id} — the queue will retry when it finishes` };
         }
       }
       for (const s of state.steps) {
@@ -1931,6 +1937,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           s.error = null;
         }
       }
+      if (opts.promote) state.options.stopAfterClarify = false; // persists via state.options
       const run = {
         id,
         task: state.task,
@@ -1952,6 +1959,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         ciCapability: undefined,
         pendingPlanGate: null,
         pendingQuestions: null,
+        holdsTree: true, // a resumed run continues building — it owns the tree
+        onSettled: typeof opts.onSettled === "function" ? opts.onSettled : null,
         git: state.git?.enabled ? state.git : null,
         __emit: emit,
         done: (() => {
@@ -1962,7 +1971,12 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       };
       if (run.git?.enabled) run.git = { ...run.git };
       runs.set(id, run);
-      return restartExecute(run, "resumed from disk after restart — milestones kept, build session reopens from its file");
+      return restartExecute(
+        run,
+        opts.promote
+          ? "promoted from disk by the ticket queue — continuing into build/verify/security"
+          : "resumed from disk after restart — milestones kept, build session reopens from its file",
+      );
     },
   };
 

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert";
 import { createEngine } from "../host/engine.mjs";
+import { runDir } from "../host/state.mjs";
 
 const FIXTURE = fs.mkdtempSync("/tmp/nano-engine-");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -742,6 +743,66 @@ await test("v3: tree lock — tree-holding run blocks starts/promotes; released 
   assert.strictEqual(out.ok, true, out.error);
   while (!["completed", "failed", "cancelled"].includes(second.status) && Date.now() < deadline) await sleep(10);
   assert.strictEqual(second.status, "completed", second.error);
+});
+
+await test("v3: promote-from-disk — a clarified run continues across a restart and holds the tree", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_verify", verifyArtifact(true));
+        await callTool(tools, "submit_audit", auditArtifact(false));
+      },
+    ],
+  };
+  const clarifyRunNode = async (opts) => {
+    if (opts.nodeId === "clarify") {
+      const fin = (opts.customTools ?? []).find((t) => t.name === "finalize_spec");
+      await fin?.execute("x", { summary: "s3", decisions: [], acceptance_criteria: ["AC3"] });
+    }
+  };
+  const mkEngine = (emit) =>
+    createEngine({
+      modelRuntime: {}, emit, webTools: {},
+      adapters: { openStepSession: makeFakeOpen(scripts), runNode: clarifyRunNode, runMechanicalChecks: async () => [] },
+    });
+  const models = { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" };
+  const id = `pd-${Date.now()}`;
+  const engine1 = mkEngine({ state: () => {}, event: () => {} });
+  const st = await engine1.start({
+    id, task: "t", project: { name: "sandbox", path: FIXTURE }, models,
+    clarify: true, maxFixRounds: 2, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
+    stopAfterClarify: true,
+  });
+  const deadline = Date.now() + 15_000;
+  while (st.status !== "clarified" && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "clarified");
+  // persist exactly as the real server would (emit.state → saveState)
+  fs.writeFileSync(path.join(runDir(id), "state.json"), JSON.stringify(st));
+  // fresh server session: the run exists only on disk
+  const latest = { s: null };
+  const engine2 = mkEngine({ state: (run) => { latest.s = run.state; }, event: () => {} });
+  const settled = [];
+  const out = engine2.resumeFromDisk(id, { name: "sandbox", path: FIXTURE }, { promote: true, onSettled: (s) => settled.push(s) });
+  assert.ok(out.ok, out.error);
+  assert.strictEqual(engine2.treeLockHolder(FIXTURE), id, "resumed run holds the tree");
+  await assert.rejects(
+    () => engine2.start({ id: "pd-block", task: "x", project: { name: "sandbox", path: FIXTURE }, models, clarify: false, maxFixRounds: 0, git: false, audit: false, approvePlan: false, remoteChecks: false, security: "off" }),
+    /holds the working tree/,
+  );
+  while (latest.s?.status !== "completed" && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(latest.s.status, "completed", latest.s?.error);
+  assert.strictEqual(latest.s.options.stopAfterClarify, false, "promote-from-disk flips stopAfterClarify");
+  assert.deepStrictEqual(settled, ["completed"], "onSettled wired through the disk resume");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "build").length, 1, "one build session for the resumed run");
+  fs.rmSync(runDir(id), { recursive: true, force: true });
 });
 
 // --- summary ---------------------------------------------------------------------------

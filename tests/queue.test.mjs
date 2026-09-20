@@ -18,10 +18,12 @@ function fakeEngine() {
   const runs = new Map();
   const gateCancels = [];
   const promotes = [];
+  const disk = new Map(); // runId -> { status } — what a restart leaves behind
   return {
     runs,
     gateCancels,
     promotes,
+    disk,
     async start(opts) {
       const r = { id: opts.id, opts, status: "running", holdsTree: !opts.stopAfterClarify, settled: false };
       runs.set(opts.id, r);
@@ -34,7 +36,7 @@ function fakeEngine() {
     },
     promote(id, onSettled) {
       const r = runs.get(id);
-      if (!r) return { ok: false, error: "unknown run" };
+      if (!r) return { ok: false, error: "run not active in this server session" };
       if (r.status !== "clarified") return { ok: false, error: `status ${r.status}` };
       const holder = [...runs.values()].find((x) => x !== r && x.holdsTree && !x.settled);
       if (holder) return { ok: false, error: `the working tree is held by run ${holder.id}` };
@@ -43,6 +45,28 @@ function fakeEngine() {
       r.holdsTree = true;
       r.settled = false; // the run is ACTIVE again after promotion (real engine: new done box)
       if (typeof onSettled === "function") r.opts.onSettled = onSettled; // build-phase callback replaces the clarify one
+      return { ok: true };
+    },
+    resume(id) {
+      const r = runs.get(id);
+      if (!r) return { ok: false, error: "run not active in this server session" };
+      if (!["cancelled", "failed"].includes(r.status)) {
+        return { ok: false, error: `only cancelled or failed runs can be resumed (status ${r.status})` };
+      }
+      r.status = "running";
+      r.settled = false;
+      return { ok: true };
+    },
+    // mirrors the real engine's restart recovery (incl. promote-from-disk)
+    resumeFromDisk(id, project, opts = {}) {
+      if (runs.has(id)) return { ok: false, error: "run is still active in this server session" };
+      const d = disk.get(id);
+      if (!d) return { ok: false, error: "unknown run (no state on disk)" };
+      const allowed = ["cancelled", "failed", "interrupted", ...(opts.promote ? ["clarified"] : [])];
+      if (!allowed.includes(d.status)) return { ok: false, error: `run status is "${d.status}"` };
+      const holder = [...runs.values()].find((x) => x.holdsTree && !x.settled);
+      if (holder) return { ok: false, error: `the working tree is held by run ${holder.id}` };
+      runs.set(id, { id, status: "running", holdsTree: true, settled: false, opts: { onSettled: opts.onSettled ?? (() => {}) } });
       return { ok: true };
     },
     treeLockHolder() {
@@ -58,7 +82,6 @@ function fakeEngine() {
         queueMicrotask(() => r.opts.onSettled?.("cancelled"));
       }
     },
-    resumeFromDisk(id) { return runs.has(id) ? { ok: true } : { ok: false, error: "unknown" }; },
     async finishBuild(id, status) {
       const r = runs.get(id);
       r.settled = true;
@@ -226,6 +249,48 @@ await test("Q5: backlog flip on completion (file write, commit skipped without a
   const doc = fs.readFileSync(path.join(projDir, "docs", "features.md"), "utf8");
   assert.ok(doc.includes("🟢"), "status flipped to done");
   fs.rmSync(projDir, { recursive: true, force: true });
+});
+
+// --- Q6: promote from disk (restart between wave and release) -------------------
+
+await test("Q6: release after a restart promotes clarified runs from disk", async () => {
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, null);
+  // the wave ran BEFORE the restart — the runs exist only on disk
+  engine.disk.set("run-q6-F1", { status: "clarified" });
+  engine.disk.set("run-q6-F2", { status: "clarified" });
+  await seedProject("q6", [
+    { id: "F1", title: "one", description: "d", status: "clarified", runId: "run-q6-F1" },
+    { id: "F2", title: "two", description: "d", status: "clarified", runId: "run-q6-F2" },
+  ], "awaiting-release");
+  const rel = mgr.release("q6");
+  assert.strictEqual(rel.released, 2);
+  await sleep(20);
+  assert.ok(engine.runs.has("run-q6-F1"), "controller rebuilt from disk (promote fallback)");
+  assert.strictEqual((await store("q6")).tickets.find((t) => t.id === "F1").status, "running");
+  await engine.finishBuild("run-q6-F1", "completed");
+  await engine.finishBuild("run-q6-F2", "completed");
+  const st = await store("q6");
+  assert.ok(st.tickets.every((t) => t.status === "done"), "queue learned every settle from the disk-resumed runs");
+  assert.strictEqual(st.queue.state, "idle");
+});
+
+// --- Q7: retry re-enters the queue loop -------------------------------------------
+
+await test("Q7: retry resumes the parked run from disk and the queue learns the settle", async () => {
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, null);
+  await seedProject("q7", [
+    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "gates-exhausted", runId: "run-q7-F1" },
+  ], "idle");
+  engine.disk.set("run-q7-F1", { status: "failed" }); // parked before the restart
+  const out = mgr.retry("q7", "F1");
+  assert.strictEqual(out.ok, true, out.error);
+  assert.ok(engine.runs.has("run-q7-F1"), "run controller rebuilt with the queue's settle callback");
+  await sleep(10);
+  await engine.finishBuild("run-q7-F1", "completed");
+  const st = await store("q7");
+  assert.strictEqual(st.tickets[0].status, "done", "the retried run's settle reached the queue");
 });
 
 process.on("exit", () => { try { fs.rmSync(path.join(ROOT, "tickets"), { recursive: true, force: true }); } catch {} });
