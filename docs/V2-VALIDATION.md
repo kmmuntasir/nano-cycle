@@ -6,7 +6,13 @@ paths; these runs validate the **whole system with a real model** — skills
 loading, gate UX, session persistence across fix rounds, git, security.
 
 **Model for all runs (as used during development):** `zai-coding-cn/glm-5.3-flash`
-for every role. Expect ~3–8 min per run (build is the long step).
+for every role (set it once via the master picker). Expect ~3–8 min per run
+(build is the long step).
+
+**Every scenario's Options line states ALL seven start toggles** — Clarify ·
+Security · Git · Remote CI · Audit · Plan Approval · Fix Rounds — so a table
+row is a complete run configuration. Models are as above unless a row says
+otherwise.
 
 **Setup (once):**
 
@@ -39,7 +45,7 @@ security-override path instead of a fix round.
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: Off · Git off · Plan Approval on · Fix Rounds: 2 |
+| **Options** | Clarify off · Security: Off · Git off · Remote CI off · Audit on · Plan Approval on · Fix Rounds: 2 |
 | **Fixture** | clean sandbox |
 | **Actions** | Approve the plan gate |
 
@@ -62,7 +68,7 @@ verifier loading `verification` → `audit-deliverables`.
 
 | | |
 |---|---|
-| **Options** | Clarify **on** · Security: Off · Git off · Plan Approval on · Fix Rounds: 2 |
+| **Options** | Clarify **on** · Security: Off · Git off · Remote CI off · Audit on · Plan Approval on · Fix Rounds: 2 |
 | **Fixture** | clean sandbox |
 | **Actions** | Answer the PM's questions in the Q&A tab; Approve the plan gate |
 
@@ -81,7 +87,7 @@ local/remote/human); run completes; spec ACs appear verbatim in the plan.
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: Off · Git off · Plan Approval **on** · Fix Rounds: 2 |
+| **Options** | Clarify off · Security: Off · Git off · Remote CI off · Audit on · Plan Approval **on** · Fix Rounds: 2 |
 | **Fixture** | clean sandbox |
 | **Actions** | At the **Plan Ready** gate: type the reject comment below → **Reject ↓** → gate re-appears → **Approve & Continue** |
 
@@ -110,7 +116,7 @@ completes; the final impl-delta/tests cover null input.
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: Off · Git off · Plan Approval on · Fix Rounds: 2 |
+| **Options** | Clarify off · Security: Off · Git off · Remote CI off · Audit on · Plan Approval on · Fix Rounds: 2 |
 | **Fixture** | clean sandbox |
 | **Actions** | At the **Divergence** gate: **Approve & Continue** (or Cancel Run — run stops cleanly) |
 
@@ -132,7 +138,7 @@ spuriously, file it as a model-quality issue, not an engine bug.
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: Off · Git off · Plan Approval off · Fix Rounds: **2** |
+| **Options** | Clarify off · Security: Off · Git off · Remote CI off · Audit on · Plan Approval off · Fix Rounds: **2** |
 | **Fixture** | see below (undeclared import planted INSIDE sandbox) |
 | **Actions** | none — the loop is fully autonomous |
 
@@ -161,7 +167,7 @@ builder fixes it in the SAME session (`steps[build].sessionFile` unchanged,
 
 | | |
 |---|---|
-| **Options** | Clarify **on** · Security: Off · Git off · Plan Approval on · Fix Rounds: 2 |
+| **Options** | Clarify **on** · Security: Off · Git off · Remote CI off · Audit **on** · Plan Approval on · Fix Rounds: 2 |
 | **Fixture** | clean sandbox |
 | **Actions** | When the PM asks how invalid input should be handled, answer with the text below; Approve the plan gate |
 
@@ -191,7 +197,7 @@ harness-covered) — re-run once if you want to observe a real blocking finding.
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: **Scan** · Git off · Plan Approval off · Fix Rounds: 2 |
+| **Options** | Clarify off · Security: **Scan** · Git off · Remote CI off · Audit on · Plan Approval off · Fix Rounds: 2 |
 | **Fixture** | see below (planted secret INSIDE sandbox, at project root) |
 | **Actions** | none — the loop is fully autonomous |
 
@@ -220,7 +226,7 @@ non-gating findings).
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: **Scan** · Git off · Plan Approval off · Fix Rounds: 2 |
+| **Options** | Clarify off · Security: **Scan** · Git off · Remote CI off · Audit on · Plan Approval off · Fix Rounds: 2 |
 | **Fixture** | see below (production credential the run must not touch) |
 | **Actions** | At the **Security Override** gate: **Accept Risk & Continue** (once also try Cancel — run fails with the findings as reason) |
 
@@ -246,11 +252,17 @@ critical/high with `fixable_in_scope: false` (rotating a production credential
 is an owner action — exactly the honest call) → **Security Override** gate
 lists it → Accept Risk → completed with `state.securityAccepted` recorded.
 
+Note: `DB_PASSWORD=…` is usually a MANUAL finding (the skill's grep-for-real-
+credentials pass), not a gitleaks rule — that's fine, both sources gate the
+same. If the model misses it entirely, strengthen the fixture with an
+AWS-format key (V7's line) inside `vault/prod.env` and keep the "production,
+do not touch" framing.
+
 ## V9 — cancel mid-build → resume with session continuity
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: Off · Git off · Plan Approval off · Fix Rounds: 2 |
+| **Options** | Clarify off · Security: Off · Git off · Remote CI off · Audit on · Plan Approval off · Fix Rounds: 2 |
 | **Fixture** | clean sandbox |
 | **Actions** | While `build` is streaming in the Console: **Cancel Run** → later **Resume** |
 
@@ -272,7 +284,7 @@ scratch), and the run completes.
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: Off · Git off · Plan Approval **on** · Fix Rounds: 2 |
+| **Options** | Clarify off · Security: Off · Git off · Remote CI off · Audit on · Plan Approval **on** · Fix Rounds: 2 |
 | **Fixture** | clean sandbox |
 | **Actions** | At the **Plan Ready** gate: **Cancel Run** → **Resume** → **Approve & Continue** |
 
@@ -286,7 +298,7 @@ stay fixed.)
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: Off · Git **on** · Plan Approval on · Fix Rounds: 2 |
+| **Options** | Clarify off · Security: Off · Git **on** · Remote CI off (needs a real origin to enable) · Audit on · Plan Approval on · Fix Rounds: 2 |
 | **Fixture** | one-time: make the sandbox its own repo (see below) |
 | **Actions** | Approve the plan gate |
 
@@ -315,7 +327,7 @@ and resume never commits to main directly.
 
 | | |
 |---|---|
-| **Options** | Clarify off · Security: Off · Git **on** · Plan Approval off · Fix Rounds: **0** |
+| **Options** | Clarify off · Security: Off · Git **on** · Remote CI off · Audit on · Plan Approval off · Fix Rounds: **0** |
 | **Fixture** | V5's fixture + V11's git init (fresh commit the planted file first) |
 | **Actions** | none |
 
