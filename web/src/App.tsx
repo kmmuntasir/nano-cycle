@@ -138,6 +138,14 @@ export default function App() {
         const ev: RunEvent = { ts: (msg.ev as { ts?: number }).ts ?? Date.now(), nodeId: msg.nodeId, ev: msg.ev };
         setEvents((prev) => [...prev.slice(-3000), ev]);
       }
+      // v3: queue/tickets broadcasts drive the Tickets view immediately (the
+      // 4s poll there is only a fallback). Dispatched as a DOM event so the
+      // Tickets view can subscribe without threading the socket down.
+      try {
+        window.dispatchEvent(new CustomEvent("nano-ws", { detail: msg }));
+      } catch {
+        /* non-vital */
+      }
     });
     // track liveness via socket events
     const onOpen = () => setConnected(true);

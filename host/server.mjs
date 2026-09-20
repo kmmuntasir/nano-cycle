@@ -198,12 +198,13 @@ const server = http.createServer(async (req, res) => {
         let out;
         switch (body.action) {
           case "clarify":
-            out = await queueManager.startClarifyWave(projectName, body.ticketIds ?? []);
+            // Config FIRST — models/options passed with the wave apply to THIS wave.
             if (body.models || body.options) {
               setQueueConfig(projectName, { models: body.models, options: body.options });
             }
+            out = await queueManager.startClarifyWave(projectName, body.ticketIds ?? []);
             break;
-          case "release": out = queueManager.release(projectName); break;
+          case "release": out = queueManager.release(projectName, body.ticketIds); break;
           case "pause": out = queueManager.pause(projectName); break;
           case "resume": out = queueManager.resume(projectName); break;
           case "retry": out = queueManager.retry(projectName, body.ticketId); break;

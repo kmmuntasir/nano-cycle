@@ -153,9 +153,12 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
 
   // --- release + build pump ------------------------------------------------------
 
-  function release(project) {
+  function release(project, onlyIds) {
     const store = loadTickets(project);
-    const clarified = store.tickets.filter((t) => t.status === "clarified");
+    // The batch spec review selects WHICH clarified tickets release (§7);
+    // no selection (or an empty one) means all clarified tickets.
+    const pick = Array.isArray(onlyIds) && onlyIds.length > 0 ? (t) => onlyIds.includes(t.id) : () => true;
+    const clarified = store.tickets.filter((t) => t.status === "clarified" && pick(t));
     for (const t of clarified) setTicketStatus(project, t.id, "queued");
     setQueueState(project, { state: "running" });
     broadcastQueue(project);
@@ -390,9 +393,11 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
 
   function reorder(project, orderedIds) {
     const store = loadTickets(project);
+    // Assign display order to every listed id (the ready set pumps by it).
+    // The running ticket is never displaced — only queued tickets are pumpable.
     orderedIds.forEach((id, i) => {
       const t = store.tickets.find((x) => x.id === id);
-      if (t && t.status === "queued") t.order = i;
+      if (t) t.order = i;
     });
     saveTickets(project, store);
     broadcastQueue(project);

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Box, Flex, HStack, Input, Stack, Text, Textarea } from "@chakra-ui/react";
 import { DangerOutlineButton, OutlineButton, PrimaryButton, WarningButton } from "../ui/buttons";
 import ModelPicker from "../ui/ModelPicker";
+import { SelectEl, selectStyleMini } from "../ui/controls";
 import { api, ticketsApi } from "../api";
 import type { InboxItem, ModelInfo, RunState, Ticket, TicketStore } from "../api";
 
@@ -36,6 +37,9 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
   const [newDeps, setNewDeps] = useState("");
   const [showModels, setShowModels] = useState(false);
   const [waveModels, setWaveModels] = useState<Record<string, string>>({});
+  const [showConfig, setShowConfig] = useState(false);
+  const [cfgDraft, setCfgDraft] = useState<TicketStore["config"] | null>(null);
+  const [showReview, setShowReview] = useState(false);
 
   const refresh = useCallback(() => {
     ticketsApi.store(project).then(setStore).catch((e) => setErr(String(e)));
@@ -48,8 +52,21 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
     return () => clearInterval(t);
   }, [refresh]);
 
+  // The App's socket dispatches every broadcast here — queue/tickets messages
+  // refresh instantly instead of waiting for the 4s poll.
+  useEffect(() => {
+    const onWs = (e: Event) => {
+      const msg = (e as CustomEvent<{ type?: string; project?: string }>).detail;
+      if (msg?.type === "queue" || msg?.type === "tickets") {
+        if (!msg.project || msg.project === project) refresh();
+      }
+    };
+    window.addEventListener("nano-ws", onWs);
+    return () => window.removeEventListener("nano-ws", onWs);
+  }, [project, refresh]);
+
   const act = useCallback(
-    async (body: { action: string; ticketIds?: string[]; ticketId?: string; orderedIds?: string[] }) => {
+    async (body: { action: string; ticketIds?: string[]; ticketId?: string; orderedIds?: string[]; models?: Record<string, string>; options?: Record<string, unknown> }) => {
       setBusy(true);
       setErr(null);
       try {
@@ -100,6 +117,22 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
 
   const q = store.queue;
   const rows = [...store.tickets].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+  // Reorder among QUEUED tickets (§6): swap with the adjacent queued ticket and
+  // persist the full display order; the pump promotes by it.
+  const move = useCallback(
+    async (t: Ticket, dir: -1 | 1) => {
+      const ordered = [...rows];
+      const queuedPositions = ordered.map((x, k) => ({ x, k })).filter(({ x }) => x.status === "queued");
+      const pos = queuedPositions.findIndex(({ x }) => x.id === t.id);
+      const neighbor = queuedPositions[pos + dir];
+      if (pos < 0 || !neighbor) return;
+      const i = ordered.findIndex((x) => x.id === t.id);
+      [ordered[i], ordered[neighbor.k]] = [ordered[neighbor.k], ordered[i]];
+      await act({ action: "reorder", orderedIds: ordered.map((x) => x.id) });
+    },
+    [rows, act],
+  );
   const clarified = rows.filter((t) => t.status === "clarified");
   const blocked = rows.filter((t) => t.status === "blocked");
   const doneCount = rows.filter((t) => t.status === "done").length;
@@ -130,10 +163,10 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
         <HStack mt={3} flexWrap="wrap">
           <PrimaryButton
             disabled={busy || clarified.length === 0 || q.state === "running"}
-            onClick={() => act({ action: "release" })}
-            title="Queue every clarified ticket for sequential delivery (build → verify → security per ticket)."
+            onClick={() => setShowReview(true)}
+            title="Review every locked spec in a batch, then release the selected tickets for sequential delivery."
           >
-            ▶ Release {clarified.length > 0 ? `${clarified.length} Ticket(s)` : ""}
+            ⚖ Review &amp; Release{clarified.length > 0 ? ` ${clarified.length}` : ""}
           </PrimaryButton>
           {q.state !== "paused" ? (
             <OutlineButton disabled={busy || q.state !== "running"} onClick={() => act({ action: "pause" })}>
@@ -163,8 +196,93 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
             {showModels ? "Start Wave →" : "◎ Clarify Wave"}
           </OutlineButton>
           <Box flex="1" />
+          <OutlineButton
+            disabled={busy}
+            onClick={() => {
+              if (!showConfig) setCfgDraft(JSON.parse(JSON.stringify(store.config)) as TicketStore["config"]);
+              setShowConfig(!showConfig);
+            }}
+            title="Queue-mode run defaults — models, fix rounds, security, git. Every wave/promotion runs with these."
+          >
+            ⚙ Config
+          </OutlineButton>
           <OutlineButton disabled={busy} onClick={refresh}>⟳ Refresh</OutlineButton>
         </HStack>
+
+        {showConfig && cfgDraft && (
+          <Box mt={3} border="1px solid" borderColor="line" borderRadius="md" p={3}>
+            <Text fontSize="10px" color="muted" mb={2} fontFamily="system-ui, sans-serif">
+              Queue config — run defaults for every wave and promotion (the queue always runs with plan approval OFF; the spec is the owner gate)
+            </Text>
+            <Flex gap={2} flexWrap="wrap" mb={2}>
+              {["clarify", "builder", "verifier", "security"].map((role) => (
+                <Box key={role}>
+                  <Text fontSize="10px" color="muted" mb={1} fontFamily="system-ui, sans-serif">{role}</Text>
+                  <ModelPicker
+                    value={cfgDraft.models[role] ?? "auto"}
+                    models={models}
+                    onChange={(v) => setCfgDraft({ ...cfgDraft, models: { ...cfgDraft.models, [role]: v } })}
+                    compact
+                    ariaLabel={`${role} model`}
+                  />
+                </Box>
+              ))}
+            </Flex>
+            <Flex gap={3} flexWrap="wrap" alignItems="flex-end">
+              <Box>
+                <Text fontSize="10px" color="muted" mb={1} fontFamily="system-ui, sans-serif">Fix rounds (0–5)</Text>
+                <Input
+                  type="number" min={0} max={5} width="90px" value={String(cfgDraft.options.maxFixRounds)}
+                  onChange={(e) => {
+                    const n = Math.max(0, Math.min(5, Number((e.target as HTMLInputElement).value) || 0));
+                    setCfgDraft({ ...cfgDraft, options: { ...cfgDraft.options, maxFixRounds: n } });
+                  }}
+                  bg="surface2" borderColor="line" color="ink" fontSize="12px"
+                />
+              </Box>
+              <Box>
+                <Text fontSize="10px" color="muted" mb={1} fontFamily="system-ui, sans-serif">Security</Text>
+                <SelectEl
+                  css={{ ...selectStyleMini, width: "130px" }}
+                  value={cfgDraft.options.security}
+                  onChange={(e) => setCfgDraft({ ...cfgDraft, options: { ...cfgDraft.options, security: (e.target as HTMLSelectElement).value as TicketStore["config"]["options"]["security"] } })}
+                >
+                  <option value="off">off</option>
+                  <option value="scan">scan</option>
+                  <option value="scan+vapt">scan+vapt</option>
+                </SelectEl>
+              </Box>
+              {([
+                ["git", "Git (branch + verdict-gated merge)"],
+                ["audit", "Audit phase"],
+                ["remoteChecks", "Remote CI"],
+              ] as const).map(([key, label]) => (
+                <Box
+                  key={key}
+                  as="button"
+                  px={2} py={1.5} fontSize="11px" borderRadius="sm"
+                  border="1px solid"
+                  borderColor={cfgDraft.options[key] ? "#2b3a5c" : "line"}
+                  bg={cfgDraft.options[key] ? "#1b2130" : "transparent"}
+                  color={cfgDraft.options[key] ? "#7aa2f7" : "muted"}
+                  onClick={() => setCfgDraft({ ...cfgDraft, options: { ...cfgDraft.options, [key]: !cfgDraft.options[key] } })}
+                  fontFamily="system-ui, sans-serif"
+                >
+                  {cfgDraft.options[key] ? "☑" : "☐"} {label}
+                </Box>
+              ))}
+              <PrimaryButton
+                size="xs"
+                onClick={async () => {
+                  await act({ action: "config", models: cfgDraft.models, options: cfgDraft.options as unknown as Record<string, unknown> });
+                  setShowConfig(false);
+                }}
+              >
+                Save Config
+              </PrimaryButton>
+            </Flex>
+          </Box>
+        )}
 
         {showModels && (
           <Box mt={3} border="1px solid" borderColor="line" borderRadius="md" p={3}>
@@ -195,26 +313,45 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
         )}
       </Box>
 
+      {/* release gate — the ONE deliberate human moment: batch spec review */}
+      {showReview && clarified.length > 0 && (
+        <ReleaseReview
+          tickets={clarified}
+          busy={busy}
+          onClose={() => setShowReview(false)}
+          onRelease={async (ids) => {
+            await act({ action: "release", ticketIds: ids });
+            setShowReview(false);
+          }}
+        />
+      )}
+
       {/* PM inbox */}
-      {inbox.length > 0 && (
-        <Box border="1px solid" borderColor="#f0b429" borderRadius="lg" bg="surface" p={4}>
+      {(inbox.length > 0 || q.state === "clarifying") && (
+        <Box border="1px solid" borderColor={inbox.length > 0 ? "#f0b429" : "line"} borderRadius="lg" bg="surface" p={4}>
           <HStack mb={3}>
-            <Text fontSize="14px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
-              📥 PM Inbox — {inbox.length} ticket(s) awaiting your answers
+            <Text fontSize="14px" fontWeight={700} color={inbox.length > 0 ? "#f0b429" : "muted"} fontFamily="system-ui, sans-serif">
+              {inbox.length > 0 ? `📥 PM Inbox — ${inbox.length} ticket(s) awaiting your answers` : "📥 PM Inbox"}
             </Text>
           </HStack>
-          <Stack gap={3}>
-            {inbox.map((item) => (
-              <InboxTicket
-                key={item.runId}
-                item={item}
-                onAnswer={async (answers) => {
-                  await api.answers(item.runId, answers);
-                  refresh();
-                }}
-              />
-            ))}
-          </Stack>
+          {inbox.length === 0 ? (
+            <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
+              no questions pending — the PMs are still investigating
+            </Text>
+          ) : (
+            <Stack gap={3}>
+              {inbox.map((item) => (
+                <InboxTicket
+                  key={item.runId}
+                  item={item}
+                  onAnswer={async (answers) => {
+                    await api.answers(item.runId, answers);
+                    refresh();
+                  }}
+                />
+              ))}
+            </Stack>
+          )}
         </Box>
       )}
 
@@ -324,17 +461,29 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
           </Text>
         ) : (
           <Stack gap={1.5}>
-            {rows.map((t) => (
+            {rows.map((t) => {
+              const queuedIds = rows.filter((x) => x.status === "queued").map((x) => x.id);
+              return (
               <TicketRow
                 key={t.id}
                 t={t}
+                isFirstQueued={queuedIds[0] === t.id}
+                isLastQueued={queuedIds[queuedIds.length - 1] === t.id}
                 onOpenRun={onOpenRun}
                 onDelete={async () => { await ticketsApi.remove(project, t.id); refresh(); }}
                 onRetry={async () => { await act({ action: "retry", ticketId: t.id }); refresh(); }}
                 onReclarify={async () => { await act({ action: "reclarify", ticketId: t.id }); refresh(); }}
                 onRunNow={runNow}
+                onMove={move}
+                onEdit={async (patch) => {
+                  try {
+                    await ticketsApi.update(project, t.id, patch);
+                    refresh();
+                  } catch (e) { setErr(String(e)); }
+                }}
               />
-            ))}
+              );
+            })}
           </Stack>
         )}
       </Box>
@@ -343,7 +492,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
 }
 
 function TicketRow({
-  t, onOpenRun, onDelete, onRetry, onReclarify, onRunNow,
+  t, onOpenRun, onDelete, onRetry, onReclarify, onRunNow, onMove, onEdit, isFirstQueued, isLastQueued,
 }: {
   t: Ticket;
   onOpenRun: (runId: string) => void;
@@ -351,8 +500,18 @@ function TicketRow({
   onRetry: () => void;
   onReclarify: () => void;
   onRunNow: (t: Ticket) => void;
+  onMove: (t: Ticket, dir: -1 | 1) => void;
+  onEdit: (patch: Partial<Ticket>) => void;
+  isFirstQueued: boolean;
+  isLastQueued: boolean;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(t.title);
+  const [description, setDescription] = useState(t.description);
+  const [dependsOn, setDependsOn] = useState(t.dependsOn.join(", "));
+  const [order, setOrder] = useState(String(t.order ?? 0));
   const meta = STATUS_ICON[t.status] ?? STATUS_ICON.draft;
+  const editable = !["running", "clarifying"].includes(t.status);
   return (
     <Flex alignItems="flex-start" gap={2} py={2} px={2} borderRadius="md" border="1px solid" borderColor={t.status === "blocked" ? "#5c2a2a" : "line"} bg={t.status === "running" ? "#141b2e" : "transparent"} flexWrap="wrap">
       <Text fontSize="13px" color={meta.color} fontFamily="ui-monospace, monospace" title={t.status} mt="2px">
@@ -381,6 +540,47 @@ function TicketRow({
           {t.status}
           {t.runId ? " · run " + t.runId : ""}
         </Text>
+        {editing && (
+          <Stack gap={2} mt={2}>
+            <Input
+              placeholder="Title" value={title}
+              onChange={(e) => setTitle((e.target as HTMLInputElement).value)}
+              bg="surface2" borderColor="line" color="ink" fontSize="12px"
+            />
+            <Textarea
+              placeholder="Description" value={description} rows={3}
+              onChange={(e) => setDescription((e.target as HTMLTextAreaElement).value)}
+              bg="surface2" borderColor="line" color="ink" fontSize="12px"
+            />
+            <Flex gap={2} flexWrap="wrap" alignItems="center">
+              <Input
+                placeholder="Depends on (comma-separated ids)" value={dependsOn} flex="1" minW="200px"
+                onChange={(e) => setDependsOn((e.target as HTMLInputElement).value)}
+                bg="surface2" borderColor="line" color="ink" fontSize="12px"
+              />
+              <Input
+                placeholder="Order" value={order} width="80px"
+                onChange={(e) => setOrder((e.target as HTMLInputElement).value)}
+                bg="surface2" borderColor="line" color="ink" fontSize="12px"
+              />
+              <PrimaryButton
+                size="xs"
+                onClick={() => {
+                  onEdit({
+                    title,
+                    description,
+                    dependsOn: dependsOn.split(",").map((s) => s.trim()).filter(Boolean),
+                    order: Number(order) || 0,
+                  });
+                  setEditing(false);
+                }}
+              >
+                Save
+              </PrimaryButton>
+              <OutlineButton size="xs" onClick={() => setEditing(false)}>Cancel</OutlineButton>
+            </Flex>
+          </Stack>
+        )}
       </Box>
       <HStack gap={1.5} flexWrap="wrap" alignItems="center">
         {t.runId && (
@@ -398,10 +598,19 @@ function TicketRow({
             </OutlineButton>
           </>
         )}
+        {t.status === "queued" && (
+          <>
+            <OutlineButton size="xs" disabled={isFirstQueued} onClick={() => onMove(t, -1)} title="Move earlier in the build order (queued tickets only).">↑</OutlineButton>
+            <OutlineButton size="xs" disabled={isLastQueued} onClick={() => onMove(t, 1)} title="Move later in the build order (queued tickets only).">↓</OutlineButton>
+          </>
+        )}
         {["draft", "blocked"].includes(t.status) && (
           <OutlineButton size="xs" onClick={() => onRunNow(t)} title="Start a plain run for this ticket now — bypasses the queue, respects the tree lock.">
             ▶ Run
           </OutlineButton>
+        )}
+        {editable && (
+          <OutlineButton size="xs" onClick={() => setEditing(!editing)} title="Edit title, description, dependencies, order.">✎</OutlineButton>
         )}
         {["draft", "blocked"].includes(t.status) && (
           <DangerOutlineButton size="xs" onClick={onDelete}>✕</DangerOutlineButton>
@@ -475,6 +684,117 @@ function InboxTicket({ item, onAnswer }: { item: InboxItem; onAnswer: (answers: 
           }
         >
           Submit Answers
+        </PrimaryButton>
+      </HStack>
+    </Box>
+  );
+}
+
+interface SpecDigest {
+  summary?: string;
+  decisions?: { topic: string; decision: string }[];
+  acceptance_criteria?: string[];
+}
+
+/** The release gate (§7): every clarified ticket's spec in one batch — review,
+ *  uncheck anything not ready, release the selected tickets into the queue. */
+function ReleaseReview({ tickets, busy, onClose, onRelease }: {
+  tickets: Ticket[];
+  busy: boolean;
+  onClose: () => void;
+  onRelease: (ids: string[]) => void;
+}) {
+  const [checked, setChecked] = useState<Record<string, boolean>>(() => Object.fromEntries(tickets.map((t) => [t.id, true])));
+  const [specs, setSpecs] = useState<Record<string, SpecDigest | null>>({});
+  const idsKey = tickets.map((t) => t.id).join(",");
+  useEffect(() => {
+    let live = true;
+    for (const t of tickets) {
+      if (!t.runId) continue;
+      api.getRun(t.runId)
+        .then((r) => {
+          if (!live) return;
+          const spec = (r.state.artifacts as Record<string, unknown>).spec as SpecDigest | undefined;
+          setSpecs((s) => ({ ...s, [t.id]: spec ?? null }));
+        })
+        .catch(() => {
+          if (live) setSpecs((s) => ({ ...s, [t.id]: null }));
+        });
+    }
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idsKey]);
+  const selected = tickets.filter((t) => checked[t.id] !== false);
+  return (
+    <Box border="1px solid" borderColor="#7aa2f7" borderRadius="lg" bg="surface" p={4}>
+      <HStack mb={3} flexWrap="wrap">
+        <Text fontSize="14px" fontWeight={700} color="#7aa2f7" fontFamily="system-ui, sans-serif">
+          ⚖ Release Gate — review {tickets.length} locked spec(s)
+        </Text>
+        <Box flex="1" />
+        <OutlineButton size="xs" onClick={onClose}>✕ Close</OutlineButton>
+      </HStack>
+      <Stack gap={2}>
+        {tickets.map((t) => {
+          const spec = t.runId ? specs[t.id] : null;
+          const on = checked[t.id] !== false;
+          return (
+            <Box key={t.id} border="1px solid" borderColor={on ? "line" : "#5c2a2a"} borderRadius="md" p={3}>
+              <Flex gap={2} alignItems="flex-start">
+                <Box
+                  as="button"
+                  mt="2px"
+                  onClick={() => setChecked({ ...checked, [t.id]: !on })}
+                  fontSize="14px"
+                  color={on ? "#7aa2f7" : "muted"}
+                  title={on ? "Release this ticket" : "Hold this ticket back"}
+                >
+                  {on ? "☑" : "☐"}
+                </Box>
+                <Box flex="1">
+                  <HStack gap={2} flexWrap="wrap">
+                    <Text fontSize="12px" fontWeight={700} color="#7aa2f7" fontFamily="ui-monospace, monospace">{t.id}</Text>
+                    <Text fontSize="12.5px" color="#e4e4e7" fontFamily="system-ui, sans-serif">{t.title}</Text>
+                  </HStack>
+                  {spec === undefined ? (
+                    <Text fontSize="10.5px" color="muted" fontFamily="system-ui, sans-serif" mt={1}>loading spec…</Text>
+                  ) : spec === null ? (
+                    <Text fontSize="10.5px" color="muted" fontFamily="system-ui, sans-serif" mt={1}>
+                      no spec on the run (clarify-off ticket) — review the ticket text itself
+                    </Text>
+                  ) : (
+                    <Box mt={1}>
+                      <Text fontSize="11.5px" color="#c9cdd8" fontFamily="system-ui, sans-serif">{spec.summary}</Text>
+                      {(spec.decisions ?? []).length > 0 && (
+                        <Text fontSize="10.5px" color="muted" fontFamily="system-ui, sans-serif" mt={1}>
+                          {(spec.decisions ?? []).map((d) => `${d.topic}: ${d.decision}`).join(" · ")}
+                        </Text>
+                      )}
+                      {(spec.acceptance_criteria ?? []).length > 0 && (
+                        <Stack gap={0.5} mt={1}>
+                          <Text fontSize="10px" color="muted" fontWeight={700} fontFamily="system-ui, sans-serif">acceptance criteria</Text>
+                          {(spec.acceptance_criteria ?? []).map((c, i) => (
+                            <Text key={i} fontSize="10.5px" color="#c9cdd8" fontFamily="system-ui, sans-serif">- {c}</Text>
+                          ))}
+                        </Stack>
+                      )}
+                    </Box>
+                  )}
+                </Box>
+              </Flex>
+            </Box>
+          );
+        })}
+      </Stack>
+      <HStack mt={3}>
+        <PrimaryButton
+          disabled={busy || selected.length === 0}
+          onClick={() => onRelease(selected.map((t) => t.id))}
+          title="Queue the selected tickets for sequential delivery (build → verify → security per ticket)."
+        >
+          ▶ Release {selected.length} Ticket(s) →
         </PrimaryButton>
       </HStack>
     </Box>
