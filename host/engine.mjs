@@ -258,6 +258,14 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     }
     run.done.box.promiseSettled = true;
     emit.state(run);
+    // Out-of-band cancel never flows back through execute()'s settle() (its
+    // catch returns early once finalized) — fire the observer HERE or queue
+    // tickets strand at 'running' when the owner hard-cancels their run.
+    try {
+      run.onSettled?.("cancelled");
+    } catch {
+      /* observer errors never break the run */
+    }
     return true;
   }
 

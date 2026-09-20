@@ -805,6 +805,40 @@ await test("v3: promote-from-disk — a clarified run continues across a restart
   fs.rmSync(runDir(id), { recursive: true, force: true });
 });
 
+await test("v3: hard cancel (out-of-band, owner) fires onSettled — queue tickets don't strand", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  let release = () => {};
+  const hang = new Promise((r) => (release = r));
+  const scripts = {
+    build: [
+      async () => {
+        await hang; // the build turn is mid-flight when the owner cancels
+        throw new Error("build must not complete after a cancel");
+      },
+    ],
+  };
+  const engine = createEngine({
+    modelRuntime: {}, emit: { state: () => {}, event: () => {} }, webTools: {},
+    adapters: { openStepSession: makeFakeOpen(scripts), runNode: async () => {}, runMechanicalChecks: async () => [] },
+  });
+  const settled = [];
+  const st = await engine.start({
+    id: `hc-${Date.now()}`, task: "t", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: false, maxFixRounds: 0, git: false, audit: false, approvePlan: false, remoteChecks: false, security: "off",
+    onSettled: (s) => settled.push(s),
+  });
+  await sleep(100);
+  assert.strictEqual(engine.cancel(st.id), true);
+  const deadline = Date.now() + 5_000;
+  while (st.status !== "cancelled" && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "cancelled");
+  assert.deepStrictEqual(settled, ["cancelled"], "out-of-band cancel fires onSettled exactly once");
+  release(); // unhang the fake prompt; execute()'s catch must not fire a second settle
+  await sleep(50);
+  assert.deepStrictEqual(settled, ["cancelled"], "no duplicate settle after the cancelled turn unwinds");
+});
+
 // --- summary ---------------------------------------------------------------------------
 
 const failed = results.filter(([, ok]) => !ok);
