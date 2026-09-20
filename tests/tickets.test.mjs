@@ -10,6 +10,7 @@ const test = (name, fn) => {
 };
 
 const PROJ = "tick-fixture";
+process.on("exit", () => { try { fs.rmSync("tickets", { recursive: true, force: true }); } catch {} });
 fs.rmSync("tickets", { recursive: true, force: true });
 
 test("create: auto id, defaults, persistence round-trip", () => {
