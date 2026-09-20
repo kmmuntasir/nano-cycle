@@ -294,7 +294,14 @@ scratch), and the run completes.
 | **Fixture** | clean sandbox |
 | **Actions** | At the **Plan Ready** gate: **Cancel Run** → **Resume** → **Approve & Continue** |
 
-**Task:** reuse the V3 task (shout).
+**Task:**
+
+```text
+Add lib/text.js exporting shout(s) that returns the input trimmed and
+uppercased, plus test/text.test.js with node:test cases for basic input,
+already-uppercase input, and surrounding-whitespace input. Run
+node --test test/text.test.js and make sure the tests pass.
+```
 
 **Pass:** resume re-presents the SAME plan approval gate BEFORE any further
 model work; approving continues to completion. (This was a v1 bug — it must
@@ -345,7 +352,14 @@ printf 'const lp = require("left-pad");\nmodule.exports = (s) => lp(s, 10, " ");
 cd sandbox && git add -A && git commit -q -m "plant legacy" && cd ..
 ```
 
-**Task:** reuse the V5 task (rollDie).
+**Task:**
+
+```text
+Add lib/rng.js exporting rollDie(sides) that returns a random integer between
+1 and sides inclusive (using Math.random only), plus test/rng.test.js asserting
+that 1000 rolls of a 6-sided die all land in 1..6. Do not touch the legacy/
+directory. Run node --test test/rng.test.js and make sure the tests pass.
+```
 
 **Pass:** status `failed`; `state.error` starts with
 `gates still failing after 0 fix round(s):` and names the mechanical failure;
