@@ -36,6 +36,7 @@ rm -rf sandbox && mkdir sandbox && printf '{ "name": "nano-cycle-sandbox", "priv
 - ⚠️→✅ **V2 owner run `20260920-201117278`** failed at the plan gate: approving after >5 min at the gate tripped the stall watchdog (it treated the in-tool gate wait as a provider stall). **Fixed** — stall detection now pauses while any tool execution is in flight (gates, coder subagents, analysts); regression-tested in `tests/watchdog.test.mjs`.
 - ✅ **V2** owner re-run after the fix (run `20260920-204148298`) — completed; 4 real PM questions; spec locked (7 ACs, 7 decisions, all env-tagged); 0 spec ACs missing from the plan; verify 7/7; audit clean; all 5 skills in phase order.
 - ✅ **V3** plan reject-with-comments (run `20260920-210752155`) — owner rejection fed back into the SAME build session; plan resubmitted with the null-handling criterion; final code + tests cover `shout(null)`; verify 6/6, audit clean.
+- ✅ **V4** divergence (run `20260920-211555646`) — outcome worth reading: the builder did NOT declare divergence; it resolved the contradiction (from-scratch, API-compatible left-pad semantics — dependency-free), the plan made both sides explicit criteria, and verify probed BOTH (semantics match + no deps + no vendored code) → 7/7. A model of this class prefers resolving over escalating — the divergence GATE path remains harness-covered; to force it live you'd need a genuinely impossible constraint.
 - ✅ Security override gate (part of run `20260920-161038752`) — out-of-scope secret classified honestly `fixable_in_scope:false`, routed to the owner.
 
 **Validated — owner manual runs:**
@@ -119,7 +120,7 @@ check `steps[build].sessionFile` unchanged in state.json) and a resubmitted
 plan that includes the null-handling criterion; after approval the run
 completes; the final impl-delta/tests cover null input.
 
-## V4 — divergence gate (optional live; harness-covered)
+## V4 — divergence gate (owner run `20260920-211555646`: the model RESOLVED the contradiction instead of diverging — gate path stays harness-covered)
 
 | | |
 |---|---|
