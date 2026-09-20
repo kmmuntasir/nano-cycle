@@ -2,7 +2,7 @@
   "name": "nano-cycle",
   "private": true,
   "version": "0.1.0",
-  "description": "Four-step agentic workflow — clarify → build → verify → security — on the Pi SDK, with driver-owned gates and milestone artifacts",
+  "description": "Four-step agentic workflow \u2014 clarify \u2192 build \u2192 verify \u2192 security \u2014 on the Pi SDK, with driver-owned gates and milestone artifacts",
   "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
@@ -12,7 +12,7 @@
     "build": "vite build",
     "dev:web": "vite",
     "start": "node host/server.mjs",
-    "test": "node tests/engine-harness.mjs && node tests/watchdog.test.mjs"
+    "test": "node tests/engine-harness.mjs && node tests/watchdog.test.mjs && node tests/tickets.test.mjs && node tests/backlog.test.mjs && node tests/queue.test.mjs"
   },
   "dependencies": {
     "@chakra-ui/react": "^3.37.0",

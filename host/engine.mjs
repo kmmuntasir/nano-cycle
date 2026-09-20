@@ -1865,7 +1865,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
 
     // v3: continue a "clarified" run (queue mode) into build/verify/security.
     // Rejects while another run holds the project's working tree.
-    promote(id) {
+    promote(id, onSettled) {
       const run = runs.get(id);
       if (!run) return { ok: false, error: "run not active in this server session" };
       if (run.state.status !== "clarified") {
@@ -1882,6 +1882,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
       run.holdsTree = true;
       run.options.stopAfterClarify = false; // persists via state.options (same object)
+      if (typeof onSettled === "function") run.onSettled = onSettled; // build-phase callback replaces the clarify one
       return restartExecute(run, "promoted by the ticket queue — continuing into build/verify/security");
     },
 

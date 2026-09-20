@@ -11,6 +11,8 @@ import { MODEL_ROLES_V2 } from "./config.mjs";
 import { addProject, loadProjects, removeProject, resolveProject, SANDBOX_DIR } from "./projects.mjs";
 import { loadTickets, saveTickets, createTicket, updateTicket, deleteTicket, setQueueConfig } from "./tickets.mjs";
 import { importFromFile, parseFeaturesMarkdown } from "./backlog.mjs";
+import { createQueueManager } from "./queue.mjs";
+import * as git from "./git.mjs";
 import { detectWebCapabilities, makeWebReaderTool, makeWebSearchTool } from "./webtools.mjs";
 import { newRunId, runsDir, saveState, appendEvent, listRuns, loadRun } from "./state.mjs";
 
@@ -59,6 +61,10 @@ const webTools = {
 
 fs.mkdirSync(SANDBOX_DIR, { recursive: true });
 fs.mkdirSync(runsDir(), { recursive: true });
+
+// v3: reconcile ticket queues with interrupted runs after a restart.
+// (Runs before the sweep below, so "running" states are already marked.)
+queueManager.recoverAll();
 
 // Orphan sweep: runs that a restart killed mid-flight must never linger as
 // "running" — mark them so the GUI and the registry tell the truth.
@@ -110,6 +116,7 @@ function broadcast(msg) {
 }
 
 const pipeline = createEngine({ modelRuntime, emit, webTools });
+const queueManager = createQueueManager({ engine: pipeline, emit, resolveProject, git, broadcast: (msg) => broadcast(msg) });
 
 // --- http ---------------------------------------------------------------------
 
@@ -180,6 +187,56 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/runs" && req.method === "GET") {
       return json(res, 200, listRuns());
+    }
+
+    // --- v3 queue ---
+    const queueMatch = url.pathname.match(/^\/api\/queue\/([^/]+)$/);
+    if (queueMatch) {
+      const projectName = decodeURIComponent(queueMatch[1]);
+      if (req.method === "GET") return json(res, 200, loadTickets(projectName));
+      if (req.method === "POST") {
+        const body = await readBody(req);
+        let out;
+        switch (body.action) {
+          case "clarify":
+            out = await queueManager.startClarifyWave(projectName, body.ticketIds ?? []);
+            if (body.models || body.options) {
+              setQueueConfig(projectName, { models: body.models, options: body.options });
+            }
+            break;
+          case "release": out = queueManager.release(projectName); break;
+          case "pause": out = queueManager.pause(projectName); break;
+          case "resume": out = queueManager.resume(projectName); break;
+          case "retry": out = queueManager.retry(projectName, body.ticketId); break;
+          case "reclarify": out = queueManager.reclarify(projectName, body.ticketId); break;
+          case "reorder": out = queueManager.reorder(projectName, body.orderedIds ?? []); break;
+          case "config": out = { ok: true, config: setQueueConfig(projectName, body) }; break;
+          default: return json(res, 400, { error: `unknown queue action "${body.action}"` });
+        }
+        return json(res, out.ok === false ? 409 : 200, out);
+      }
+    }
+
+    // PM Inbox: every live answers gate across the project's clarify runs.
+    const inboxMatch = url.pathname.match(/^\/api\/inbox\/([^/]+)$/);
+    if (inboxMatch && req.method === "GET") {
+      const projectName = decodeURIComponent(inboxMatch[1]);
+      const items = [];
+      for (const entry of fs.readdirSync(runsDir(), { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        try {
+          const st = JSON.parse(fs.readFileSync(path.join(runsDir(), entry.name, "state.json"), "utf8"));
+          if (st.project !== projectName || st.status !== "awaiting-answers" || st.gate?.type !== "answers") continue;
+          items.push({
+            runId: st.id,
+            ticketId: st.ticketId ?? null,
+            round: st.gate.round ?? 1,
+            questions: st.gate.questions ?? [],
+          });
+        } catch { /* skip */ }
+      }
+      items.sort((a, b) => String(a.runId).localeCompare(String(b.runId)));
+      return json(res, 200, { project: projectName, items });
     }
 
     // --- v3 ticket store ---

@@ -88,3 +88,10 @@ export async function ffMerge(cwd, branch) {
 export async function deleteBranch(cwd, branch) {
   await git(cwd, ["branch", "-d", branch]);
 }
+
+/** Stage one file and commit it with the given subject. Returns the hash. */
+export async function commitFile(projectPath, relPath, subject) {
+  await stagePath(projectPath, relPath);
+  if (!(await hasStaged(projectPath))) return null;
+  return commit(projectPath, subject);
+}
