@@ -458,17 +458,23 @@ await test("divergence gate: owner approves despite divergence", async () => {
 
 await test("cancel at plan gate → run cancelled; resume re-presents gate and completes", async () => {
   stepStores.clear(); openCalls.length = 0;
+  const buildPrompts = [];
+  let submitPlanCalls = 0;
   const scripts = {
     build: [
       async ({ tools }) => {
         const t = await callTool(tools, "submit_plan", PLAN);
+        submitPlanCalls += 1;
         if (/cancelled/i.test(t)) return;
         await callTool(tools, "submit_tasks", TASKS);
         await callTool(tools, "submit_impl_delta", IMPL_DELTA);
       },
-      // turn 1 = the resumed run's re-driven initial turn (context intact, plan re-submitted)
-      async ({ tools }) => {
-        await callTool(tools, "submit_plan", PLAN);
+      // turn 1 = the resumed synthetic turn: plan is already approved and
+      // stored — the builder must go STRAIGHT to tasks, never re-plan.
+      async ({ tools, text }) => {
+        buildPrompts.push(text);
+        assert.match(text, /APPROVED your submitted plan/, "synthetic approval turn");
+        assert.match(text, /Do NOT investigate again and do NOT re-plan/, "re-plan forbidden");
         await callTool(tools, "submit_tasks", TASKS);
         await callTool(tools, "submit_impl_delta", IMPL_DELTA);
       },
@@ -491,6 +497,7 @@ await test("cancel at plan gate → run cancelled; resume re-presents gate and c
     await sleep(10);
   }
   assert.strictEqual(state.status, "completed", `after resume: ${state.status} ${state.error ?? ""}`);
+  assert.strictEqual(submitPlanCalls, 1, `plan submitted exactly ONCE (stored, not re-planned) — got ${submitPlanCalls}`);
   const buildOpens = openCalls.filter((c) => c.stepId === "build");
   assert.strictEqual(buildOpens.length, 2, "build session reopened on resume");
   assert.strictEqual(buildOpens[1].resumed, true, "reopened FROM the persisted session file");

@@ -10,6 +10,7 @@ import Header from "./components/Header";
 import NewRunModal from "./components/NewRunModal";
 import ConfirmDialog from "./components/ConfirmDialog";
 import StartForm from "./components/StartForm";
+import ReviewPanel from "./components/ReviewPanel";
 import Workbench from "./components/Workbench";
 import { SelectEl, selectStyleMini } from "./ui/controls";
 import { api, openWs } from "./api";
@@ -245,7 +246,6 @@ export default function App() {
   const work = Math.max(0, wall - gateMs);
   const liveCount = runs.filter((r) => ["running", "awaiting-gate", "awaiting-answers"].includes(r.status)).length;
   const runStart = state ? Date.parse(state.createdAt) || Date.now() : Date.now();
-  const hasQA = !!state?.gate || clarify;
 
   const startFormEl = (
     <StartForm
@@ -283,7 +283,7 @@ export default function App() {
     { id: "pipeline", label: "Pipeline", hint: "1" },
     { id: "console", label: `Console · ${events.length}`, hint: "2" },
     { id: "artifacts", label: `Artifacts · ${Object.keys(state?.artifacts ?? {}).length}`, hint: "3" },
-    { id: "qa", label: "Q&A", hint: "4" },
+    { id: "qa", label: "Review", hint: "4" },
   ];
 
   return (
@@ -400,7 +400,6 @@ export default function App() {
               {/* tabs */}
               <Flex gap={1} borderBottom="1px solid" borderColor="line" pb={0}>
                 {tabs
-                  .filter((t) => t.id !== "qa" || hasQA || state.gate)
                   .map((t) => {
                     const active = tab === t.id;
                     const gated = t.id === "qa" && state.gate?.type === "answers";
@@ -455,7 +454,7 @@ export default function App() {
               )}
               {tab === "artifacts" && <Workbench state={state} />}
               {tab === "qa" && (
-                <GatePanel
+                <ReviewPanel
                   state={state}
                   answerDrafts={answerDrafts}
                   setAnswerDrafts={setAnswerDrafts}

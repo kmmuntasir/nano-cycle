@@ -90,6 +90,7 @@ export interface RunState {
   tickets?: { id: string; title: string; implIds: string[]; verifyId: string }[];
   deferredChecks?: { criterion: string; env: string; evidence?: string }[];
   qa?: QaRound[];
+  pendingQuestions?: { round: number; questions: ClarifyQuestion[] } | null;
   artifacts: Record<string, unknown>;
   remoteChecks?: {
     round: number;
@@ -110,7 +111,7 @@ export interface PlanApproval {
   task_summary: string;
   approach?: string;
   acceptance_criteria: string[];
-  files?: string[];
+  files?: (string | { path: string; purpose?: string })[];
   /** v1 legacy shape */
   capabilities?: {
     id: string;

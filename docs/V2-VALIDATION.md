@@ -303,6 +303,14 @@ scratch), and the run completes.
 
 ## V10 — cancel at plan gate → resume re-presents the gate ✅ (owner run `20260921-001538062`)
 
+> **Owner feedback → improvement:** the first V10 run wasted tokens re-planning
+> after resume (the plan wasn't persisted at submit time). **Fixed:** the plan
+> artifact is now persisted BEFORE the gate opens; on resume the SAME plan is
+> re-presented for approval, and approval continues the builder's own session
+> straight to task breakdown — no re-planning, one gate. Pending clarification
+> questions also survive cancel now: resume re-presents them to the owner
+> directly, zero model tokens.
+
 | | |
 |---|---|
 | **Options** | Clarify off · Security: Off · Git off · Remote CI off · Audit on · Plan Approval **on** · Fix Rounds: 2 |

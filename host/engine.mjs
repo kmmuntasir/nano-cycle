@@ -241,6 +241,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
     }
     gateClose(run);
+    // An interrupted answers gate keeps its PENDING questions — resume
+    // re-presents them to the owner directly (no model turn needed).
+    if (run.state.gate?.type === "answers" && run.state.gate.questions?.length) {
+      run.state.pendingQuestions = { round: run.state.gate.round ?? 1, questions: run.state.gate.questions };
+    }
     run.state.gate = null;
     run.state.status = "cancelled";
     run.state.error = null;
@@ -327,6 +332,32 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     const rounds = (run.state.qa ?? []).map((r) => ({ questions: r.questions, answers: r.answers }));
     let emptyRounds = 0;
     let round = rounds.length;
+    // Resume after cancel-at-answers-gate: the SAME pending questions go back
+    // to the owner directly — no model turn, no re-asking, zero tokens.
+    if (run.state.pendingQuestions?.questions?.length) {
+      const pending = run.state.pendingQuestions;
+      run.state.pendingQuestions = null;
+      round = pending.round;
+      emit.event(run.id, "clarify", {
+        t: "notice",
+        s: `resume: re-presenting ${pending.questions.length} unanswered question(s) from round ${round} — no model turn needed`,
+      });
+      run.state.gate = { type: "answers", nodeId: "clarify", round: pending.round, questions: pending.questions };
+      run.state.status = "awaiting-answers";
+      gateOpen(run);
+      emit.state(run);
+      const answers = await new Promise((resolve) => {
+        run.answersResolver = resolve;
+      });
+      run.answersResolver = null;
+      gateClose(run);
+      if (answers === "cancel") throw new Error("cancelled at answers gate");
+      rounds.push({ questions: pending.questions, answers });
+      run.state.qa = [...(run.state.qa ?? []), { round, at: Date.now(), questions: pending.questions, answers }];
+      run.state.gate = null;
+      run.state.status = "running";
+      emit.state(run);
+    }
     while (true) {
       round += 1;
       const history = rounds.map((r, i) => ({
@@ -588,19 +619,6 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       parameters: MILESTONE_SCHEMAS.plan,
       execute: async (_id, p) => {
         const divergence = realDivergence(p?.divergence);
-        if (divergence) {
-          run.state.artifacts.plan = p;
-          emit.event(run.id, "build", { t: "notice", s: `divergence: ${String(divergence).slice(0, 200)}` });
-          const decision = await awaitGateDecision(run, { type: "divergence", nodeId: "build", divergence });
-          if (decision === "cancel" || run.cancelRequested) {
-            stop();
-            return { content: [{ type: "text", text: "Run cancelled at the divergence gate." }], details: {} };
-          }
-          return {
-            content: [{ type: "text", text: "The owner approved despite the divergence — proceed to the TASK BREAKDOWN phase: read " + SKILL_DIRS.taskBreakdown + "/SKILL.md, then call submit_tasks." }],
-            details: {},
-          };
-        }
         const { errors, warnings } = validatePlan(p, run.spec);
         for (const w of warnings) emit.event(run.id, "build", { t: "notice", s: `plan warning: ${w}` });
         if (errors.length) {
@@ -610,21 +628,42 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             details: {},
           };
         }
-        if (run.options.approvePlan) {
-          run.pendingPlanApproval = {
-            task_summary: p.task_summary,
-            approach: p.approach,
-            files: (p.files ?? []).map((f) => f.path),
-            acceptance_criteria: p.acceptance_criteria ?? [],
+        // Persist the plan BEFORE any gate: a cancel/restart at the gate must
+        // never lose it — resume re-presents the SAME plan (no model re-plan).
+        run.state.artifacts.plan = p;
+        if (divergence) {
+          run.state.pendingPlanGate = { type: "divergence", plan: p };
+          emit.event(run.id, "build", { t: "notice", s: `divergence: ${String(divergence).slice(0, 200)}` });
+          emit.state(run);
+          const decision = await awaitGateDecision(run, { type: "divergence", nodeId: "build", divergence });
+          if (decision === "cancel" || run.cancelRequested) {
+            stop();
+            return { content: [{ type: "text", text: "Run cancelled at the divergence gate." }], details: {} };
+          }
+          run.state.pendingPlanGate = null;
+          emit.state(run);
+          return {
+            content: [{ type: "text", text: "The owner approved despite the divergence — proceed to the TASK BREAKDOWN phase: read " + SKILL_DIRS.taskBreakdown + "/SKILL.md, then call submit_tasks." }],
+            details: {},
           };
+        }
+        if (run.options.approvePlan) {
+          run.state.pendingPlanGate = { type: "plan-approval", plan: p };
           emit.event(run.id, "build", { t: "notice", s: "plan submitted — owner approval required (plan-approval gate)" });
+          emit.state(run);
           const decision = await awaitGateDecision(run, {
             type: "plan-approval",
             nodeId: "build",
-            plan: run.pendingPlanApproval,
+            plan: {
+              task_summary: p.task_summary,
+              approach: p.approach,
+              files: (p.files ?? []).map((f) => f.path),
+              acceptance_criteria: p.acceptance_criteria ?? [],
+            },
           });
-          run.pendingPlanApproval = null;
           if (decision?.action === "reject") {
+            run.state.pendingPlanGate = null;
+            emit.state(run);
             const comments = String(decision.comments ?? "").slice(0, 2000);
             emit.event(run.id, "build", { t: "notice", s: `plan REJECTED by owner${comments ? `: ${comments.slice(0, 200)}` : ""}` });
             return {
@@ -633,11 +672,14 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             };
           }
           if (decision === "cancel" || run.cancelRequested || decision?.action === "cancel") {
+            // pendingPlanGate DELIBERATELY kept — resume re-presents the SAME
+            // plan for approval instead of asking the model to re-plan.
             stop();
-            return { content: [{ type: "text", text: "Run cancelled at the plan gate." }], details: {} };
+            return { content: [{ type: "text", text: "Run cancelled at the plan gate. The plan is stored; the owner will review it when the run resumes." }], details: {} };
           }
+          run.state.pendingPlanGate = null;
+          emit.state(run);
         }
-        run.state.artifacts.plan = p;
         emit.event(run.id, "build", {
           t: "notice",
           s: `plan approved: ${p.task_summary.slice(0, 120)} — ${(p.files ?? []).length} file(s), ${(p.acceptance_criteria ?? []).length} criteria`,
@@ -847,6 +889,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     const handle = await getOrCreateBuildSession(run);
     const step = stepState(run, "build");
     let text;
+    let expected;
     if (kind === "initial") {
       text = builderPrompt({
         task: run.task,
@@ -854,8 +897,27 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         spec: run.spec,
         sourceDocText: sourceDocsFor(run),
       });
+      expected = () => run.cancelRequested || run.state.artifacts.plan;
+    } else if (kind === "plan-approved") {
+      const plan = run.state.artifacts.plan;
+      text = [
+        "Your run was cancelled while your submitted plan was awaiting owner approval. The run has now been resumed and the owner has APPROVED your submitted plan (restated):",
+        JSON.stringify(
+          {
+            task_summary: plan?.task_summary,
+            approach: plan?.approach,
+            files: plan?.files,
+            acceptance_criteria: plan?.acceptance_criteria,
+          },
+          null,
+          2,
+        ),
+        "Do NOT investigate again and do NOT re-plan or call submit_plan. Proceed directly to the TASK BREAKDOWN phase: read " + SKILL_DIRS.taskBreakdown + "/SKILL.md, then call submit_tasks exactly once.",
+      ].join("\n\n");
+      expected = () => run.cancelRequested || run.state.artifacts.tasks;
     } else {
       step.rounds = (step.rounds ?? 0) + 1;
+      expected = () => run.cancelRequested || run.state.artifacts.implDelta;
       text = builderFeedbackTurn({
         round: kind.feedback.round,
         source: kind.feedback.source,
@@ -871,22 +933,15 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       });
       emit.state(run);
     }
-    await safePrompt(
-      handle,
-      text,
-      () => run.cancelRequested || run.state.artifacts.implDelta,
-    );
+    await safePrompt(handle, text, expected);
     if (run.cancelRequested) throw new Error("cancelled");
     // Milestone nudge (v1 pattern): the turn ended without the expected call.
-    const expected = kind === "initial" ? "submit_plan or a gate decision" : "submit_impl_delta";
-    const got =
-      kind === "initial"
-        ? run.state.artifacts.plan || run.cancelRequested
-        : run.state.artifacts.implDelta;
-    if (!got) {
-      emit.event(run.id, "build", { t: "notice", s: `turn ended without ${expected} — nudging once` });
+    if (!expected()) {
+      const want =
+        kind === "initial" ? "submit_plan" : kind === "plan-approved" ? "submit_tasks" : "submit_impl_delta";
+      emit.event(run.id, "build", { t: "notice", s: `turn ended without ${want} — nudging once` });
       await handle.prompt(
-        `You ended your turn without the required milestone call. ${kind === "initial" ? "Call submit_plan now with the structured plan (or request divergence via its divergence field)." : "Call submit_impl_delta now with summary, files_written, notes, task_completion."} Do nothing else first.`,
+        `You ended your turn without the required milestone call. Call ${want} now with the structured result. Do nothing else first.`,
       );
     }
   }
@@ -1306,10 +1361,25 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           );
         }
       }
-      // Resume after cancel-at-plan-gate: re-present the approval gate BEFORE
-      // the build continues (v1 FIX-REPORT regression, kept fixed).
-      if (run.pendingPlanApproval && !run.state.artifacts.implDelta) {
-        run.state.gate = { type: "plan-approval", nodeId: "build", plan: run.pendingPlanApproval };
+      // Resume after cancel-at-plan-gate: the plan artifact was persisted at
+      // submit time — re-present the SAME plan for approval (no model re-plan)
+      // BEFORE any build work (v1 FIX-REPORT regression, kept fixed).
+      const pendingGate = run.state.pendingPlanGate;
+      if (pendingGate && !run.state.artifacts.implDelta) {
+        emit.event(run.id, "build", { t: "notice", s: "resume: re-presenting the stored plan for approval — the builder will NOT re-plan" });
+        run.state.gate =
+          pendingGate.type === "divergence"
+            ? { type: "divergence", nodeId: "build", divergence: pendingGate.plan.divergence }
+            : {
+                type: "plan-approval",
+                nodeId: "build",
+                plan: {
+                  task_summary: pendingGate.plan.task_summary,
+                  approach: pendingGate.plan.approach,
+                  files: (pendingGate.plan.files ?? []).map((f) => f.path),
+                  acceptance_criteria: pendingGate.plan.acceptance_criteria ?? [],
+                },
+              };
         emit.state(run);
         const decision = await new Promise((resolve) => {
           run.gateResolver = resolve;
@@ -1319,9 +1389,10 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           emit.state(run);
         });
         if (decision === "cancel" || decision?.action === "cancel" || run.cancelRequested) throw new Error("cancelled at gate");
-        if (decision?.action === "reject") {
-          run.pendingPlanApproval = null;
-          // feed the rejection back through a build turn
+        if (pendingGate.type === "plan-approval" && decision?.action === "reject") {
+          run.state.pendingPlanGate = null;
+          emit.state(run);
+          // rejection comments go back through the SAME session — the builder revises
           await buildTurn(run, {
             feedback: {
               round: 0,
@@ -1330,7 +1401,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             },
           });
         } else {
-          run.pendingPlanApproval = null;
+          // approved (or divergence accepted): the stored plan STANDS — the
+          // builder continues from its own context straight to task breakdown.
+          run.state.pendingPlanGate = null;
+          emit.state(run);
+          await buildTurn(run, "plan-approved");
         }
       }
 
@@ -1588,7 +1663,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         qa: [],
         artifacts: {},
         gate: null,
-        pendingPlanApproval: null,
+        pendingPlanGate: null,
+        pendingQuestions: null,
         deferredChecks: [],
         mechanicalChecks: null,
         remoteChecks: null,
@@ -1614,7 +1690,6 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         cancelRequested: false,
         finalized: false,
         ciCapability: undefined,
-        pendingPlanApproval: null,
         git: gitInfo,
         __emit: emit,
         done: (() => {
@@ -1799,7 +1874,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         cancelRequested: false,
         finalized: false,
         ciCapability: undefined,
-        pendingPlanApproval: state.pendingPlanApproval ?? null,
+        pendingPlanGate: null,
+        pendingQuestions: null,
         git: state.git?.enabled ? state.git : null,
         __emit: emit,
         done: (() => {

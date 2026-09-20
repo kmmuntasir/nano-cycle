@@ -106,6 +106,27 @@ export default function RunHeader({
             )}
           </HStack>
           <HStack gap={1.5} mt={2} flexWrap="wrap">
+            {(state.qa?.length ?? 0) > 0 && (
+              <Box px={2} py={0.5} borderRadius="sm" border="1px solid" borderColor="line">
+                <Text fontSize="10px" color="muted" fontFamily="ui-monospace, monospace">
+                  Clarification: {state.qa!.length} round(s)
+                </Text>
+              </Box>
+            )}
+            {state.pendingQuestions && (
+              <Box px={2} py={0.5} borderRadius="sm" border="1px solid" borderColor="#5c4a12" bg="#221b08">
+                <Text fontSize="10px" color="#f0b429" fontFamily="ui-monospace, monospace">
+                  Clarification: answers pending
+                </Text>
+              </Box>
+            )}
+            {(state.artifacts?.plan as { acceptance_criteria?: string[] } | undefined) && (
+              <Box px={2} py={0.5} borderRadius="sm" border="1px solid" borderColor="line">
+                <Text fontSize="10px" color="muted" fontFamily="ui-monospace, monospace">
+                  Plan: {(state.artifacts!.plan as { acceptance_criteria?: string[] }).acceptance_criteria?.length ?? 0} criteria
+                </Text>
+              </Box>
+            )}
             {chips.map((c) => (
               <Box
                 key={c.label}
