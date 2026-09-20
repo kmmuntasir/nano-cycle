@@ -62,10 +62,6 @@ const webTools = {
 fs.mkdirSync(SANDBOX_DIR, { recursive: true });
 fs.mkdirSync(runsDir(), { recursive: true });
 
-// v3: reconcile ticket queues with interrupted runs after a restart.
-// (Runs before the sweep below, so "running" states are already marked.)
-queueManager.recoverAll();
-
 // Orphan sweep: runs that a restart killed mid-flight must never linger as
 // "running" — mark them so the GUI and the registry tell the truth.
 for (const entry of fs.readdirSync(runsDir())) {
@@ -117,6 +113,9 @@ function broadcast(msg) {
 
 const pipeline = createEngine({ modelRuntime, emit, webTools });
 const queueManager = createQueueManager({ engine: pipeline, emit, resolveProject, git, broadcast: (msg) => broadcast(msg) });
+// v3: reconcile ticket queues with interrupted runs after a restart — runs the
+// sweep below already marked, so reconciliation sees the truth and requeues.
+queueManager.recoverAll();
 
 // --- http ---------------------------------------------------------------------
 

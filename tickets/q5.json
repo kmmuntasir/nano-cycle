@@ -14,20 +14,20 @@
       "order": 0,
       "history": [
         {
-          "at": "2026-09-20T20:58:41.010Z",
+          "at": "2026-09-20T21:17:03.018Z",
           "from": "queued",
           "to": "running",
           "runId": "flip-run"
         },
         {
-          "at": "2026-09-20T20:58:41.021Z",
+          "at": "2026-09-20T21:17:03.028Z",
           "from": "running",
           "to": "done",
           "runId": "flip-run"
         }
       ],
       "createdAt": "2026-01-01T00:00:00Z",
-      "updatedAt": "2026-09-20T20:58:41.021Z",
+      "updatedAt": "2026-09-20T21:17:03.028Z",
       "id": "F1",
       "title": "thing",
       "description": "d"
@@ -36,5 +36,5 @@
   "queue": {
     "state": "idle"
   },
-  "updatedAt": "2026-09-20T20:58:41.022Z"
+  "updatedAt": "2026-09-20T21:17:03.030Z"
 }
