@@ -264,7 +264,12 @@ const server = http.createServer(async (req, res) => {
             parsed = { tickets: arr, sourceDoc: body.sourceDoc ?? null };
           } else if (body.markdown) {
             const tickets = parseFeaturesMarkdown(String(body.markdown));
-            if (tickets.length === 0) throw new Error("no feature headings (F##/OMNI-###) found in the pasted markdown");
+            if (tickets.length === 0) {
+              throw new Error(
+                "no feature entries found in the pasted markdown — expected ids like F##/OMNI-###/GM-## on headings (\"## F01 — Title\") or list items (\"- [x] **F01 — Title**\"); " +
+                  "other formats: have an agent structure the doc and use the nano-cycle MCP (nano_bulk_create_tickets) or POST a JSON ticket array",
+              );
+            }
             parsed = { tickets, sourceDoc: body.sourceDoc ?? null };
           } else {
             let projectPath;
