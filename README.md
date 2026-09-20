@@ -73,6 +73,31 @@ evidence.
 prompts FORCE loading the phase skill before its milestone tool. Repo-local
 skills stay ignored by design; the driver owns context.
 
+## Ticket queue (v3)
+
+Beyond single runs, each project has a **ticket backlog** (the "☰ Tickets & Queue" view):
+
+- **Backlog** — create tickets or import the project's own `docs/features.md`
+  (F##/OMNI-### sections; 🔴/🟢 markers understood). Tickets live outside the
+  target repo.
+- **Clarify wave** — start PM clarification runs for every draft ticket at once;
+  answer all of them in one **PM Inbox** screen.
+- **Release gate** — review the locked specs in a batch (rendered exactly as
+  presented), then release the queue.
+- **Sequential delivery** — tickets are promoted one at a time (build → verify
+  → security), each on its own branch, verdict-gated ff-merge. Gates **park
+  tickets, never the queue**: a ticket that fails its gates becomes `blocked`
+  (dependents cascade), independent tickets keep flowing; retry resumes the
+  parked run from disk, re-clarify starts fresh PM round seeded with the old spec.
+- **Spec staleness** — a spec clarified before earlier tickets were built is
+  re-checked by the builder; repo/spec contradictions surface as divergence
+  (`stale-spec`) instead of silent adaptation.
+- **Completion flip** — a finished ticket's 🔴 → 🟢 in the backlog doc,
+  committed to the base branch.
+
+The engine stays a four-step state machine; the queue (`host/queue.mjs`) sits
+above it and drives the existing run API.
+
 ## Run
 
 ```bash
