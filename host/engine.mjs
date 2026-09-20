@@ -537,6 +537,27 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     return hits.size ? [...hits].join("+") : null;
   }
 
+  // A milestone tool's hard stop aborts the in-flight prompt() — the SDK
+  // rejects the pending promise with an AbortError. That is SUCCESS when the
+  // milestone the tool represents was recorded (v1 clarify's swallow-guard,
+  // ported). Anything else rethrows.
+  async function safePrompt(handle, text, milestoneRecorded) {
+    try {
+      await handle.prompt(text);
+    } catch (err) {
+      if (milestoneRecorded()) return;
+      if (/abort/i.test(String(err?.message ?? err)) && milestoneRecorded(true)) return; // last-chance re-check
+      throw err;
+    }
+  }
+
+  // Optional divergence fields sometimes come back as literal "none"/"n/a" —
+  // treat those as absent so a filled-but-empty field can't open a gate.
+  function realDivergence(v) {
+    const s = String(v ?? "").trim();
+    return /^(none|no|n\/a|na|nothing|null|\.| - )$/i.test(s) ? undefined : s || undefined;
+  }
+
   function buildMilestoneTools(run, ctrl) {
     const stop = () => {
       // Hard turn stop (mirrors v1 ask_questions): the milestone is recorded;
@@ -549,13 +570,14 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     const submitPlan = defineTool({
       name: "submit_plan",
       label: "Submit plan",
-      description: "Submit the implementation plan (PLAN phase milestone). Call EXACTLY ONCE per plan revision.",
+      description: "Submit the implementation plan (PLAN phase milestone). Call EXACTLY ONCE per plan revision. Leave divergence EMPTY unless the task truly cannot be done as specified.",
       parameters: MILESTONE_SCHEMAS.plan,
       execute: async (_id, p) => {
-        if (p?.divergence) {
+        const divergence = realDivergence(p?.divergence);
+        if (divergence) {
           run.state.artifacts.plan = p;
-          emit.event(run.id, "build", { t: "notice", s: `divergence: ${String(p.divergence).slice(0, 200)}` });
-          const decision = await awaitGateDecision(run, { type: "divergence", nodeId: "build", divergence: p.divergence });
+          emit.event(run.id, "build", { t: "notice", s: `divergence: ${String(divergence).slice(0, 200)}` });
+          const decision = await awaitGateDecision(run, { type: "divergence", nodeId: "build", divergence });
           if (decision === "cancel" || run.cancelRequested) {
             stop();
             return { content: [{ type: "text", text: "Run cancelled at the divergence gate." }], details: {} };
@@ -835,7 +857,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       });
       emit.state(run);
     }
-    await handle.prompt(text);
+    await safePrompt(
+      handle,
+      text,
+      () => run.cancelRequested || run.state.artifacts.implDelta,
+    );
     if (run.cancelRequested) throw new Error("cancelled");
     // Milestone nudge (v1 pattern): the turn ended without the expected call.
     const expected = kind === "initial" ? "submit_plan or a gate decision" : "submit_impl_delta";
@@ -1083,7 +1109,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     step.sessionFiles.push(handle.sessionFile);
     emit.state(run);
     try {
-      await handle.prompt(
+      await safePrompt(
+        handle,
         verifierPrompt({
           task: run.task,
           workspace: run.projectPath,
@@ -1098,6 +1125,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           remoteResults: run.state.remoteChecks,
           fixRound: round,
         }),
+        () => run.cancelRequested || run.state.artifacts.verify,
       );
       if (!run.cancelRequested && !run.state.artifacts.verify) {
         emit.event(run.id, "verify", { t: "notice", s: "turn ended without submit_verify — nudging once" });
@@ -1194,7 +1222,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     step.sessionFiles.push(handle.sessionFile);
     emit.state(run);
     try {
-      await handle.prompt(
+      await safePrompt(
+        handle,
         securityPrompt({
           task: run.task,
           workspace: run.projectPath,
@@ -1202,6 +1231,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           vapt: run.options.security === "scan+vapt",
           priorReports: { verify: run.state.artifacts.verify, implDelta: run.state.artifacts.implDelta },
         }),
+        () => run.cancelRequested || run.state.artifacts.security,
       );
       if (!run.cancelRequested && !run.state.artifacts.security) {
         emit.event(run.id, "security", { t: "notice", s: "turn ended without submit_security — nudging once" });
