@@ -417,12 +417,11 @@ export default function App() {
                         borderBottomColor={active ? "#7aa2f7" : "transparent"}
                         onClick={() => setTab(t.id)}
                       >
-                        {gated ? "● " : ""}{t.label}
                         <Text
                           as="span"
                           fontSize="9px"
                           color={active ? "#7aa2f7" : "muted"}
-                          ml={1.5}
+                          mr={1.5}
                           px={1}
                           borderRadius="3px"
                           border="1px solid"
@@ -432,6 +431,7 @@ export default function App() {
                         >
                           {t.hint}
                         </Text>
+                        {gated ? "● " : ""}{t.label}
                       </Box>
                     );
                   })}
