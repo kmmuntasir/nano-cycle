@@ -211,10 +211,13 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     const store = loadTickets(project);
     const t = store.tickets.find((x) => x.id === ticketId);
     if (!t || t.runId !== runId) return;
+    let flip = Promise.resolve();
     if (status === "completed") {
       setTicketStatus(project, ticketId, "done", { runId });
-      flipBacklog(project, t);
       unblockDependents(project);
+      // The flip's write+commit must land on the base branch BEFORE the pump
+      // promotes the next ticket — its branch checkout would race the commit.
+      flip = flipBacklog(project, t);
     } else if (status === "failed") {
       setTicketStatus(project, ticketId, "blocked", { reason: "gates-exhausted", runId });
     } else if (status === "cancelled") {
@@ -222,24 +225,26 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       // ticket is blocked/parked for review; retry resumes the run from disk.
       if (t.status !== "blocked") setTicketStatus(project, ticketId, "blocked", { reason: "gates-exhausted", runId });
     }
-    // Cascade: dependents of a non-done ticket cannot run — mark them blocked
-    // (transitively) so the columns tell the truth.
-    const fresh = loadTickets(project);
-    const byId = new Map(fresh.tickets.map((x) => [x.id, x]));
-    const blockedOn = (id, seen = new Set()) => {
-      const dependents = fresh.tickets.filter(
-        (x) => (x.dependsOn ?? []).includes(id) && !["done", "blocked"].includes(x.status),
-      );
-      for (const d of dependents) {
-        if (seen.has(d.id)) continue;
-        seen.add(d.id);
-        setTicketStatus(project, d.id, "blocked", { reason: `depends on ${id}` });
-        blockedOn(d.id, seen);
-      }
+    const finish = () => {
+      // Cascade: dependents of a non-done ticket cannot run — mark them blocked
+      // (transitively) so the columns tell the truth.
+      const fresh = loadTickets(project);
+      const blockedOn = (id, seen = new Set()) => {
+        const dependents = fresh.tickets.filter(
+          (x) => (x.dependsOn ?? []).includes(id) && !["done", "blocked"].includes(x.status),
+        );
+        for (const d of dependents) {
+          if (seen.has(d.id)) continue;
+          seen.add(d.id);
+          setTicketStatus(project, d.id, "blocked", { reason: `depends on ${id}` });
+          blockedOn(d.id, seen);
+        }
+      };
+      if (status !== "completed") blockedOn(ticketId);
+      broadcastQueue(project);
+      pump(project);
     };
-    if (status !== "completed") blockedOn(ticketId);
-    broadcastQueue(project);
-    pump(project);
+    Promise.resolve(flip).catch(() => {}).finally(finish);
   }
 
   // A completed ticket releases its dependents: dependency-blocked tickets
@@ -257,30 +262,39 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     }
   }
 
+  // Flip the ticket's backlog marker (🔴→🟢) and commit it on the base branch.
+  // NEVER while another run holds the tree (its branch is checked out — the
+  // flip would land there instead of base). Returns a promise so the caller can
+  // sequence the pump after the commit; never rejects.
   function flipBacklog(project, ticket) {
-    if (!ticket.sourceDoc) return;
+    const note = (s) => {
+      if (ticket.runId) emit.event?.(ticket.runId, "_run", { t: "notice", s });
+    };
+    if (!ticket.sourceDoc) return Promise.resolve();
     let projectPath;
-    try { projectPath = resolveProject(project).path; } catch { return; }
+    try { projectPath = resolveProject(project).path; } catch { return Promise.resolve(); }
     const abs = path.resolve(projectPath, ticket.sourceDoc.split("#")[0]);
-    if (!abs.startsWith(path.resolve(projectPath)) || !fs.existsSync(abs)) return;
+    if (!abs.startsWith(path.resolve(projectPath)) || !fs.existsSync(abs)) return Promise.resolve();
+    if (engine.treeLockHolder(projectPath)) {
+      note(`backlog: flip skipped for ${ticket.id} — the working tree is held by another run; flip ${ticket.sourceDoc} manually`);
+      return Promise.resolve();
+    }
     try {
       const text = fs.readFileSync(abs, "utf8");
       const flipped = flipStatus(text, ticket.id, true);
-      if (!flipped || flipped === text) return;
+      if (!flipped || flipped === text) return Promise.resolve();
       fs.writeFileSync(abs, flipped);
-      if (engine.treeLockHolder(projectPath)) return; // no git flip while building
-      (async () => {
+      return (async () => {
         try {
-          const g = await import("./git.mjs");
-          if (!(await g.isRepo(projectPath))) return;
-          await git.commitFile(projectPath, path.relative(projectPath, abs), `chore: mark ${ticket.id} done (queue)`);
-          emit.event?.("queue", "_run", { t: "notice", s: `backlog: ${ticket.id} marked done in ${ticket.sourceDoc}` });
-        } catch {
-          /* flip committed best-effort */
+          if (!(await git.isRepo(projectPath))) return;
+          await git.commitFile(projectPath, path.relative(projectPath, abs), `chore: mark ${ticket.id} done (${ticket.id})`);
+          note(`backlog: ${ticket.id} marked done in ${ticket.sourceDoc}`);
+        } catch (e) {
+          note(`backlog: flip commit failed for ${ticket.id} (${String(e?.message ?? e).slice(0, 160)}) — doc flipped, commit not landed`);
         }
       })();
     } catch {
-      /* flip is best-effort */
+      return Promise.resolve(); // flip is best-effort
     }
   }
 

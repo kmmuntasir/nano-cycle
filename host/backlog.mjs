@@ -74,7 +74,8 @@ export function importFromFile(projectPath, relPath) {
 }
 
 /** Flip a ticket's status marker in the doc text: 🔴/none → 🟢 (done), 🟢 → 🔴.
- *  Returns the new text, or null when the id line isn't found. */
+ *  Returns the new text, or null when the id line isn't found. The heading's
+ *  markup (level, bold) is PRESERVED — the marker is swapped/appended in place. */
 export function flipStatus(docText, id, done = true) {
   const lines = String(docText ?? "").split(/\r?\n/);
   let changed = false;
@@ -82,7 +83,11 @@ export function flipStatus(docText, id, done = true) {
     if (changed || !line.includes(id)) return line;
     if (!HEAD_RE.test(line)) return line;
     changed = true;
-    if (done) return line.includes("🔴") ? line.replace("🔴", "🟢") : line.replace(HEAD_RE, (mm, idGrp, rest) => `${mm.includes("🟢") ? mm : `${idGrp} — ${rest} 🟢`}`);
+    if (done) {
+      if (line.includes("🔴")) return line.replace("🔴", "🟢");
+      if (line.includes("🟢")) return line;
+      return line.replace(/\s+$/, "") + " 🟢";
+    }
     return line.includes("🟢") ? line.replace("🟢", "🔴") : line;
   });
   return changed ? out.join("\n") : null;

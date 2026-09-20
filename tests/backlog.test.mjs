@@ -65,6 +65,19 @@ test("flip: 🔴 → 🟢 on the id line only; reverse works; missing id → nul
   assert.strictEqual(flipStatus(DOC, "F99", true), null);
 });
 
+test("flip: heading WITHOUT a marker gains 🟢 with its markup preserved", () => {
+  const doc = "## F07 — Brand new thing\nbody text\n";
+  const flipped = flipStatus(doc, "F07", true);
+  const line = flipped.split("\n")[0];
+  assert.ok(line.startsWith("## F07"), `heading level intact: "${line}"`);
+  assert.ok(line.includes("🟢"), line);
+  assert.strictEqual(flipped.split("\n")[1], "body text", "body untouched");
+  // bolded pseudo-heading shape keeps its bold too
+  const bold = flipStatus("**F08) Bold title**\n", "F08", true);
+  assert.ok(bold.startsWith("**F08)"), bold);
+  assert.ok(bold.includes("🟢"), bold);
+});
+
 test("importFromFile: reads within the project, rejects escapes/missing", () => {
   const dir = fs.mkdtempSync("/tmp/nano-backlog-");
   fs.writeFileSync(path.join(dir, "docs.md"), DOC);

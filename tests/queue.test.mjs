@@ -324,6 +324,29 @@ await test("Q8: completing a blocked ticket un-blocks its dependents (the cascad
   assert.strictEqual(st2.queue.state, "idle", "blocked-but-not-pumpable work parks the TICKET, never the queue");
 });
 
+// --- Q9: flip guard — never write the doc while a run holds the tree -------------
+
+await test("Q9: backlog flip skipped while another run holds the tree (the doc stays untouched)", async () => {
+  const projDir = fs.mkdtempSync("/tmp/nano-queue-flip2-");
+  fs.mkdirSync(path.join(projDir, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(projDir, "docs", "features.md"), "## F1 — thing 🔴\nbody\n");
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, projDir);
+  await seedProject("q9", [
+    { id: "F1", title: "thing", description: "d", sourceDoc: "docs/features.md", status: "queued", runId: "flip9" },
+  ], "running");
+  engine.runs.set("flip9", { id: "flip9", status: "clarified", holdsTree: false, settled: true, opts: { onSettled: () => {} } });
+  mgr.pump("q9"); // promotes flip9 (tree free at pump time)
+  await sleep(10);
+  // a direct run grabs the tree before flip9's build settles
+  engine.runs.set("direct-run", { id: "direct-run", status: "running", holdsTree: true, settled: false, opts: {} });
+  await engine.finishBuild("flip9", "completed");
+  const doc = fs.readFileSync(path.join(projDir, "docs", "features.md"), "utf8");
+  assert.ok(doc.includes("🔴"), "flip skipped — the doc was NOT written into the direct run's branch");
+  assert.ok(!doc.includes("🟢"), "no partial flip");
+  fs.rmSync(projDir, { recursive: true, force: true });
+});
+
 process.on("exit", () => { try { fs.rmSync(path.join(ROOT, "tickets"), { recursive: true, force: true }); } catch {} });
 
 const failed = results.filter(([, ok]) => !ok).length;
