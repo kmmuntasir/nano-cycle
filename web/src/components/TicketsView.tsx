@@ -107,6 +107,25 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
     [project, store, onOpenRun],
   );
 
+  // Reorder among QUEUED tickets (§6): swap with the adjacent queued ticket and
+  // persist the full display order; the pump promotes by it.
+  // NOTE: must live ABOVE the !store early return — hooks may not be
+  // conditional, or the hook count changes between renders (React #310).
+  const move = useCallback(
+    async (t: Ticket, dir: -1 | 1) => {
+      if (!store) return;
+      const ordered = [...store.tickets].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      const queuedPositions = ordered.map((x, k) => ({ x, k })).filter(({ x }) => x.status === "queued");
+      const pos = queuedPositions.findIndex(({ x }) => x.id === t.id);
+      const neighbor = queuedPositions[pos + dir];
+      if (pos < 0 || !neighbor) return;
+      const i = ordered.findIndex((x) => x.id === t.id);
+      [ordered[i], ordered[neighbor.k]] = [ordered[neighbor.k], ordered[i]];
+      await act({ action: "reorder", orderedIds: ordered.map((x) => x.id) });
+    },
+    [store, act],
+  );
+
   if (!store) {
     return (
       <Box border="1px dashed" borderColor="line" borderRadius="md" p={6} textAlign="center">
@@ -117,22 +136,6 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
 
   const q = store.queue;
   const rows = [...store.tickets].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-
-  // Reorder among QUEUED tickets (§6): swap with the adjacent queued ticket and
-  // persist the full display order; the pump promotes by it.
-  const move = useCallback(
-    async (t: Ticket, dir: -1 | 1) => {
-      const ordered = [...rows];
-      const queuedPositions = ordered.map((x, k) => ({ x, k })).filter(({ x }) => x.status === "queued");
-      const pos = queuedPositions.findIndex(({ x }) => x.id === t.id);
-      const neighbor = queuedPositions[pos + dir];
-      if (pos < 0 || !neighbor) return;
-      const i = ordered.findIndex((x) => x.id === t.id);
-      [ordered[i], ordered[neighbor.k]] = [ordered[neighbor.k], ordered[i]];
-      await act({ action: "reorder", orderedIds: ordered.map((x) => x.id) });
-    },
-    [rows, act],
-  );
   const clarified = rows.filter((t) => t.status === "clarified");
   const blocked = rows.filter((t) => t.status === "blocked");
   const doneCount = rows.filter((t) => t.status === "done").length;
