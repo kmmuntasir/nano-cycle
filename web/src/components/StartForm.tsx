@@ -2,21 +2,17 @@ import { useState } from "react";
 import { Box, Flex, HStack, Stack, Text, Textarea } from "@chakra-ui/react";
 import { OutlineButton, PrimaryButton } from "../ui/buttons";
 import ModelPicker from "../ui/ModelPicker";
-import type { ModelInfo } from "../api";
+import type { ModelInfo, SecurityMode } from "../api";
 
-const TIER_HINT: Record<string, string> = {
-  demo: "Plan → Implement → Verify · Scratch Tasks",
-  S: "Implement → Verify · Skip Planning",
-  M: "Plan → BE ∥ FE → Verify · One Slice",
-  L: "Plan → Capability Graph → Verify · Complex",
+const SECURITY_HINT: Record<SecurityMode, string> = {
+  off: "No security step",
+  scan: "Scanner triage: gitleaks · deps audit · semgrep/trivy when present",
+  "scan+vapt": "Scanners + running-app VAPT probes (boot & probe the real stack)",
 };
 
 export default function StartForm({
   task,
   setTask,
-  tier,
-  setTier,
-  tiers,
   roles,
   models,
   modelPick,
@@ -34,6 +30,8 @@ export default function StartForm({
   setApprovePlan,
   remoteChecks,
   setRemoteChecks,
+  security,
+  setSecurity,
   starting,
   onStart,
   project,
@@ -41,9 +39,6 @@ export default function StartForm({
 }: {
   task: string;
   setTask: (v: string) => void;
-  tier: string;
-  setTier: (v: string) => void;
-  tiers: Record<string, string[]>;
   roles: Record<string, string>;
   models: ModelInfo[];
   modelPick: Record<string, string>;
@@ -61,6 +56,8 @@ export default function StartForm({
   setApprovePlan: (v: boolean) => void;
   remoteChecks: boolean;
   setRemoteChecks: (v: boolean) => void;
+  security: SecurityMode;
+  setSecurity: (v: SecurityMode) => void;
   starting: boolean;
   onStart: () => void;
   project: string;
@@ -68,7 +65,6 @@ export default function StartForm({
 }) {
   const [master, setMaster] = useState("");
   const roleEntries = Object.entries(roles);
-  const tierKeys = Object.keys(tiers).length > 0 ? Object.keys(tiers) : ["demo", "S", "M", "L"];
 
   return (
     <Flex direction={{ base: "column", md: "row" }} gap={5}>
@@ -112,44 +108,41 @@ export default function StartForm({
 
         <Box>
           <Text fontSize="11px" color="muted" mb={2} fontFamily="system-ui, sans-serif">
-            Tier
+            Security (Step 4)
           </Text>
           <Flex gap={2} flexWrap="wrap">
-            {tierKeys.map((t) => {
-              const active = tier === t;
+            {(["off", "scan", "scan+vapt"] as SecurityMode[]).map((mode) => {
+              const active = security === mode;
+              const label = mode === "off" ? "Off" : mode === "scan" ? "Scan" : "Scan + VAPT";
               return (
                 <Box
-                  key={t}
+                  key={mode}
                   as="button"
                   flex="1"
-                  minW="110px"
+                  minW="120px"
                   textAlign="left"
                   p={3}
                   borderRadius="md"
                   border="1px solid"
                   borderColor={active ? "#7aa2f7" : "line"}
                   bg={active ? "#1b2130" : "transparent"}
-                  onClick={() => setTier(t)}
+                  onClick={() => setSecurity(mode)}
                 >
                   <Text fontSize="13px" fontWeight={800} color={active ? "#7aa2f7" : "ink"} fontFamily="system-ui, sans-serif">
-                    {t}
+                    {label}
                   </Text>
                   <Text fontSize="10px" color="muted" mt={1} fontFamily="system-ui, sans-serif" lineHeight="1.4">
-                    {TIER_HINT[t] ?? (tiers[t] ?? []).join(" → ")}
+                    {SECURITY_HINT[mode]}
                   </Text>
                 </Box>
               );
             })}
           </Flex>
-          <Text fontSize="10px" color="muted" mt={1} fontFamily="system-ui, sans-serif">
-            {(tiers[tier] ?? []).join(" → ")}
-            {tier === "L" ? " (compiled from plan)" : ""}
-          </Text>
         </Box>
 
         <Box>
           <Text fontSize="11px" color="muted" mb={2} fontFamily="system-ui, sans-serif">
-            Plan
+            Options
           </Text>
           <HStack gap={2} flexWrap="wrap">
             <OutlineButton active={clarify} onClick={() => setClarify(!clarify)}>
@@ -172,7 +165,7 @@ export default function StartForm({
             </OutlineButton>
             <OutlineButton
               active={approvePlan}
-              title="Pause after the plan compiles (M/L tiers) for owner review before any code is written."
+              title="Pause after the plan is submitted for owner review before any code is written."
               onClick={() => setApprovePlan(!approvePlan)}
             >
               {approvePlan ? "✓ Plan Approval" : "Plan Approval Off"}
@@ -242,13 +235,13 @@ export default function StartForm({
           ))}
           <Text fontSize="10px" color="muted" fontFamily="system-ui, sans-serif">Saved in this browser (localStorage).</Text>
           <PrimaryButton size="md" disabled={starting || !task.trim()} onClick={onStart}>
-            {starting ? "Starting…" : `Start ${tier} Run →`}
+            {starting ? "Starting…" : "Start Run →"}
           </PrimaryButton>
           {!task.trim() && (
             <Text fontSize="11px" color="#f0b429" fontFamily="system-ui, sans-serif">Describe the task to enable Start.</Text>
           )}
           <Text fontSize="10px" color="muted" fontFamily="system-ui, sans-serif">
-            {clarify ? "Clarify loop first (PM asks, you answer) · " : ""}{maxFixRounds} fix round(s) · runs in {project}
+            {clarify ? "Clarify loop first (PM asks, you answer) · " : ""}{maxFixRounds} fix round(s) · {security === "off" ? "no security step" : `security: ${security}`} · runs in {project}
           </Text>
         </Stack>
       </Box>

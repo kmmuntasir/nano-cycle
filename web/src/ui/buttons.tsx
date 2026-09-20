@@ -122,6 +122,7 @@ export function WarningButton({
   children: ReactNode;
   size?: "xs" | "sm" | "md";
   onClick?: () => void;
+  disabled?: boolean;
 }) {
   return (
     <Button
@@ -130,7 +131,9 @@ export function WarningButton({
       color="#1a1503"
       fontFamily={SANS}
       fontWeight={700}
-      _hover={{ bg: "#ffc93c" }}
+      _hover={{ bg: "ffc93c" }}
+      _disabled={{ bg: "#5c4a12", color: "#8a7a3a", cursor: "not-allowed", opacity: 1, _hover: { bg: "#5c4a12" } }}
+      disabled={rest.disabled}
       onClick={rest.onClick}
     >
       {children}

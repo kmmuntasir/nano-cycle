@@ -1,4 +1,5 @@
-import { Box, HStack, Input, Stack, Text } from "@chakra-ui/react";
+import { useState } from "react";
+import { Box, HStack, Input, Stack, Text, Textarea } from "@chakra-ui/react";
 import { DangerOutlineButton, PrimaryButton, WarningButton } from "../ui/buttons";
 import type { RunState } from "../api";
 
@@ -57,10 +58,27 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
       <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={3} bg="#221b08" position="sticky" top="60px" zIndex={10}>
         <HStack gap={2} flexWrap="wrap">
           <Text fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
-            📋 Plan Ready — Approval Needed · tier {gate.plan.tier}
+            📋 Plan Ready — Approval Needed
           </Text>
           <Text fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
-            No Coder Runs Until You Approve
+            No Code Runs Until You Approve
+          </Text>
+          <Box flex="1" />
+          {showJump && (
+            <WarningButton onClick={onJump}>
+              Review →
+            </WarningButton>
+          )}
+        </HStack>
+      </Box>
+    );
+  }
+  if (gate.type === "security-override") {
+    return (
+      <Box border="1px solid" borderColor="#f16a6a" borderRadius="md" p={3} bg="#230f0f" position="sticky" top="60px" zIndex={10}>
+        <HStack gap={2} flexWrap="wrap">
+          <Text fontSize="13px" fontWeight={700} color="#f16a6a" fontFamily="system-ui, sans-serif">
+            🛡 Security Override Needed — {gate.findings?.length ?? 0} unfixable critical/high finding(s)
           </Text>
           <Box flex="1" />
           {showJump && (
@@ -86,9 +104,10 @@ export default function GatePanel({
   answerDrafts: Record<string, string>;
   setAnswerDrafts: (d: Record<string, string>) => void;
   onAnswers: (answers: Record<string, string>) => void;
-  onGate: (action: "approve" | "cancel") => void;
+  onGate: (action: "approve" | "reject" | "cancel", comments?: string) => void;
 }) {
   const gate = state.gate;
+  const [rejectComments, setRejectComments] = useState("");
   if (!gate) return null;
 
   if (gate.type === "answers" && gate.questions) {
@@ -216,12 +235,17 @@ export default function GatePanel({
     return (
       <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={4} bg="surface">
         <Text fontSize="14px" fontWeight={700} color="#f0b429" mb={2} fontFamily="system-ui, sans-serif">
-          Plan Approval — tier {plan.tier} · review before any code is written
+          Plan Approval — review before any code is written
         </Text>
         <Box border="1px solid" borderColor="line" borderRadius="md" p={3} mb={3}>
           <Text fontSize="12px" fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
             {plan.task_summary}
           </Text>
+          {plan.approach && (
+            <Text fontSize="11px" color="#c9cdd8" mt={2} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+              approach: {plan.approach}
+            </Text>
+          )}
         </Box>
         {plan.capabilities && plan.capabilities.length > 0 ? (
           <Box mb={3} overflowX="auto">
@@ -261,6 +285,11 @@ export default function GatePanel({
           </Box>
         ) : (
           <Stack gap={2} mb={3}>
+            {(plan.files?.length ?? 0) > 0 && (
+              <Text fontSize="11px" fontFamily="ui-monospace, monospace" whiteSpace="pre-wrap">
+                files: {plan.files!.join("\n       ")}
+              </Text>
+            )}
             {(plan.backend?.length ?? 0) > 0 && (
               <Text fontSize="11px" fontFamily="ui-monospace, monospace" whiteSpace="pre-wrap">
                 backend: {plan.backend!.join("\n         ")}
@@ -283,10 +312,82 @@ export default function GatePanel({
             </Text>
           ))}
         </Stack>
-        <HStack>
+        <HStack mt={2} alignItems="flex-start">
           <PrimaryButton onClick={() => onGate("approve")}>
             Approve & Continue
           </PrimaryButton>
+          <DangerOutlineButton onClick={() => onGate("cancel")}>
+            Cancel Run
+          </DangerOutlineButton>
+        </HStack>
+        <Box mt={3} border="1px dashed" borderColor="line" borderRadius="md" p={2}>
+          <Text fontSize="10px" color="muted" mb={1} fontFamily="system-ui, sans-serif">
+            Reject with comments — the builder revises the plan in its own session and resubmits:
+          </Text>
+          <HStack alignItems="flex-start">
+            <Textarea
+              value={rejectComments}
+              onChange={(e) => setRejectComments(e.target.value)}
+              placeholder="What must change before you approve…"
+              rows={2}
+              bg="surface2"
+              borderColor="line"
+              color="ink"
+              fontSize="12px"
+              fontFamily="system-ui, sans-serif"
+              _placeholder={{ color: "#8b91a0" }}
+              w="100%"
+            />
+            <WarningButton
+              disabled={!rejectComments.trim()}
+              onClick={() => {
+                onGate("reject", rejectComments.trim());
+                setRejectComments("");
+              }}
+            >
+              Reject ↓
+            </WarningButton>
+          </HStack>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (gate.type === "security-override" && gate.findings) {
+    return (
+      <Box border="1px solid" borderColor="#f16a6a" borderRadius="md" p={4} bg="surface">
+        <Text fontSize="14px" fontWeight={700} color="#f16a6a" mb={1} fontFamily="system-ui, sans-serif">
+          Security Override — {gate.findings.length} critical/high finding(s) not fixable in this run's scope
+        </Text>
+        <Text fontSize="11px" color="#c9cdd8" mb={3} fontFamily="system-ui, sans-serif">
+          Accept the risk (recorded on the run, verification continues) or cancel the run.
+        </Text>
+        <Stack gap={2} mb={4}>
+          {gate.findings.map((f, i) => (
+            <Box key={i} border="1px solid" borderColor="line" borderRadius="md" p={2}>
+              <HStack gap={2} flexWrap="wrap">
+                <Text fontSize="11px" fontWeight={700} color="#f16a6a" fontFamily="ui-monospace, monospace">
+                  [{f.severity}]
+                </Text>
+                <Text fontSize="12px" fontWeight={600} fontFamily="system-ui, sans-serif">
+                  {f.title}
+                </Text>
+              </HStack>
+              <Text fontSize="11px" color="#c9cdd8" mt={1} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+                {f.evidence}
+              </Text>
+              {f.fix && (
+                <Text fontSize="10px" color="muted" mt={1} fontFamily="system-ui, sans-serif">
+                  remediation: {f.fix}
+                </Text>
+              )}
+            </Box>
+          ))}
+        </Stack>
+        <HStack>
+          <WarningButton onClick={() => onGate("approve")}>
+            Accept Risk & Continue
+          </WarningButton>
           <DangerOutlineButton onClick={() => onGate("cancel")}>
             Cancel Run
           </DangerOutlineButton>

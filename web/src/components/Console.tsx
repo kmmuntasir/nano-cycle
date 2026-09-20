@@ -3,7 +3,7 @@ import { Box, Flex, Input, Text } from "@chakra-ui/react";
 import { SelectEl } from "../ui/controls";
 import { GhostButton, OutlineButton } from "../ui/buttons";
 import { fmtTimestamp, fmtTokens } from "../lib/format";
-import type { RunEvent, RunState } from "../api";
+import type { NodeState, RunEvent } from "../api";
 
 const titleCase = (s: string) =>
   s
@@ -111,7 +111,7 @@ export default function Console({
   eventsTotal,
 }: {
   events: RunEvent[];
-  nodes: RunState["nodes"];
+  nodes: NodeState[];
   nodeId: string | null;
   setNodeId: (id: string | null) => void;
   height?: string;

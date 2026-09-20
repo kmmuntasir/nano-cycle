@@ -36,7 +36,7 @@ export default function RunHeader({
   onCancel: () => void;
   onResume: () => void;
 }) {
-  const totalUsage = state.nodes.reduce(
+  const totalUsage = (state.steps ?? state.nodes ?? []).reduce(
     (acc, n) => ({ input: acc.input + n.usage.input, output: acc.output + n.usage.output }),
     { input: 0, output: 0 },
   );

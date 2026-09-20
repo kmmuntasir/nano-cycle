@@ -8,8 +8,10 @@ function groupOf(name: string, kind: string): string {
   if (kind === "input") return "Inputs";
   const n = name.toLowerCase();
   if (n.includes("spec") || n.includes("clarif")) return "Spec";
-  if (n.includes("plan")) return "Plans";
-  if (n.includes("verif")) return "Verify";
+  if (n.includes("plan") || n.includes("tasks")) return "Plans";
+  if (n.includes("impldelta") || n.includes("impl_delta")) return "Build";
+  if (n.includes("verif") || n.includes("audit")) return "Verify";
+  if (n.includes("security") || n.includes("scanner")) return "Security";
   return "Outputs";
 }
 
@@ -60,7 +62,7 @@ export default function Workbench({ state }: { state: RunState }) {
     }
     const order = ["Spec", "Plans", "Outputs", "Verify", "Inputs"];
     return out.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group) || a.name.localeCompare(b.name));
-  }, [state.artifacts, state.prompts, state.qa, state.mechanicalChecks, state.deferredChecks]);
+  }, [state.artifacts, state.prompts, state.qa, state.mechanicalChecks, state.deferredChecks, state.scannerResults, state.securityAccepted]);
 
   const [activeName, setActiveName] = useState<string | null>(null);
   useEffect(() => {

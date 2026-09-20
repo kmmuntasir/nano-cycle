@@ -9,6 +9,10 @@ export interface NodeState {
   startedAt: number | null;
   endedAt: number | null;
   error: string | null;
+  /** v2 step extras */
+  sessionFile?: string | null;
+  sessionFiles?: string[];
+  rounds?: number;
 }
 
 export interface ClarifyQuestion {
@@ -28,10 +32,14 @@ export interface QaRound {
   answers: Record<string, string>;
 }
 
+export type SecurityMode = "off" | "scan" | "scan+vapt";
+
 export interface RunState {
   id: string;
   task: string;
-  tier: string;
+  /** v2 has no tier; legacy v1 runs carry one. */
+  tier?: string;
+  version?: number;
   project: string;
   status: "running" | "awaiting-gate" | "awaiting-answers" | "completed" | "failed" | "cancelled" | "interrupted";
   createdAt: string;
@@ -39,32 +47,50 @@ export interface RunState {
   gateWaitMs: number;
   gateSince: number | null;
   models: Record<string, string>;
+  options?: {
+    clarify: boolean;
+    requireQuestions?: boolean;
+    maxFixRounds: number;
+    git: boolean;
+    audit: boolean;
+    approvePlan: boolean;
+    remoteCi: boolean;
+    security: SecurityMode;
+  };
   git?: {
     enabled: boolean;
     baseBranch: string;
     runBranch: string;
-    commits: { node: string; hash: string; files: string[] }[];
+    commits: { node?: string; subject?: string; hash: string; files: string[] }[];
     merged: boolean;
     mergeError: string | null;
   };
   gate: {
-    type?: "divergence" | "answers" | "plan-approval";
+    type?: "divergence" | "answers" | "plan-approval" | "security-override";
     nodeId: string;
     divergence?: string;
     questions?: ClarifyQuestion[];
     round?: number;
     plan?: PlanApproval;
+    findings?: { severity: string; title: string; evidence: string; fix: string | null }[];
   } | null;
   error: string | null;
-  nodes: NodeState[];
+  /** v2 */
+  steps?: NodeState[];
+  round?: number;
+  securityRound?: number;
+  securityAccepted?: { at: string; findings: string[] } | null;
+  scannerResults?: { round: number; at: string; scanners?: { id: string; title?: string; status: string; evidence: string }[] } | null;
+  /** v1 legacy */
+  nodes?: NodeState[];
   nodeModels?: Record<string, string>;
   prompts?: Record<string, string>;
-  artifacts: Record<string, unknown>;
   feedbackByNode?: Record<string, string>;
   writtenFiles?: Record<string, string[]>;
+  tickets?: { id: string; title: string; implIds: string[]; verifyId: string }[];
   deferredChecks?: { criterion: string; env: string; evidence?: string }[];
   qa?: QaRound[];
-  tickets?: { id: string; title: string; implIds: string[]; verifyId: string }[];
+  artifacts: Record<string, unknown>;
   remoteChecks?: {
     round: number;
     at: string;
@@ -80,9 +106,12 @@ export interface RunState {
 }
 
 export interface PlanApproval {
-  tier: string;
+  tier?: string;
   task_summary: string;
+  approach?: string;
   acceptance_criteria: string[];
+  files?: string[];
+  /** v1 legacy shape */
   capabilities?: {
     id: string;
     title: string;
@@ -104,7 +133,7 @@ export interface RunEvent {
 export interface RunSummary {
   id: string;
   task: string;
-  tier: string;
+  tier?: string;
   project: string;
   status: string;
   createdAt: string;
@@ -139,7 +168,6 @@ async function jfetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   models: () => jfetch<ModelInfo[]>(`/api/models?_=${Date.now()}`),
-  tiers: () => jfetch<Record<string, string[]>>(`/api/tiers?_=${Date.now()}`),
   roles: () => jfetch<Record<string, string>>(`/api/roles?_=${Date.now()}`),
   projects: () => jfetch<Project[]>(`/api/projects?_=${Date.now()}`),
   addProject: (name: string, path: string) =>
@@ -155,21 +183,20 @@ export const api = {
     jfetch<{ state: RunState; events: RunEvent[]; totalEvents?: number }>(`/api/runs/${id}`),
   start: (
     task: string,
-    tier: string,
     project: string,
     models: Record<string, string>,
-    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean; approvePlan?: boolean; remoteChecks?: boolean },
+    opts?: { clarify?: boolean; maxFixRounds?: number; git?: boolean; audit?: boolean; approvePlan?: boolean; remoteChecks?: boolean; security?: SecurityMode },
   ) =>
     jfetch<RunState>("/api/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ task, tier, project, models, ...opts }),
+      body: JSON.stringify({ task, project, models, ...opts }),
     }),
-  gate: (id: string, action: "approve" | "cancel") =>
+  gate: (id: string, action: "approve" | "reject" | "cancel", comments?: string) =>
     jfetch<{ ok: boolean }>(`/api/runs/${id}/gate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, comments }),
     }),
   answers: (id: string, answers: Record<string, string>) =>
     jfetch<{ ok: boolean }>(`/api/runs/${id}/answers`, {
@@ -179,11 +206,11 @@ export const api = {
     }),
   cancel: (id: string) => jfetch<{ ok: boolean }>(`/api/runs/${id}/cancel`, { method: "POST" }),
   resume: (id: string) => jfetch<{ ok: boolean }>(`/api/runs/${id}/resume`, { method: "POST" }),
-  setNodeModel: (id: string, node: string, model: string) =>
+  setNodeModel: (id: string, step: string, model: string) =>
     jfetch<{ ok: boolean }>(`/api/runs/${id}/model`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ node, model }),
+      body: JSON.stringify({ step, model }),
     }),
 };
 

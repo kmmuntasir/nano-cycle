@@ -3,7 +3,7 @@ import { Box, Flex, Stack, Text } from "@chakra-ui/react";
 import { GhostButton, OutlineButton, PrimaryButton } from "./ui/buttons";
 import Console from "./components/Console";
 import GatePanel, { GateBanner } from "./components/GatePanel";
-import PipelineLanes from "./components/PipelineLanes";
+import StepTimeline from "./components/StepTimeline";
 import RunHeader from "./components/RunHeader";
 import RunsSidebar from "./components/RunsSidebar";
 import Header from "./components/Header";
@@ -13,7 +13,8 @@ import StartForm from "./components/StartForm";
 import Workbench from "./components/Workbench";
 import { SelectEl, selectStyleMini } from "./ui/controls";
 import { api, openWs } from "./api";
-import type { ModelInfo, Project, RunEvent, RunState, RunSummary } from "./api";
+import type { ModelInfo, Project, RunEvent, RunState, RunSummary, SecurityMode } from "./api";
+import { orderedUnits } from "./lib/pipeline";
 
 function useNow(active: boolean): number {
   const [now, setNow] = useState(Date.now());
@@ -29,7 +30,6 @@ type Tab = "pipeline" | "console" | "artifacts" | "qa";
 
 export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [tiers, setTiers] = useState<Record<string, string[]>>({});
   const [roles, setRoles] = useState<Record<string, string>>({});
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState("sandbox");
@@ -50,7 +50,10 @@ export default function App() {
   const [showNew, setShowNew] = useState(false);
   const [connected, setConnected] = useState(false);
   const [task, setTask] = useState("");
-  const [tier, setTier] = useState("demo");
+  const [security, setSecurity] = useState<SecurityMode>(() => {
+    const v = localStorage.getItem("nano-cycle-security");
+    return v === "scan" || v === "scan+vapt" ? v : "off";
+  });
   const [modelPick, setModelPick] = useState<Record<string, string>>(() => {
     try {
       return JSON.parse(localStorage.getItem("nano-cycle-models") ?? "{}");
@@ -77,13 +80,17 @@ export default function App() {
     localStorage.setItem("nano-cycle-models", JSON.stringify(modelPick));
   }, [modelPick]);
 
+  useEffect(() => {
+    localStorage.setItem("nano-cycle-security", security);
+  }, [security]);
+
   const loadRun = useCallback(async (id: string) => {
     const { state: s, events: evs, totalEvents } = await api.getRun(id);
     setRunId(id);
     setState(s);
     setEvents(evs);
     setEventsTotal(totalEvents ?? evs.length);
-    setSelectedNode(s.nodes[0]?.id ?? null);
+    setSelectedNode(orderedUnits(s)[0]?.id ?? null);
     if (s.gate?.type === "answers" || s.gate?.type === "plan-approval") setTab("qa");
     else setTab((t) => (t === "qa" ? "pipeline" : t));
     history.replaceState(null, "", `?run=${id}`);
@@ -105,10 +112,6 @@ export default function App() {
 
   useEffect(() => {
     api.models().then(setModels).catch(() => {});
-    api.tiers().then((t) => {
-      setTiers(t);
-      setTier((cur) => (t[cur] ? cur : Object.keys(t)[0]));
-    }).catch(() => {});
     api.roles().then(setRoles).catch(() => {});
     api.projects().then((p) => {
       setProjects(p);
@@ -156,7 +159,7 @@ export default function App() {
   const start = async () => {
     setStarting(true);
     try {
-      const s = await api.start(task, tier, project, modelPick, { clarify, maxFixRounds, git: useGit, audit: useAudit, approvePlan, remoteChecks: remoteChecks && useGit });
+      const s = await api.start(task, project, modelPick, { clarify, maxFixRounds, git: useGit, audit: useAudit, approvePlan, remoteChecks: remoteChecks && useGit, security });
       setShowNew(false);
       setTask("");
       await loadRun(s.id);
@@ -213,12 +216,12 @@ export default function App() {
     }
   };
 
-  const handleGate = (action: "approve" | "cancel") => {
+  const handleGate = (action: "approve" | "reject" | "cancel", comments?: string) => {
     if (action === "cancel") {
       setConfirmCancel(true);
       return;
     }
-    if (runId) api.gate(runId, action);
+    if (runId) api.gate(runId, action, comments);
   };
 
   const handleResume = async () => {
@@ -247,9 +250,6 @@ export default function App() {
     <StartForm
       task={task}
       setTask={setTask}
-      tier={tier}
-      setTier={setTier}
-      tiers={tiers}
       roles={roles}
       models={models}
       modelPick={modelPick}
@@ -267,6 +267,8 @@ export default function App() {
       setApprovePlan={setApprovePlan}
       remoteChecks={remoteChecks}
       setRemoteChecks={setRemoteChecks}
+      security={security}
+      setSecurity={setSecurity}
       starting={starting}
       onStart={start}
       project={project}
@@ -422,13 +424,13 @@ export default function App() {
 
               {tab === "pipeline" && (
                 <Box border="1px solid" borderColor="line" borderRadius="lg" bg="surface" p={4}>
-                  <PipelineLanes
+                  <StepTimeline
                     state={state}
                     models={models}
                     now={now}
                     selectedNode={selectedNode}
                     setSelectedNode={setSelectedNode}
-                    onNodeModel={(node, model) => runId && api.setNodeModel(runId, node, model)}
+                    onStepModel={(step, model) => runId && api.setNodeModel(runId, step, model)}
                     onViewLogs={(id) => {
                       setSelectedNode(id);
                       setTab("console");
@@ -440,7 +442,7 @@ export default function App() {
                 <Box border="1px solid" borderColor="line" borderRadius="lg" bg="surface" p={3}>
                   <Console
                     events={events}
-                    nodes={state.nodes}
+                    nodes={orderedUnits(state)}
                     nodeId={selectedNode}
                     setNodeId={setSelectedNode}
                     runStart={runStart}
