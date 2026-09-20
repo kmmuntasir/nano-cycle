@@ -267,7 +267,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
                   try {
                     const r = await ticketsApi.import(project, { markdown: importText });
                     setImportText(""); setShowImport(false);
-                    setErr(`Imported ${r.tickets.length} ticket(s) from ${r.sourceDoc ?? "markdown"}`);
+                    setErr(`Imported ${r.created.length} ticket(s)${r.skipped.length ? `, skipped ${r.skipped.length} existing` : ""} from ${r.sourceDoc ?? "markdown"}`);
                     refresh();
                   } catch (e) { setErr(String(e)); }
                 }}
@@ -280,7 +280,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
                   try {
                     const r = await ticketsApi.import(project, { path: "docs/features.md" });
                     setImportText(""); setShowImport(false);
-                    setErr(`Imported ${r.tickets.length} ticket(s) from ${r.sourceDoc}`);
+                    setErr(`Imported ${r.created.length} ticket(s)${r.skipped.length ? `, skipped ${r.skipped.length} existing` : ""} from ${r.sourceDoc}`);
                     refresh();
                   } catch (e) { setErr(String(e)); }
                 }}

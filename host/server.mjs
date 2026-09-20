@@ -9,7 +9,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createEngine } from "./engine.mjs";
 import { MODEL_ROLES_V2 } from "./config.mjs";
 import { addProject, loadProjects, removeProject, resolveProject, SANDBOX_DIR } from "./projects.mjs";
-import { loadTickets, saveTickets, createTicket, updateTicket, deleteTicket, setQueueConfig } from "./tickets.mjs";
+import { loadTickets, saveTickets, createTicket, updateTicket, deleteTicket, setQueueConfig, importTickets } from "./tickets.mjs";
 import { importFromFile, parseFeaturesMarkdown } from "./backlog.mjs";
 import { createQueueManager } from "./queue.mjs";
 import * as git from "./git.mjs";
@@ -256,17 +256,24 @@ const server = http.createServer(async (req, res) => {
       if (req.method === "POST" && ticketsMatch[2] === "import") {
         const body = await readBody(req);
         try {
-          let imported;
-          if (body.markdown) {
+          let parsed;
+          if (body.json !== undefined) {
+            const arr = typeof body.json === "string" ? JSON.parse(body.json) : body.json;
+            if (!Array.isArray(arr) || arr.length === 0) throw new Error("json import needs a non-empty array of {id?, title, description?} tickets");
+            parsed = { tickets: arr, sourceDoc: body.sourceDoc ?? null };
+          } else if (body.markdown) {
             const tickets = parseFeaturesMarkdown(String(body.markdown));
             if (tickets.length === 0) throw new Error("no feature headings (F##/OMNI-###) found in the pasted markdown");
-            imported = { tickets, sourceDoc: body.sourceDoc ?? null };
+            parsed = { tickets, sourceDoc: body.sourceDoc ?? null };
           } else {
             let projectPath;
             try { projectPath = resolveProject(projectName).path; } catch { return json(res, 400, { error: `unknown project "${projectName}"` }); }
-            imported = importFromFile(projectPath, String(body.path ?? "docs/features.md"));
+            parsed = importFromFile(projectPath, String(body.path ?? "docs/features.md"));
           }
-          return json(res, 200, imported);
+          // Parse-then-CREATE: the import lands in the store (existing ids skipped).
+          const out = importTickets(projectName, parsed);
+          broadcast({ type: "tickets", project: projectName });
+          return json(res, 200, { ...out, sourceDoc: parsed.sourceDoc });
         } catch (e) { return json(res, 400, { error: String(e?.message ?? e) }); }
       }
       const ticketId = ticketsMatch[2];

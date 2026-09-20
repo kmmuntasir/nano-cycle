@@ -267,8 +267,8 @@ export const ticketsApi = {
     }),
   remove: (project: string, id: string) =>
     jfetch<{ ok: boolean }>(`/api/tickets/${encodeURIComponent(project)}/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  import: (project: string, body: { path?: string; markdown?: string }) =>
-    jfetch<{ tickets: Ticket[]; sourceDoc: string | null }>(`/api/tickets/${encodeURIComponent(project)}/import`, {
+  import: (project: string, body: { path?: string; markdown?: string; json?: unknown; sourceDoc?: string }) =>
+    jfetch<{ created: string[]; skipped: string[]; sourceDoc: string | null }>(`/api/tickets/${encodeURIComponent(project)}/import`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),

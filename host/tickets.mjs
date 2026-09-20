@@ -169,3 +169,41 @@ export function setQueueConfig(project, patch) {
   saveTickets(project, store);
   return store.config;
 }
+
+/** Import parsed tickets into the store (backlog import, pasted markdown, JSON).
+ *  Existing ids are skipped so re-importing a doc is idempotent; `done` tickets
+ *  (🟢/✅ markers) import as done. Dependencies may reference siblings created
+ *  later in the same batch (two-pass). Returns { created, skipped } id lists. */
+export function importTickets(project, { tickets, sourceDoc = null }) {
+  const created = [];
+  const skipped = [];
+  const pendingDeps = [];
+  for (const raw of tickets ?? []) {
+    const id = String(raw.id ?? "").trim();
+    if (id && loadTickets(project).tickets.some((x) => x.id === id)) {
+      skipped.push(id);
+      continue;
+    }
+    let t;
+    try {
+      t = createTicket(project, { id: id || undefined, title: raw.title, description: raw.description });
+    } catch {
+      skipped.push(id || "(invalid)");
+      continue;
+    }
+    const doc = raw.sourceDoc ?? sourceDoc;
+    if (doc) updateTicket(project, t.id, { sourceDoc: doc });
+    if (Array.isArray(raw.dependsOn) && raw.dependsOn.length > 0) pendingDeps.push([t.id, raw.dependsOn]);
+    if (raw.done === true) setTicketStatus(project, t.id, "done");
+    created.push(t.id);
+  }
+  // Second pass: deps are cycle-checked against the now-complete sibling set.
+  for (const [id, deps] of pendingDeps) {
+    try {
+      updateTicket(project, id, { dependsOn: deps });
+    } catch {
+      /* an unresolvable dep is dropped — the ticket imports dep-free rather than failing the batch */
+    }
+  }
+  return { created, skipped };
+}

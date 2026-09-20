@@ -1,7 +1,7 @@
 // Ticket store unit tests — TODO 5. Run: node tests/tickets.test.mjs
 import fs from "node:fs";
 import assert from "node:assert";
-import { createTicket, updateTicket, deleteTicket, setTicketStatus, loadTickets } from "../host/tickets.mjs";
+import { createTicket, updateTicket, deleteTicket, setTicketStatus, loadTickets, importTickets } from "../host/tickets.mjs";
 
 const results = [];
 const test = (name, fn) => {
@@ -56,6 +56,27 @@ test("status transitions recorded in history; blocked keeps reason", () => {
   assert.strictEqual(t.blockedReason, "gates-exhausted");
   assert.strictEqual(t.runId, "r-1");
   assert.deepStrictEqual(t.history.map((h) => h.to), ["draft", "clarifying", "clarified", "blocked"]);
+});
+
+test("importTickets: creates with sourceDoc + done flag, skips existing, forward deps", () => {
+  const out = importTickets("tick-import", {
+    tickets: [
+      { id: "F01", title: "one", description: "d1", done: false },
+      { id: "F02", title: "two", description: "d2", dependsOn: ["F03"], done: true },
+      { id: "F03", title: "three", description: "d3" },
+    ],
+    sourceDoc: "docs/features.md",
+  });
+  assert.deepStrictEqual(out, { created: ["F01", "F02", "F03"], skipped: [] });
+  const store = loadTickets("tick-import");
+  assert.strictEqual(store.tickets.length, 3);
+  assert.ok(store.tickets.every((t) => t.sourceDoc === "docs/features.md"), "sourceDoc provenance recorded");
+  assert.strictEqual(store.tickets.find((t) => t.id === "F02").status, "done", "🟢-style done flag imports as done");
+  assert.deepStrictEqual(store.tickets.find((t) => t.id === "F02").dependsOn, ["F03"], "dep on a later sibling resolves (two-pass)");
+  // re-import is idempotent
+  const again = importTickets("tick-import", { tickets: [{ id: "F01", title: "one", description: "d1" }], sourceDoc: "docs/features.md" });
+  assert.deepStrictEqual(again, { created: [], skipped: ["F01"] });
+  assert.strictEqual(loadTickets("tick-import").tickets.length, 3);
 });
 
 const failed = results.filter(([, ok]) => !ok).length;
