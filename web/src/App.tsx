@@ -244,6 +244,8 @@ export default function App() {
   const wall = state ? Math.max(0, (state.finishedAt ?? now) - (Date.parse(state.createdAt) || 0)) : 0;
   const gateMs = state ? (state.gateWaitMs ?? 0) + (state.gateSince && live ? Math.max(0, now - state.gateSince) : 0) : 0;
   const work = Math.max(0, wall - gateMs);
+  // The sidebar (and mobile picker) list only the SELECTED project's history.
+  const projectRuns = runs.filter((r) => r.project === project);
   const liveCount = runs.filter((r) => ["running", "awaiting-gate", "awaiting-answers"].includes(r.status)).length;
   const runStart = state ? Date.parse(state.createdAt) || Date.now() : Date.now();
 
@@ -329,7 +331,7 @@ export default function App() {
           <Text fontSize="10px" color="muted" letterSpacing="widest" mb={2} fontFamily="system-ui, sans-serif">
             Runs · {runs.length}
           </Text>
-          <RunsSidebar runs={runs} runId={runId} onSelect={openRun} />
+          <RunsSidebar runs={projectRuns} runId={runId} onSelect={openRun} />
         </Box>
 
         {/* main */}
@@ -389,7 +391,7 @@ export default function App() {
                 )}
               </Flex>
               <Box mt={6} display={{ base: "block", lg: "none" }}>
-                <RunsSidebar runs={runs} runId={runId} onSelect={openRun} />
+                <RunsSidebar runs={projectRuns} runId={runId} onSelect={openRun} />
               </Box>
             </Box>
           ) : (
