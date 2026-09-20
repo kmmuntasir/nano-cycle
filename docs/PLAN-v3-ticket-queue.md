@@ -1,6 +1,6 @@
 # nano-cycle v3 — Ticket Queue: backlog → batch clarification → sequential delivery
 
-**Status:** approved direction; implementation plan (sequenced TODOs at the end)
+**Status:** IMPLEMENTED on branch `v3-ticket-queue` — all suites green (17 engine scenarios + 3 watchdog + 5 tickets + 6 backlog + 5 queue = 36 checks). Live validation W1–W8 deferred to owner; merge + tag after.
 **Builds on:** v2.0.0 (four-step workflow — `docs/PLAN-v2-step-workflow.md`, fully owner-validated)
 **Branch:** `v3-ticket-queue`
 
@@ -271,66 +271,65 @@ stopAfterClarify/promote/tree-lock/onSettled.
 
 ### Phase 0 — Groundwork
 
-- [ ] **1. Branch + plan** — `git checkout -b v3-ticket-queue` from `main`; commit this doc.
-- [ ] **2. Engine: `stopAfterClarify` + `clarified` status** — settle after spec lock (or
+- [x] **1. Branch + plan** — `git checkout -b v3-ticket-queue` from `main`; commit this doc.
+- [x] **2. Engine: `stopAfterClarify` + `clarified` status** — settle after spec lock (or
   immediately when clarify off); harness scenario: run settles `clarified` with spec artifact,
   no build session created.
-- [ ] **3. Engine: `promote(id)` + phase-aware tree lock** — promote continues a `clarified`
+- [x] **3. Engine: `promote(id)` + phase-aware tree lock** — promote continues a `clarified`
   run through build/verify/security; second promote/tree-holding start rejected while one runs;
   clarify-only starts allowed in parallel. Harness: two parallel clarify-only runs → promote
   one → promote the other rejected → first settles → second promote succeeds.
-- [ ] **4. Engine: `onSettled` callback + `ticketId` passthrough** — callback fires on every
+- [x] **4. Engine: `onSettled` callback + `ticketId` passthrough** — callback fires on every
   terminal path (completed/failed/cancelled/clarified); ticketId stored in state. Harness
   asserts firing on the failure path specifically (the V12 lesson).
 
 ### Phase 1 — Ticket store
 
-- [ ] **5. `host/tickets.mjs`** — store, CRUD, transitions with history, persistence to
+- [x] **5. `host/tickets.mjs`** — store, CRUD, transitions with history, persistence to
   `tickets/<project>.json`, queue config block. Unit tests (fs fixture).
-- [ ] **6. `host/backlog.mjs` — parser** — `docs/features.md` → tickets (id/title/description/
+- [x] **6. `host/backlog.mjs` — parser** — `docs/features.md` → tickets (id/title/description/
   sourceDoc, 🔴/🟢 awareness), lenient headings, JSON import. Unit tests with the omni-isp
   features doc shape + edge cases.
-- [ ] **7. Server: ticket CRUD + import endpoints** — the five REST routes above; validation
+- [x] **7. Server: ticket CRUD + import endpoints** — the five REST routes above; validation
   errors as 400s. Curl smoke.
 
 ### Phase 2 — The queue
 
-- [ ] **8. `host/queue.mjs` — wave + settle bookkeeping** — startClarifyWave (parallel
+- [x] **8. `host/queue.mjs` — wave + settle bookkeeping** — startClarifyWave (parallel
   clarify-only runs via stopAfterClarify), onSettled → ticket transitions, blockedReason
   classification from run state. Unit harness with a fake engine.
-- [ ] **9. Pump + park + dependency cascade** — release, ready-set ordering (order, createdAt),
+- [x] **9. Pump + park + dependency cascade** — release, ready-set ordering (order, createdAt),
   tree-lock-aware promote loop, blocked cascade (transitive), retry/reclarify actions. Unit
   harness: W2's dependency scenario against the fake engine.
-- [ ] **10. Persistence + crash recovery** — queue snapshot broadcast, boot reconciliation
+- [x] **10. Persistence + crash recovery** — queue snapshot broadcast, boot reconciliation
   (interrupted runs → requeue), pause/resume. Unit: simulate restart by reconstructing the
   manager from disk.
-- [ ] **11. Server: queue + inbox endpoints** — actions, snapshots, aggregated Inbox. Curl smoke.
+- [x] **11. Server: queue + inbox endpoints** — actions, snapshots, aggregated Inbox. Curl smoke.
 
 ### Phase 3 — Prompts & freshness
 
-- [ ] **12. Spec-freshness framing** — `planning` skill + `builderSystem` staleness paragraph;
+- [x] **12. Spec-freshness framing** — `planning` skill + `builderSystem` staleness paragraph;
   queue maps divergence on promoted runs → `stale-spec`; `reclarify` seeds a fresh clarify run
   with the old spec + reason appended to the task.
 
 ### Phase 4 — GUI
 
-- [ ] **13. api.ts + Tickets view** — types, endpoints, Runs|Tickets switch, ticket table with
+- [x] **13. api.ts + Tickets view** — types, endpoints, Runs|Tickets switch, ticket table with
   status icons, create/edit, import dialog.
-- [ ] **14. PM Inbox** — aggregated answers screen (per-ticket groups, GatePanel answer
+- [x] **14. PM Inbox** — aggregated answers screen (per-ticket groups, GatePanel answer
   rendering reused), submit per ticket.
-- [ ] **15. Queue panel** — state chip, Release flow with batch spec review (Review-tab spec
+- [x] **15. Queue panel** — state chip, Release flow with batch spec review (Review-tab spec
   cards + checkboxes), pause/resume, blocked column with retry/reclarify, WS `queue` messages.
-- [ ] **16. Backlog flip integration** — queue posts `chore: mark F## done` on the base branch
+- [x] **16. Backlog flip integration** — queue posts `chore: mark F## done` on the base branch
   via existing git helpers; W1 verifies the doc actually flips.
 
 ### Phase 5 — Validation & ship
 
-- [ ] **17. Unit suites green** — engine harness (new scenarios), queue harness, store/parser
+- [x] **17. Unit suites green** — engine harness (new scenarios), queue harness, store/parser
   tests; `npm test` wires them all.
-- [ ] **18. Live W1–W8** (§9) on sandbox/git fixtures — owner-run discipline, record results
-  in `docs/V3-VALIDATION.md` (same format as V2's).
-- [ ] **19. README + docs refresh** — queue mode section, Inbox, tickets, guardrails.
-- [ ] **20. Merge + tag** — ff-merge `v3-ticket-queue` → `main`, tag `v3.0.0`, push.
+- [~] **18. Live W1–W8** — **deferred to owner** (same discipline as V1–V12: implement on the branch, validate against the real system, record in `docs/V3-VALIDATION.md`).
+- [x] **19. README + docs refresh** — queue mode section, Inbox, tickets, guardrails.
+- [ ] **20. Merge + tag** — BLOCKED ON OWNER VALIDATION (W1–W8): ff-merge `v3-ticket-queue` → `main`, tag `v3.0.0`, push.
 
 ---
 
