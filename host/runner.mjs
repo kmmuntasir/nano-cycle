@@ -1,6 +1,11 @@
-// Node runner — one pi SDK AgentSession per node. The driver owns 100% of the
-// context: system prompt override, zero context-file/skill discovery, explicit
-// tool allowlists, schema'd report_artifact for structured output.
+// Node/step runner — pi SDK sessions for pipeline nodes (v1) and v2 step
+// sessions. The driver owns 100% of the context: system prompt override, zero
+// context-file discovery, explicit tool allowlists, schema'd milestone tools.
+//
+// v2 additions (additive): per-step bundled-skill filtering and openStepSession
+// — persistent sessions stored under runs/<id>/sessions that survive close and
+// server restart (docs/SPIKE-NOTES.md).
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -14,10 +19,9 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
-// Nano-cycle's bundled skills — vendored under <root>/skills and loaded for
-// EVERY node in EVERY project, regardless of what the system or the target
-// repo has. The session appends them to the driver's system prompt whenever
-// the node has a file-read tool (all nodes do).
+// Nano-cycle's bundled skills — vendored under <root>/skills and injected per
+// step (v2) or wholesale (v1 nodes). Repo-local skills stay ignored by design:
+// the driver owns the context; bundled skills are the one deliberate exception.
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUNDLED_SKILLS_DIR = path.join(ROOT_DIR, "skills");
 let bundledSkillsCache = null;
@@ -30,6 +34,29 @@ function bundledSkills() {
     }
   }
   return bundledSkillsCache;
+}
+
+// v2: which bundled skills each step's session carries. Step system prompts
+// FORCE the mandatory phase skill loads by absolute path — the description-
+// triggered progressive disclosure is not relied upon for phase law.
+export const SKILLS_BY_STEP = {
+  clarify: ["markdown-writer"],
+  build: ["planning", "task-breakdown", "implementation", "markdown-writer"],
+  verify: ["verification", "audit-deliverables", "markdown-writer"],
+  security: ["security-scan", "vapt", "markdown-writer"],
+};
+
+/** Skills visible to one step (v2) — all bundled skills when stepId is unknown (v1). */
+export function bundledSkillsForStep(stepId) {
+  const all = bundledSkills();
+  const allow = SKILLS_BY_STEP[stepId];
+  if (!allow) return all;
+  return { skills: all.skills.filter((s) => allow.includes(s.name)), diagnostics: all.diagnostics };
+}
+
+/** Absolute SKILL.md dir for a skill name (for system-prompt path injection). */
+export function skillDirFor(name) {
+  return path.join(BUNDLED_SKILLS_DIR, name);
 }
 
 function resolveModel(spec, modelRuntime) {
@@ -53,7 +80,7 @@ function makeReportTool(schema, store) {
   });
 }
 
-/** Generic structured-output tool factory (clarify phase uses ask/finalize tools). */
+/** Generic structured-output tool factory (clarify + v2 milestone tools use it). */
 export function makeTool({ name, label, description, schema, onCall }) {
   return defineTool({
     name,
@@ -96,66 +123,12 @@ const preview = (v, max = 160) => {
   return s.length > max ? s.slice(0, max) + "…" : s;
 };
 
-/**
- * Run one node to completion. Returns the reported artifact.
- * onEvent(nodeId, ev) receives normalized UI events.
- * tools = allowlist strings; customTools = tool definitions (their names must
- * appear in `tools` to be reachable).
- */
-export async function runNode({ nodeId, tools, customTools = [], artifactStore, requireArtifact = true, systemPrompt, prompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking }) {
-  const store = artifactStore ?? { artifacts: [] };
-  const { model, thinking: lvl } = resolveModel(modelSpec, modelRuntime);
-  if (modelSpec && modelSpec !== "auto" && !model) {
-    throw new Error(`model "${modelSpec}" did not resolve`);
-  }
+// --- shared session plumbing (v1 runNode + v2 openStepSession) ----------------
 
-  const bundled = bundledSkills();
-  const loader = new DefaultResourceLoader({
-    cwd,
-    agentDir: getAgentDir(),
-    // The driver owns the context — no runtime discovery of anything EXCEPT
-    // nano-cycle's own bundled skills, which every node gets everywhere.
-    systemPromptOverride: () => systemPrompt,
-    agentsFilesOverride: () => ({ agentsFiles: [] }),
-    skillsOverride: (current) => ({
-      skills: bundled.skills,
-      diagnostics: [...(current?.diagnostics ?? []), ...bundled.diagnostics],
-    }),
-  });
-  await loader.reload();
-
-  const { session } = await createAgentSession({
-    cwd,
-    modelRuntime,
-    ...(model ? { model } : {}),
-    ...(lvl ?? thinking ? { thinkingLevel: lvl ?? thinking } : {}),
-    tools, // allowlist is the enforcement
-    customTools,
-    resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(cwd),
-    settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 } }),
-  });
-
-  // Stall watchdog: a provider connection can hang mid-stream with no events.
-  // If nothing arrives for stallMs, abort the attempt — execNode retries it.
-  const stallMs = Number(process.env.NANO_STALL_TIMEOUT_MS ?? 300_000);
+/** Normalize SDK session events into GUI events; returns { unsubscribe, touch }. */
+function attachEventBridge(session, nodeId, onEvent) {
   let lastActivity = Date.now();
-  let stalled = false;
   const touch = () => (lastActivity = Date.now());
-  const stallTimer =
-    stallMs > 0
-      ? setInterval(() => {
-          if (Date.now() - lastActivity >= stallMs) {
-            stalled = true;
-            onEvent(nodeId, {
-              t: "notice",
-              s: `stalled: no activity for ${Math.round(stallMs / 1000)}s — aborting attempt`,
-            });
-            session.abort().catch(() => {});
-          }
-        }, 5_000)
-      : null;
-
   const unsubscribe = session.subscribe((evt) => {
     touch();
     switch (evt.type) {
@@ -183,6 +156,68 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
         break;
     }
   });
+  return { unsubscribe, touch, lastActivityRef: () => lastActivity };
+}
+
+/** Stall watchdog: abort the session if nothing arrives for stallMs. Returns a
+ *  clearer; the caller checks didStall() after prompt() settles. */
+const STALL_MS = Number(process.env.NANO_STALL_TIMEOUT_MS ?? 300_000);
+function startStallWatchdog(lastActivityRef, onAbort) {
+  let stalled = false;
+  if (STALL_MS <= 0) return { clear: () => {}, didStall: () => false };
+  const timer = setInterval(() => {
+    if (Date.now() - lastActivityRef() >= STALL_MS) {
+      stalled = true;
+      onAbort();
+    }
+  }, 5_000);
+  return { clear: () => clearInterval(timer), didStall: () => stalled };
+}
+
+function buildLoader({ cwd, systemPrompt, stepId }) {
+  const bundled = bundledSkillsForStep(stepId);
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    // The driver owns the context — no runtime discovery of anything EXCEPT
+    // nano-cycle's own bundled skills (filtered per step in v2).
+    systemPromptOverride: () => systemPrompt,
+    agentsFilesOverride: () => ({ agentsFiles: [] }),
+    skillsOverride: (current) => ({
+      skills: bundled.skills,
+      diagnostics: [...(current?.diagnostics ?? []), ...bundled.diagnostics],
+    }),
+  });
+  return loader.reload().then(() => loader);
+}
+
+/**
+ * Run one node to completion (v1 pipeline + v2 ephemeral children). Returns the
+ * reported artifact. onEvent(nodeId, ev) receives normalized UI events.
+ */
+export async function runNode({ nodeId, tools, customTools = [], artifactStore, requireArtifact = true, systemPrompt, prompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking, stepId }) {
+  const store = artifactStore ?? { artifacts: [] };
+  const { model, thinking: lvl } = resolveModel(modelSpec, modelRuntime);
+  if (modelSpec && modelSpec !== "auto" && !model) {
+    throw new Error(`model "${modelSpec}" did not resolve`);
+  }
+
+  const loader = await buildLoader({ cwd, systemPrompt, stepId });
+
+  const { session } = await createAgentSession({
+    cwd,
+    modelRuntime,
+    ...(model ? { model } : {}),
+    ...(lvl ?? thinking ? { thinkingLevel: lvl ?? thinking } : {}),
+    tools, // allowlist is the enforcement
+    customTools,
+    resourceLoader: loader,
+    sessionManager: SessionManager.inMemory(cwd),
+    settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 } }),
+  });
+
+  const bridge = attachEventBridge(session, nodeId, onEvent);
+  const watchdog = startStallWatchdog(bridge.lastActivityRef, () => session.abort().catch(() => {}));
 
   if (signal) {
     signal.addEventListener(
@@ -213,17 +248,89 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
       }
     }
   } finally {
-    if (stallTimer) clearInterval(stallTimer);
-    unsubscribe();
+    watchdog.clear();
+    bridge.unsubscribe();
   }
-  if (stalled && store.artifacts.length === 0) {
-    throw new Error(`stalled: no activity for ${Math.round(stallMs / 1000)}s`);
+  if (watchdog.didStall() && store.artifacts.length === 0) {
+    throw new Error(`stalled: no activity for ${Math.round(STALL_MS / 1000)}s`);
   }
 
   if (requireArtifact && store.artifacts.length === 0) {
     throw new Error(`${nodeId}: completed without report_artifact`);
   }
   return store.artifacts[store.artifacts.length - 1];
+}
+
+/**
+ * v2: open (or create) one PERSISTENT step session. The session file lives in
+ * `sessionsDir` (runs/<id>/sessions) so the step survives handle close and
+ * server restarts — the build step's fix rounds resume THIS session (amendment 1).
+ *
+ * Returns { session, sessionFile, prompt(text), lastError(), abort(), close() }.
+ * - prompt(text): one full model turn; throws on provider error or stall.
+ * - The event bridge stays attached for the handle's lifetime; the watchdog is
+ *   per-turn. The system prompt comes from the loader on every (re)open, so a
+ *   resumed session gets the same (or evolved) step law — see SPIKE-NOTES (e).
+ */
+export async function openStepSession({ stepId, sessionFile, sessionsDir, tools, customTools = [], systemPrompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking }) {
+  const { model, thinking: lvl } = resolveModel(modelSpec, modelRuntime);
+  if (modelSpec && modelSpec !== "auto" && !model) {
+    throw new Error(`model "${modelSpec}" did not resolve`);
+  }
+  const loader = await buildLoader({ cwd, systemPrompt, stepId });
+
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const resume = sessionFile && fs.existsSync(sessionFile);
+  const mgr = resume ? SessionManager.open(sessionFile) : SessionManager.create(cwd, sessionsDir);
+  const { session } = await createAgentSession({
+    cwd,
+    modelRuntime,
+    ...(model ? { model } : {}),
+    ...(lvl ?? thinking ? { thinkingLevel: lvl ?? thinking } : {}),
+    tools,
+    customTools,
+    resourceLoader: loader,
+    sessionManager: mgr,
+    settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 } }),
+  });
+  const file = mgr.getSessionFile();
+  if (!file) throw new Error("persistent session did not expose its file (getSessionFile)");
+
+  const bridge = attachEventBridge(session, stepId, onEvent);
+  const onAbort = () => session.abort().catch(() => {});
+  signal?.addEventListener("abort", onAbort, { once: true });
+
+  let lastStall = null;
+  const prompt = async (text) => {
+    const watchdog = startStallWatchdog(bridge.lastActivityRef, () => {
+      lastStall = STALL_MS;
+      onAbort();
+    });
+    try {
+      await session.prompt(text);
+      const last = session.messages.filter((m) => m.role === "assistant").pop();
+      if (last?.stopReason === "error") {
+        throw new Error(last.errorMessage ?? "provider call failed");
+      }
+    } finally {
+      watchdog.clear();
+    }
+    if (lastStall && !session.messages.some((m) => m.role === "assistant" && m.stopReason === "end")) {
+      throw new Error(`stalled: no activity for ${Math.round(lastStall / 1000)}s`);
+    }
+  };
+
+  return {
+    session,
+    sessionFile: file,
+    resumed: resume,
+    prompt,
+    abort: onAbort,
+    close: () => {
+      bridge.unsubscribe();
+      signal?.removeEventListener("abort", onAbort);
+    },
+  };
 }
 
 export { addUsage };
