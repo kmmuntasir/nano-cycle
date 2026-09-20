@@ -331,6 +331,8 @@ const server = http.createServer(async (req, res) => {
         approvePlan: body.approvePlan !== false,
         remoteChecks: body.remoteChecks === true,
         security,
+        ticketId: body.ticketId ?? null, // v3: joins the run to its ticket (watcher/Inbox provenance)
+        stopAfterClarify: body.stopAfterClarify === true, // v3: park as 'clarified' for queue promotion
       });
       return json(res, 201, state);
     }

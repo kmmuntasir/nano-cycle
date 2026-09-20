@@ -64,6 +64,32 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
     [project, refresh],
   );
 
+  // Direct "Run now" (plan §6): a plain v2 run seeded from the ticket text —
+  // bypasses the queue, respects the tree lock, uses the queue config's models.
+  const runNow = useCallback(
+    async (t: Ticket) => {
+      setBusy(true);
+      setErr(null);
+      try {
+        const cfg = store?.config;
+        const s = await api.start([t.title, t.description].filter(Boolean).join("\n\n"), project, cfg?.models ?? {}, {
+          maxFixRounds: cfg?.options.maxFixRounds,
+          git: cfg?.options.git,
+          audit: cfg?.options.audit,
+          remoteChecks: cfg?.options.remoteChecks,
+          security: cfg?.options.security,
+          ticketId: t.id,
+        });
+        onOpenRun(s.id);
+      } catch (e) {
+        setErr(String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [project, store, onOpenRun],
+  );
+
   if (!store) {
     return (
       <Box border="1px dashed" borderColor="line" borderRadius="md" p={6} textAlign="center">
@@ -306,6 +332,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
                 onDelete={async () => { await ticketsApi.remove(project, t.id); refresh(); }}
                 onRetry={async () => { await act({ action: "retry", ticketId: t.id }); refresh(); }}
                 onReclarify={async () => { await act({ action: "reclarify", ticketId: t.id }); refresh(); }}
+                onRunNow={runNow}
               />
             ))}
           </Stack>
@@ -316,13 +343,14 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
 }
 
 function TicketRow({
-  t, onOpenRun, onDelete, onRetry, onReclarify,
+  t, onOpenRun, onDelete, onRetry, onReclarify, onRunNow,
 }: {
   t: Ticket;
   onOpenRun: (runId: string) => void;
   onDelete: () => void;
   onRetry: () => void;
   onReclarify: () => void;
+  onRunNow: (t: Ticket) => void;
 }) {
   const meta = STATUS_ICON[t.status] ?? STATUS_ICON.draft;
   return (
@@ -369,6 +397,11 @@ function TicketRow({
               Re-clarify
             </OutlineButton>
           </>
+        )}
+        {["draft", "blocked"].includes(t.status) && (
+          <OutlineButton size="xs" onClick={() => onRunNow(t)} title="Start a plain run for this ticket now — bypasses the queue, respects the tree lock.">
+            ▶ Run
+          </OutlineButton>
         )}
         {["draft", "blocked"].includes(t.status) && (
           <DangerOutlineButton size="xs" onClick={onDelete}>✕</DangerOutlineButton>

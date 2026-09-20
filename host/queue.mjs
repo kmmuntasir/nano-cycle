@@ -225,7 +225,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       // promotes the next ticket — its branch checkout would race the commit.
       flip = flipBacklog(project, t);
     } else if (status === "failed") {
-      setTicketStatus(project, ticketId, "blocked", { reason: "gates-exhausted", runId });
+      setTicketStatus(project, ticketId, "blocked", { reason: classifyFailure(runId), runId });
     } else if (status === "cancelled") {
       // Cancelled by the park watcher (gate) or by the owner — either way the
       // ticket is blocked/parked for review; retry resumes the run from disk.
@@ -251,6 +251,23 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       pump(project);
     };
     Promise.resolve(flip).catch(() => {}).finally(finish);
+  }
+
+  // §2.4: classify the blockedReason from the run's own error record. Gate
+  // failures say "gates still failing…" / "security findings not fixed…";
+  // provider-type errors (watchdog aborts, rate limits, credit exhaustion)
+  // are provider-failures — a different owner decision than a gate verdict.
+  const PROVIDER_FAILURE_RE =
+    /abort|stall|provider|rate.?limit|credit|quota|timeout|insufficient|overloaded|network|econn|fetch failed|socket|dns|429|503/i;
+  function classifyFailure(runId) {
+    try {
+      const runFile = path.join(path.resolve(import.meta.dirname, ".."), "runs", runId, "state.json");
+      const st = JSON.parse(fs.readFileSync(runFile, "utf8"));
+      if (PROVIDER_FAILURE_RE.test(String(st.error ?? ""))) return "provider-failures";
+    } catch {
+      /* no state on disk — default bucket */
+    }
+    return "gates-exhausted";
   }
 
   // A completed ticket releases its dependents: dependency-blocked tickets

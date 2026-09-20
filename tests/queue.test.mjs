@@ -383,6 +383,36 @@ await test("Q11: a wave whose starts all fail can't stick the queue at 'clarifyi
   assert.strictEqual((await store("q11")).queue.state, "idle", "state advanced instead of sticking");
 });
 
+// --- Q12: failed-build classification from the run's error record ------------------
+
+async function seedFailedRunWithError(rid, error) {
+  fs.mkdirSync(path.join(ROOT, "runs", rid), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, "runs", rid, "state.json"), JSON.stringify({ id: rid, status: "failed", error }));
+}
+
+await test("Q12: gates failures vs provider failures classify differently (§2.4)", async () => {
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, null);
+  await seedProject("q12", [
+    { id: "F1", title: "gates", description: "d", status: "queued", runId: "run-q12-a" },
+    { id: "F2", title: "provider", description: "d", status: "queued", runId: "run-q12-b" },
+  ], "running");
+  await seedFailedRunWithError("run-q12-a", "gates still failing after 2 fix round(s): verify: 1 failing check(s)");
+  await seedFailedRunWithError("run-q12-b", "provider stall detected — aborting the session");
+  for (const rid of ["run-q12-a", "run-q12-b"]) {
+    engine.runs.set(rid, { id: rid, status: "clarified", holdsTree: false, settled: true, opts: { onSettled: () => {} } });
+  }
+  mgr.pump("q12"); // promotes F1
+  await sleep(10);
+  await engine.finishBuild("run-q12-a", "failed");
+  await engine.finishBuild("run-q12-b", "failed");
+  const st = await store("q12");
+  const byId = Object.fromEntries(st.tickets.map((t) => [t.id, t]));
+  assert.strictEqual(byId.F1.blockedReason, "gates-exhausted", "a gate verdict parks as gates-exhausted");
+  assert.strictEqual(byId.F2.blockedReason, "provider-failures", "a provider-type error parks as provider-failures");
+  for (const rid of ["run-q12-a", "run-q12-b"]) fs.rmSync(path.join(ROOT, "runs", rid), { recursive: true, force: true });
+});
+
 process.on("exit", () => { try { fs.rmSync(path.join(ROOT, "tickets"), { recursive: true, force: true }); } catch {} });
 
 const failed = results.filter(([, ok]) => !ok).length;
