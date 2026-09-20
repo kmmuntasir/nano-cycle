@@ -146,12 +146,6 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, models);
     }
 
-    if (url.pathname === "/api/tiers" && req.method === "GET") {
-      // v2: tiers are gone (four-step workflow). Kept as {} during GUI migration;
-      // removed at cleanup.
-      return json(res, 200, {});
-    }
-
     if (url.pathname === "/api/roles" && req.method === "GET") {
       return json(res, 200, MODEL_ROLES_V2);
     }

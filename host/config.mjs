@@ -8,54 +8,6 @@
 import { Type } from "typebox";
 
 export const ARTIFACT_SCHEMAS = {
-  // static plan (demo/S/M): one slice split into two halves
-  plan: Type.Object({
-    task_summary: Type.String({ description: "One-paragraph restatement of the task" }),
-    backend: Type.Array(
-      Type.Object({ path: Type.String(), purpose: Type.String() }),
-      { description: "Backend files to create/modify (empty if none)" },
-    ),
-    frontend: Type.Array(
-      Type.Object({ path: Type.String(), purpose: Type.String() }),
-      { description: "Frontend files to create/modify (empty if none)" },
-    ),
-    acceptance_criteria: Type.Array(Type.String(), { description: "Verifiable checks" }),
-    divergence: Type.Optional(
-      Type.String({ description: "ONLY if the task is not doable as specified — explain why and stop" }),
-    ),
-  }),
-  // capability plan (L): a graph of capabilities the engine compiles into coder nodes
-  plan_caps: Type.Object({
-    task_summary: Type.String({ description: "One-paragraph restatement of the task" }),
-    capabilities: Type.Array(
-      Type.Object({
-        id: Type.String({ description: "Short slug, unique, e.g. customer-crud" }),
-        title: Type.String({ description: "What this capability delivers" }),
-        backend: Type.Array(
-          Type.Object({ path: Type.String(), purpose: Type.String() }),
-          { description: "Backend files (empty if none)" },
-        ),
-        frontend: Type.Array(
-          Type.Object({ path: Type.String(), purpose: Type.String() }),
-          { description: "Frontend files (empty if none)" },
-        ),
-        dependsOn: Type.Array(Type.String(), {
-          description: "Capability ids that must finish before this one starts",
-        }),
-        single_side_class: Type.Optional(
-          Type.Union(
-            ["plumbing", "devops", "qa", "no-counterpart"].map((c) => Type.Literal(c)),
-            { description: "REQUIRED when exactly one side is empty: why this capability legally has no counterpart" },
-          ),
-        ),
-      }),
-      { description: "2–6 capabilities; each independently implementable; a file belongs to exactly one capability-side" },
-    ),
-    acceptance_criteria: Type.Array(Type.String(), { description: "Verifiable checks for the WHOLE task" }),
-    divergence: Type.Optional(
-      Type.String({ description: "ONLY if the task is not doable as specified — explain why and stop" }),
-    ),
-  }),
   implement: Type.Object({
     summary: Type.String(),
     files_written: Type.Array(Type.String()),
@@ -163,108 +115,6 @@ export const ARTIFACT_SCHEMAS = {
 // files (AGENTS.md / CLAUDE.md / .claude/rules/*) are injected on top by
 // host/rules.mjs. Verify/audit carry no coding rules: their method lives in
 // their system prompts (host/prompts.mjs).
-const IMPLEMENT_RULES = `
-Rules (binding):
-- Implement the task FULLY — every artifact the task, the spec's acceptance criteria, and the injected rules require. No stubs, no TODOs, no placeholder logic.
-- TypeScript strict where applicable; no \`any\`.
-- Run lint and tests for what you changed before reporting; fix what they surface. If no test setup exists, follow the injected testing rules if present.
-- Stay inside your assigned files — sibling coder nodes are working on other files concurrently. On fix rounds: fix ONLY your assigned gaps; do not refactor unrelated code.
-- If a command needs something unavailable, surface it instead of pretending success.
-- Report honestly: summary of what you built, files_written, and notes (decisions made, deviations from the plan and why).
-`.trim();
-
-export const NODE_PROFILES = {
-  plan: {
-    title: "Plan",
-    tools: ["read", "grep", "find", "ls", "report_artifact"],
-    thinking: "high",
-    schema: ARTIFACT_SCHEMAS.plan,
-    role: "plan",
-  },
-  implement: {
-    title: "Implement",
-    tools: ["read", "write", "edit", "bash", "report_artifact"],
-    thinking: "high",
-    schema: ARTIFACT_SCHEMAS.implement,
-    role: "backend",
-    rules: IMPLEMENT_RULES,
-  },
-  verify: {
-    title: "Verify",
-    tools: ["read", "bash", "report_artifact"],
-    thinking: "high",
-    schema: ARTIFACT_SCHEMAS.verify,
-    role: "verify",
-  },
-  audit: {
-    title: "Audit",
-    tools: ["read", "bash", "report_artifact"],
-    thinking: "high",
-    schema: ARTIFACT_SCHEMAS.audit,
-    role: "audit",
-  },
-};
-
-// Role = which model/config slot a node uses. Capability-derived coder nodes
-// (impl-<cap>-be / impl-<cap>-fe) resolve to the backend/frontend roles, so a
-// single run can drive N parallel backend coders and M parallel frontend coders.
-export function profileFor(nodeId) {
-  if (nodeId === "plan") return NODE_PROFILES.plan;
-  // "verify" and per-ticket "verify-<capId>" nodes share the verify profile
-  if (nodeId === "verify" || nodeId.startsWith("verify-")) return NODE_PROFILES.verify;
-  if (nodeId === "audit") return NODE_PROFILES.audit;
-  if (nodeId === "implement") return NODE_PROFILES.implement;
-  if (nodeId.endsWith("-be")) return { ...NODE_PROFILES.implement, lane: "backend" };
-  if (nodeId.endsWith("-fe")) return { ...NODE_PROFILES.implement, lane: "frontend" };
-  throw new Error(`unknown node: ${nodeId}`);
-}
-
-export function roleOf(nodeId) {
-  return profileFor(nodeId).role;
-}
-
-export const MODEL_ROLES = {
-  clarify: "PM (clarify)",
-  plan: "Plan",
-  backend: "Backend coder",
-  frontend: "Frontend coder",
-  verify: "Verify",
-  audit: "Audit",
-};
-
-export const TIERS = {
-  // demo: single-file scratch task
-  demo: [
-    { id: "plan", dependsOn: [] },
-    { id: "implement", dependsOn: ["plan"] },
-    { id: "verify", dependsOn: ["implement"] },
-  ],
-  // S: skip planning — one coding node, then the gate
-  S: [
-    { id: "implement", dependsOn: [] },
-    { id: "verify", dependsOn: ["implement"] },
-  ],
-  // M: one slice — plan splits into BE/FE halves; the engine compiles ONLY the
-  // halves that have files, so an unused side never spawns a coder.
-  M: [{ id: "plan", dependsOn: [] }],
-  // L: DYNAMIC — the plan decomposes into capabilities; the engine compiles each
-  // into backend/frontend coder nodes with capability-level dependencies. The
-  // resulting graph can have any number of parallel coders per side.
-  L: [{ id: "plan", dependsOn: [] }],
-};
-
-export const MAX_FIX_ROUNDS = 2;
-export const DEFAULT_TIER = "demo";
-export const LEGAL_SINGLE_SIDES = ["plumbing", "devops", "qa", "no-counterpart"];
-
-// Clarify (PM) phase — Step 1 of the two-step flow: ask → answers → repeat.
-// UNCAPPED by design: the PM decides when nothing essential remains unknown.
-// The owner can always cancel from the GUI.
-export const CLARIFY_PROFILE = {
-  tools: ["read", "grep", "find", "ls", "investigate", "ask_questions", "finalize_spec"],
-  thinking: "high",
-};
-
 // ============================================================================
 // v2 — the four-step workflow (docs/PLAN-v2-step-workflow.md). Additive: v1
 // exports above stay until the engine switch + cleanup phase.
@@ -484,3 +334,6 @@ export function validateTasks(tasks, plan) {
 function pathNormalize(p) {
   return String(p).replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/g, "").toLowerCase();
 }
+
+// Fix-round budgets (driver-enforced).
+export const MAX_FIX_ROUNDS = 2;
