@@ -1,0 +1,24 @@
+{
+  "project": "sandbox",
+  "config": {
+    "models": {
+      "clarify": "auto",
+      "builder": "auto",
+      "verifier": "auto",
+      "security": "auto"
+    },
+    "options": {
+      "git": true,
+      "audit": true,
+      "security": "off",
+      "maxFixRounds": 2,
+      "remoteChecks": false
+    }
+  },
+  "tickets": [],
+  "queue": {
+    "state": "idle",
+    "pausedAt": null
+  },
+  "updatedAt": "2026-09-20T20:35:10.102Z"
+}

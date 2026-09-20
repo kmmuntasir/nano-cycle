@@ -9,6 +9,8 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createEngine } from "./engine.mjs";
 import { MODEL_ROLES_V2 } from "./config.mjs";
 import { addProject, loadProjects, removeProject, resolveProject, SANDBOX_DIR } from "./projects.mjs";
+import { loadTickets, saveTickets, createTicket, updateTicket, deleteTicket, setQueueConfig } from "./tickets.mjs";
+import { importFromFile, parseFeaturesMarkdown } from "./backlog.mjs";
 import { detectWebCapabilities, makeWebReaderTool, makeWebSearchTool } from "./webtools.mjs";
 import { newRunId, runsDir, saveState, appendEvent, listRuns, loadRun } from "./state.mjs";
 
@@ -178,6 +180,55 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/runs" && req.method === "GET") {
       return json(res, 200, listRuns());
+    }
+
+    // --- v3 ticket store ---
+    const ticketsMatch = url.pathname.match(/^\/api\/tickets\/([^/]+)(?:\/([\w.-]+))?$/);
+    if (ticketsMatch) {
+      const projectName = decodeURIComponent(ticketsMatch[1]);
+      let store;
+      try { store = loadTickets(projectName); } catch (e) { return json(res, 500, { error: String(e?.message ?? e) }); }
+      if (req.method === "GET" && !ticketsMatch[2]) return json(res, 200, store);
+      if (req.method === "POST" && !ticketsMatch[2]) {
+        const body = await readBody(req);
+        try {
+          const t = createTicket(projectName, body);
+          broadcast({ type: "tickets", project: projectName });
+          return json(res, 201, t);
+        } catch (e) { return json(res, 400, { error: String(e?.message ?? e) }); }
+      }
+      if (req.method === "POST" && ticketsMatch[2] === "import") {
+        const body = await readBody(req);
+        try {
+          let imported;
+          if (body.markdown) {
+            const tickets = parseFeaturesMarkdown(String(body.markdown));
+            if (tickets.length === 0) throw new Error("no feature headings (F##/OMNI-###) found in the pasted markdown");
+            imported = { tickets, sourceDoc: body.sourceDoc ?? null };
+          } else {
+            let projectPath;
+            try { projectPath = resolveProject(projectName).path; } catch { return json(res, 400, { error: `unknown project "${projectName}"` }); }
+            imported = importFromFile(projectPath, String(body.path ?? "docs/features.md"));
+          }
+          return json(res, 200, imported);
+        } catch (e) { return json(res, 400, { error: String(e?.message ?? e) }); }
+      }
+      const ticketId = ticketsMatch[2];
+      if (req.method === "PATCH" && ticketId) {
+        const body = await readBody(req);
+        try {
+          const t = updateTicket(projectName, ticketId, body);
+          broadcast({ type: "tickets", project: projectName });
+          return json(res, 200, t);
+        } catch (e) { return json(res, 400, { error: String(e?.message ?? e) }); }
+      }
+      if (req.method === "DELETE" && ticketId) {
+        try {
+          deleteTicket(projectName, ticketId);
+          broadcast({ type: "tickets", project: projectName });
+          return json(res, 200, { ok: true });
+        } catch (e) { return json(res, 404, { error: String(e?.message ?? e) }); }
+      }
     }
 
     if (url.pathname === "/api/runs" && req.method === "POST") {
