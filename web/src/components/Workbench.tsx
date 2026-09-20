@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Box, Flex, Text } from "@chakra-ui/react";
 import { GhostButton } from "../ui/buttons";
 import { fmtTimestamp, pretty } from "../lib/format";
+import ArtifactDocument, { DOCUMENTED } from "./ArtifactDocument";
 import type { QaRound, RunState } from "../api";
 
 function groupOf(name: string, kind: string): string {
@@ -40,9 +41,9 @@ function formatQa(qa: QaRound[]): string {
 
 export default function Workbench({ state }: { state: RunState }) {
   const files = useMemo(() => {
-    const out: { name: string; kind: "artifact" | "input"; content: string; group: string }[] = [];
+    const out: { name: string; kind: "artifact" | "input"; content: string; group: string; data?: unknown }[] = [];
     for (const [k, v] of Object.entries(state.artifacts ?? {})) {
-      out.push({ name: k, kind: "artifact", content: pretty(v), group: groupOf(k, "artifact") });
+      out.push({ name: k, kind: "artifact", content: pretty(v), group: groupOf(k, "artifact"), data: v });
     }
     for (const [k, v] of Object.entries(state.prompts ?? {})) {
       out.push({ name: `input:${k}`, kind: "input", content: v, group: groupOf(k, "input") });
@@ -131,9 +132,13 @@ export default function Workbench({ state }: { state: RunState }) {
           <Text fontSize="10px" color="muted" mb={2} fontFamily="ui-monospace, monospace">
             {file.name} · {file.content.length} chars
           </Text>
-          <Box as="pre" fontSize="12px" whiteSpace="pre-wrap" m={0} fontFamily="ui-monospace, monospace">
-            {file.content}
-          </Box>
+          {file.kind === "artifact" && DOCUMENTED.has(file.name) ? (
+            <ArtifactDocument name={file.name} data={file.data} raw={file.content} />
+          ) : (
+            <Box as="pre" fontSize="12px" whiteSpace="pre-wrap" m={0} fontFamily="ui-monospace, monospace">
+              {file.content}
+            </Box>
+          )}
         </Box>
       </Flex>
     </Box>
