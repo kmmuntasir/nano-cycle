@@ -14,6 +14,7 @@ export function PrimaryButton({
   children: ReactNode;
   size?: "xs" | "sm" | "md";
   disabled?: boolean;
+  title?: string;
   onClick?: () => void;
 }) {
   return (
@@ -22,6 +23,7 @@ export function PrimaryButton({
       bg="#2f6fed"
       color="white"
       border="1px solid transparent"
+      title={rest.title}
       fontFamily={SANS}
       _hover={{ bg: "#3b7bff" }}
       _disabled={{ bg: "#24407e", color: "rgba(255,255,255,0.55)", cursor: "not-allowed", opacity: 1 }}

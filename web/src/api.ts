@@ -215,6 +215,74 @@ export const api = {
     }),
 };
 
+// --- v3 ticket queue -----------------------------------------------------------
+
+export type TicketStatus = "draft" | "clarifying" | "clarified" | "queued" | "running" | "done" | "blocked";
+
+export interface Ticket {
+  id: string;
+  title: string;
+  description: string;
+  sourceDoc: string | null;
+  dependsOn: string[];
+  order: number;
+  status: TicketStatus;
+  blockedReason: string | null;
+  runId: string | null;
+  history: { at: string; from: string | null; to: string; runId?: string; note?: string }[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TicketStore {
+  project: string;
+  config: {
+    models: Record<string, string>;
+    options: { git: boolean; audit: boolean; security: SecurityMode; maxFixRounds: number; remoteChecks: boolean };
+  };
+  tickets: Ticket[];
+  queue: { state: "idle" | "clarifying" | "awaiting-release" | "running" | "paused"; pausedAt: string | null };
+}
+
+export interface InboxItem {
+  runId: string;
+  ticketId: string | null;
+  round: number;
+  questions: ClarifyQuestion[];
+}
+
+export const ticketsApi = {
+  store: (project: string) => jfetch<TicketStore>(`/api/tickets/${encodeURIComponent(project)}?_=${Date.now()}`),
+  create: (project: string, body: { id?: string; title: string; description?: string; dependsOn?: string[] }) =>
+    jfetch<Ticket>(`/api/tickets/${encodeURIComponent(project)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  update: (project: string, id: string, patch: Partial<Ticket>) =>
+    jfetch<Ticket>(`/api/tickets/${encodeURIComponent(project)}/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  remove: (project: string, id: string) =>
+    jfetch<{ ok: boolean }>(`/api/tickets/${encodeURIComponent(project)}/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  import: (project: string, body: { path?: string; markdown?: string }) =>
+    jfetch<{ tickets: Ticket[]; sourceDoc: string | null }>(`/api/tickets/${encodeURIComponent(project)}/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  queue: (project: string, body: { action: string; ticketIds?: string[]; ticketId?: string; orderedIds?: string[]; models?: Record<string, string>; options?: Record<string, unknown> }) =>
+    jfetch<{ ok?: boolean; released?: number; error?: string }>(`/api/queue/${encodeURIComponent(project)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  inbox: (project: string) =>
+    jfetch<{ project: string; items: InboxItem[] }>(`/api/inbox/${encodeURIComponent(project)}?_=${Date.now()}`),
+};
+
 export function openWs(onMessage: (msg: { type: string; runId?: string; state?: RunState; nodeId?: string; ev?: RunEvent["ev"] }) => void): WebSocket {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);

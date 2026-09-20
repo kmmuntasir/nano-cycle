@@ -11,6 +11,7 @@ import NewRunModal from "./components/NewRunModal";
 import ConfirmDialog from "./components/ConfirmDialog";
 import StartForm from "./components/StartForm";
 import ReviewPanel from "./components/ReviewPanel";
+import TicketsView from "./components/TicketsView";
 import Workbench from "./components/Workbench";
 import { SelectEl, selectStyleMini } from "./ui/controls";
 import { api, openWs } from "./api";
@@ -28,6 +29,7 @@ function useNow(active: boolean): number {
 }
 
 type Tab = "pipeline" | "console" | "artifacts" | "qa";
+type View = "runs" | "tickets";
 
 export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -48,6 +50,7 @@ export default function App() {
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("pipeline");
+  const [view, setView] = useState<View>("runs");
   const [showNew, setShowNew] = useState(false);
   const [connected, setConnected] = useState(false);
   const [task, setTask] = useState("");
@@ -290,6 +293,33 @@ export default function App() {
 
   return (
     <Box minH="100dvh" bg="#0f1115">
+      <Flex
+        borderBottom="1px solid"
+        borderColor="line"
+        bg="surface"
+        px={4}
+        py={2}
+        gap={2}
+        alignItems="center"
+      >
+        {(["runs", "tickets"] as View[]).map((v) => (
+          <Box
+            key={v}
+            as="button"
+            px={3}
+            py={1.5}
+            fontSize="12px"
+            fontWeight={view === v ? 700 : 500}
+            fontFamily="system-ui, sans-serif"
+            color={view === v ? "#7aa2f7" : "#8b91a0"}
+            borderBottom="2px solid"
+            borderBottomColor={view === v ? "#7aa2f7" : "transparent"}
+            onClick={() => setView(v)}
+          >
+            {v === "runs" ? "▶ Runs" : "☰ Tickets & Queue"}
+          </Box>
+        ))}
+      </Flex>
       <Header
         projects={projects}
         project={project}
@@ -374,7 +404,11 @@ export default function App() {
             </Box>
           )}
 
-          {!state ? (
+          {view === "tickets" ? (
+            <Box maxW="1100px" mx="auto" w="100%">
+              <TicketsView project={project} models={models} onOpenRun={(rid) => { setView("runs"); openRun(rid); }} />
+            </Box>
+          ) : !state ? (
             <Box border="1px dashed" borderColor="line" borderRadius="lg" p={8} textAlign="center" bg="surface">
               <Text fontSize="18px" fontWeight={800} fontFamily="system-ui, sans-serif" mb={2}>
                 No Run Selected
@@ -394,7 +428,7 @@ export default function App() {
                 <RunsSidebar runs={projectRuns} runId={runId} onSelect={openRun} />
               </Box>
             </Box>
-          ) : (
+          ) : view === "runs" ? (
             <Stack gap={3}>
               <RunHeader state={state} wall={wall} work={work} gateMs={gateMs} live={live} onCancel={() => setConfirmCancel(true)} onResume={handleResume} />
               <GateBanner state={state} onJump={() => setTab("qa")} showJump={tab !== "qa"} />
@@ -489,7 +523,7 @@ export default function App() {
                 </Box>
               )}
             </Stack>
-          )}
+          ) : null}
         </Box>
       </Flex>
 
