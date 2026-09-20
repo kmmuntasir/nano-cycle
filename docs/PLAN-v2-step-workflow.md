@@ -372,7 +372,7 @@ v1 runs: listed and viewable (state/events readers are shape-agnostic); `resume`
 ### Phase 9 — Live validation (V1–V12 of §5)
 
 - [~] **26. Happy paths (V1, V2, V3, V4)** — V1 ✅ (dev `20260920-154407664` + owner-validated `20260920-194320256`, 11/11) V2 ✅ (dev `20260920-155539141` + owner-validated `20260920-204148298` post-watchdog-fix) live-passed 2026-09-20 (glm-5.3-flash); V3 ✅ owner-validated (`20260920-210752155` — reject→revise→approve in one session); V4 owner-run `20260920-211555646`: model resolved the contradiction rather than diverging (verify probed both sides, 7/7) — divergence gate path stays harness-covered; remaining live runs deferred to owner (docs/V2-VALIDATION.md).
-- [~] **27. Fix-loop paths (V5, V6)** — V5 ✅ owner-validated (`20260920-213826032` — mechanical fail → same-session fix round → green); V6 harness-covered — live run deferred to owner (runbook §V6).
+- [~] **27. Fix-loop paths (V5, V6)** — V5 ✅ owner-validated (`20260920-213826032` — mechanical fail → same-session fix round → green); V6 owner-runs `20260920-215309256`+`20260920-222041658`: first exposed requireQuestions-as-no-op (fixed, structural withholding + regression); re-run with PM Must Ask — PM asked, steering reached spec, builder shipped all 10 ACs, audit clean (blocking path stays harness-covered).
 - [~] **28. Security paths (V7, V8)** — override gate observed live (run 20260920-161038752, out-of-scope secret classified honestly); fixable-secret fix loop **deferred to owner** (V7).
 - [~] **29. Lifecycle paths (V9–V12)** — V10 harness-covered; V9/V11/V12 **deferred to owner** (runbook §V9–V12).
 

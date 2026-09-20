@@ -37,7 +37,8 @@ rm -rf sandbox && mkdir sandbox && printf '{ "name": "nano-cycle-sandbox", "priv
 - ✅ **V2** owner re-run after the fix (run `20260920-204148298`) — completed; 4 real PM questions; spec locked (7 ACs, 7 decisions, all env-tagged); 0 spec ACs missing from the plan; verify 7/7; audit clean; all 5 skills in phase order.
 - ✅ **V3** plan reject-with-comments (run `20260920-210752155`) — owner rejection fed back into the SAME build session; plan resubmitted with the null-handling criterion; final code + tests cover `shout(null)`; verify 6/6, audit clean.
 - ✅ **V5** mechanical→fix round (owner run `20260920-213826032`) — `deps-declared` failed at round 0 with file:line precision (`legacy/old.js:1`); fix round resumed the SAME build session (`rounds: 1`, one session file); the builder declared the dep and left `legacy/` intact; impl-delta notes confirm untouched files stayed byte-identical; round 1 green → completed.
-- ⚠️→🔧 **V6 first attempt** (run `20260920-215309256`) — PM locked the spec without asking anything (legitimate for this task text); no round to steer → audit had nothing to block on → completed 7/7. Led to the **PM Must Ask** GUI toggle (`requireQuestions` — existed in the engine since v1, never exposed). Re-run V6 with it on.
+- ⚠️→🔧 **V6 first attempt** (run `20260920-215309256`) — PM locked the spec without asking anything (legitimate for this task text); no round to steer → audit had nothing to block on → completed 7/7. Led to the **PM Must Ask** GUI toggle + the discovery that `requireQuestions` was a v1 no-op (finalize was never structurally withheld — fixed + regression-tested).
+- ✅ **V6** owner re-run with PM Must Ask (run `20260920-222041658`) — the fix held: the PM asked 4 real questions (incl. non-numeric policy + README scope); the steering text entered the spec as 3 explicit ACs; the builder shipped ALL 10 ACs (null handling in code, `## Usage` in README) → verify 10/10, audit clean, no fix round needed. The audit-blocking→fix-round path remains harness-covered — a builder this diligent leaves audit nothing to block.
 - ✅ **V4** divergence (run `20260920-211555646`) — outcome worth reading: the builder did NOT declare divergence; it resolved the contradiction (from-scratch, API-compatible left-pad semantics — dependency-free), the plan made both sides explicit criteria, and verify probed BOTH (semantics match + no deps + no vendored code) → 7/7. A model of this class prefers resolving over escalating — the divergence GATE path remains harness-covered; to force it live you'd need a genuinely impossible constraint.
 - ✅ Security override gate (part of run `20260920-161038752`) — out-of-scope secret classified honestly `fixable_in_scope:false`, routed to the owner.
 
@@ -173,7 +174,7 @@ undeclared) → `gaps-found — fix round 1 (resuming the build session)` → th
 builder fixes it in the SAME session (`steps[build].sessionFile` unchanged,
 `steps[build].rounds: 1`) → round 1 mechanical green → completed.
 
-## V6 — audit blocking finding → fix round
+## V6 — audit blocking finding → fix round ✅* (owner run `20260920-222041658` — see note: builder nailed all 10 ACs; blocking-finding path stays harness-covered)
 
 > **Owner finding (run `20260920-215309256`):** with Clarify merely ON, the PM
 > judged this task self-contained and locked the spec WITHOUT asking anything —
