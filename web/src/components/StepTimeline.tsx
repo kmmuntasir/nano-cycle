@@ -1,15 +1,29 @@
 import { Box, Flex, HStack, Stack, Text } from "@chakra-ui/react";
+import {
+  CircleAlert,
+  CircleCheck,
+  CircleDashed,
+  CirclePause,
+  CircleSlash,
+  CircleX,
+  LoaderCircle,
+} from "lucide-react";
 import ModelPicker from "../ui/ModelPicker";
 import { fmtDuration } from "../lib/format";
 import { isV2, orderedUnits } from "../lib/pipeline";
 import type { ModelInfo, NodeState, RunState } from "../api";
 
-const DOT: Record<string, string> = {
-  queued: "#8b91a0",
-  running: "#7aa2f7",
-  done: "#4fd6a8",
-  failed: "#f16a6a",
-  cancelled: "#8b91a0",
+// Status → icon + color: spinning loader while running, green check when done.
+const STATUS_ICON: Record<string, { Icon: typeof CircleCheck; color: string; spin?: boolean }> = {
+  queued: { Icon: CircleDashed, color: "#8b91a0" },
+  running: { Icon: LoaderCircle, color: "#7aa2f7", spin: true },
+  done: { Icon: CircleCheck, color: "#4fd6a8" },
+  completed: { Icon: CircleCheck, color: "#4fd6a8" },
+  failed: { Icon: CircleX, color: "#f16a6a" },
+  cancelled: { Icon: CircleSlash, color: "#8b91a0" },
+  "awaiting-gate": { Icon: CirclePause, color: "#f0b429" },
+  "awaiting-answers": { Icon: CirclePause, color: "#f0b429" },
+  interrupted: { Icon: CircleAlert, color: "#f16a6a" },
 };
 
 const STEP_META: Record<string, { title: string; hint: string; role: string }> = {
@@ -46,7 +60,7 @@ function StepCard({
   detail?: string;
   disabledModel?: boolean;
 }) {
-  const color = DOT[n.status] ?? "#8b91a0";
+  const meta = STATUS_ICON[n.status] ?? STATUS_ICON.queued;
   return (
     <Box
       border="1px solid"
@@ -60,13 +74,11 @@ function StepCard({
       onClick={onSelect}
     >
       <HStack gap={2} alignItems="center" mb={1}>
-        <Box
-          w="9px"
-          h="9px"
-          borderRadius="full"
-          bg={color}
-          flexShrink={0}
-          animation={n.status === "running" ? "ncPulse 1.6s infinite" : undefined}
+        <meta.Icon
+          size={17}
+          color={meta.color}
+          strokeWidth={2.4}
+          style={meta.spin ? { animation: "ncSpin 1.2s linear infinite" } : undefined}
         />
         <Text fontSize="13px" fontWeight={800} fontFamily="ui-monospace, monospace">
           {STEP_META[n.id]?.title ?? titleCase(n.id)}

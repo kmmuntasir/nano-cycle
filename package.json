@@ -2,7 +2,7 @@
   "name": "nano-cycle",
   "private": true,
   "version": "0.1.0",
-  "description": "Four-step agentic workflow \u2014 clarify \u2192 build \u2192 verify \u2192 security \u2014 on the Pi SDK, with driver-owned gates and milestone artifacts",
+  "description": "Four-step agentic workflow — clarify → build → verify → security — on the Pi SDK, with driver-owned gates and milestone artifacts",
   "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
@@ -17,6 +17,7 @@
   "dependencies": {
     "@chakra-ui/react": "^3.37.0",
     "@earendil-works/pi-coding-agent": "0.85.1",
+    "lucide-react": "^1.47.0",
     "typebox": "1.3.7",
     "ws": "^8.18.0"
   },
