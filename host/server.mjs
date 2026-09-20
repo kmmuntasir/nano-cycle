@@ -6,8 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createPipeline } from "./pipeline.mjs";
-import { DEFAULT_TIER, MODEL_ROLES, TIERS } from "./config.mjs";
+import { createEngine } from "./engine.mjs";
+import { MODEL_ROLES_V2 } from "./config.mjs";
 import { addProject, loadProjects, removeProject, resolveProject, SANDBOX_DIR } from "./projects.mjs";
 import { detectWebCapabilities, makeWebReaderTool, makeWebSearchTool } from "./webtools.mjs";
 import { newRunId, runsDir, saveState, appendEvent, listRuns, loadRun } from "./state.mjs";
@@ -107,7 +107,7 @@ function broadcast(msg) {
   }
 }
 
-const pipeline = createPipeline({ modelRuntime, emit, webTools });
+const pipeline = createEngine({ modelRuntime, emit, webTools });
 
 // --- http ---------------------------------------------------------------------
 
@@ -147,14 +147,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/tiers" && req.method === "GET") {
-      const tiers = Object.fromEntries(
-        Object.entries(TIERS).map(([t, nodes]) => [t, nodes.map((n) => n.id)]),
-      );
-      return json(res, 200, tiers);
+      // v2: tiers are gone (four-step workflow). Kept as {} during GUI migration;
+      // removed at cleanup.
+      return json(res, 200, {});
     }
 
     if (url.pathname === "/api/roles" && req.method === "GET") {
-      return json(res, 200, MODEL_ROLES);
+      return json(res, 200, MODEL_ROLES_V2);
     }
 
     if (url.pathname === "/api/projects") {
@@ -191,7 +190,6 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const task = String(body.task ?? "").trim();
       if (!task) return json(res, 400, { error: "task is required" });
-      const tier = TIERS[body.tier] ? body.tier : DEFAULT_TIER;
       let project;
       try {
         project = resolveProject(String(body.project ?? "sandbox"));
@@ -199,14 +197,15 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: String(e?.message ?? e) });
       }
       const models = {};
-      for (const role of Object.keys(MODEL_ROLES)) {
+      for (const role of Object.keys(MODEL_ROLES_V2)) {
         models[role] = String(body.models?.[role] ?? "auto");
       }
+      const securityRaw = String(body.security ?? "off");
+      const security = ["off", "scan", "scan+vapt"].includes(securityRaw) ? securityRaw : "off";
       const id = newRunId();
       const state = await pipeline.start({
         id,
         task,
-        tier,
         project,
         models,
         clarify: !!body.clarify,
@@ -216,6 +215,7 @@ const server = http.createServer(async (req, res) => {
         audit: body.audit !== false,
         approvePlan: body.approvePlan !== false,
         remoteChecks: body.remoteChecks === true,
+        security,
       });
       return json(res, 201, state);
     }
@@ -231,7 +231,7 @@ const server = http.createServer(async (req, res) => {
         try {
           const st = JSON.parse(fs.readFileSync(path.join(runsDir(), entry.name, "state.json"), "utf8"));
           if (st.project === projectName && st.artifacts?.spec) {
-            found.push({ runId: st.id, createdAt: st.createdAt, tier: st.tier, status: st.status, spec: st.artifacts.spec });
+            found.push({ runId: st.id, createdAt: st.createdAt, tier: st.version === 2 ? `v2/${st.options?.security ?? "-"}` : st.tier, status: st.status, spec: st.artifacts.spec });
           }
         } catch {
           /* unreadable run — skip */
@@ -245,7 +245,7 @@ const server = http.createServer(async (req, res) => {
         const md = [
           `# Spec — ${latest.runId}`,
           "",
-          `Project: ${projectName} · Tier: ${latest.tier} · Date: ${latest.createdAt}`,
+          `Project: ${projectName} · Mode: ${latest.tier} · Date: ${latest.createdAt}`,
           ...(spec.source_docs?.length ? [`Source docs (their requirements OUTRANK this spec): ${spec.source_docs.join(", ")}`] : []),
           "",
           "## Summary",
@@ -283,7 +283,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === "POST" && action === "gate") {
         const body = await readBody(req);
-        const ok = pipeline.gate(id, body.action === "cancel" ? "cancel" : "approve");
+        const ok = pipeline.gate(id, body.action === "cancel" ? "cancel" : body.action === "reject" ? "reject" : "approve", body.comments);
         return json(res, ok ? 200 : 409, { ok });
       }
       if (req.method === "POST" && action === "answers") {
@@ -293,14 +293,18 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === "POST" && action === "model") {
         const body = await readBody(req);
-        const out = pipeline.setNodeModel(id, String(body.node ?? ""), String(body.model ?? "auto"));
+        const out = pipeline.setStepModel(id, String(body.step ?? body.node ?? ""), String(body.model ?? "auto"));
         return json(res, out.ok ? 200 : 400, out);
       }
       if (req.method === "POST" && action === "cancel") {
         return json(res, 200, { ok: pipeline.cancel(id) });
       }
       if (req.method === "POST" && action === "resume") {
-        const out = pipeline.resume(id);
+        let out = pipeline.resume(id);
+        if (!out.ok && /not active in this server session/.test(String(out.error ?? ""))) {
+          // restart recovery: rebuild the controller from runs/<id>/state.json
+          out = pipeline.resumeFromDisk(id);
+        }
         return json(res, out.ok ? 200 : 409, out);
       }
     }
