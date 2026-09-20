@@ -78,7 +78,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
 
   // --- clarify wave ------------------------------------------------------------
 
-  async function startClarifyWave(project, ticketIds) {
+  async function startClarifyWave(project, ticketIds, { taskSuffix = "" } = {}) {
     const store = loadTickets(project);
     const cfg = store.config;
     let projectRef;
@@ -93,15 +93,15 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     for (const id of ticketIds) {
       const t = store.tickets.find((x) => x.id === id);
       if (!t) { errors.push(`unknown ticket "${id}"`); continue; }
-      if (!["draft", "blocked", "clarified", "failed"].includes(t.status)) {
-        errors.push(`ticket "${id}" is ${t.status} — only draft/blocked/clarified/failed tickets can (re-)clarify`);
+      if (!["draft", "blocked", "clarified"].includes(t.status)) {
+        errors.push(`ticket "${id}" is ${t.status} — only draft/blocked/clarified tickets can (re-)clarify`);
         continue;
       }
       // newRunId() has millisecond precision — a wave loop can start two runs
       // within one tick, so suffix the ticket id to keep runs/<id> unique.
       const runId = `${newRunId()}-${String(id).toLowerCase().replace(/[^\w-]/g, "")}`;
       setTicketStatus(project, id, "clarifying", { runId });
-      const task = [t.title, t.description].filter(Boolean).join("\n\n");
+      const task = [t.title, t.description].filter(Boolean).join("\n\n") + taskSuffix;
       try {
         await engine.start({
           id: runId,
@@ -125,6 +125,12 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
         setTicketStatus(project, id, "blocked", { reason: "provider-failures", note: String(e?.message ?? e) });
         errors.push(`${id}: ${e?.message ?? e}`);
       }
+    }
+    // A wave whose every start failed (or that was empty) never produces a
+    // settle — advance the state here so the queue can't stick at 'clarifying'.
+    const fresh = loadTickets(project);
+    if (fresh.queue.state === "clarifying" && !fresh.tickets.some((x) => x.status === "clarifying")) {
+      setQueueState(project, { state: fresh.tickets.some((x) => x.status === "clarified") ? "awaiting-release" : "idle" });
     }
     broadcastQueue(project);
     return { ok: errors.length === 0, started, errors };
@@ -323,7 +329,33 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     const store = loadTickets(project);
     const t = store.tickets.find((x) => x.id === ticketId);
     if (!t) return { ok: false, error: `unknown ticket "${ticketId}"` };
-    return startClarifyWave(project, [ticketId]);
+    return startClarifyWave(project, [ticketId], { taskSuffix: reclarifySeed(t) });
+  }
+
+  // The plan's re-clarify contract (§2.2): the fresh PM run is seeded with the
+  // OLD spec plus the park reason, so the PM re-validates it against the
+  // current tree instead of re-deriving from scratch.
+  function reclarifySeed(t) {
+    const parts = [];
+    if (t.blockedReason) parts.push(`This ticket was previously parked with reason: "${t.blockedReason}".`);
+    if (t.runId) {
+      try {
+        const runFile = path.join(path.resolve(import.meta.dirname, ".."), "runs", t.runId, "state.json");
+        const st = JSON.parse(fs.readFileSync(runFile, "utf8"));
+        const spec = st.artifacts?.spec;
+        if (spec) {
+          const digest = [
+            `Summary: ${spec.summary ?? ""}`,
+            ...((spec.decisions ?? []).map((d) => `Decision — ${d.topic}: ${d.decision}`)),
+            ...((spec.acceptance_criteria ?? []).map((c) => `- ${c}`)),
+          ].join("\n").slice(0, 4000);
+          parts.push(`The PREVIOUS spec follows. It may predate recent repo changes — re-validate every reference against the CURRENT tree before locking:\n\n${digest}`);
+        }
+      } catch {
+        /* no old run/spec on disk — seed with the reason alone */
+      }
+    }
+    return parts.length ? `\n\n--- RE-CLARIFICATION CONTEXT ---\n${parts.join("\n\n")}` : "";
   }
 
   function pause(project) {

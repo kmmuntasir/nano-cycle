@@ -119,13 +119,13 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
             </PrimaryButton>
           )}
           <OutlineButton
-            disabled={busy || rows.every((t) => !["draft", "blocked", "clarified", "failed"].includes(t.status))}
+            disabled={busy || rows.every((t) => !["draft", "blocked", "clarified"].includes(t.status))}
             onClick={async () => {
               if (!showModels) { setShowModels(true); return; }
               setBusy(true);
               try {
                 await ticketsApi.queue(project, { action: "config", models: waveModels });
-                const ids = rows.filter((t) => ["draft", "blocked", "clarified", "failed"].includes(t.status)).map((t) => t.id);
+                const ids = rows.filter((t) => ["draft", "blocked", "clarified"].includes(t.status)).map((t) => t.id);
                 const out = await ticketsApi.queue(project, { action: "clarify", ticketIds: ids, models: waveModels });
                 if (out.error) setErr(out.error);
                 setShowModels(false);

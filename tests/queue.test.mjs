@@ -347,6 +347,42 @@ await test("Q9: backlog flip skipped while another run holds the tree (the doc s
   fs.rmSync(projDir, { recursive: true, force: true });
 });
 
+// --- Q10/Q11: re-clarify seeding + wave-state guard ---------------------------------
+
+await test("Q10: re-clarify seeds the old spec + park reason into the fresh run's task", async () => {
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, null);
+  const rid = `recl-${Date.now()}`;
+  fs.mkdirSync(path.join(ROOT, "runs", rid), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, "runs", rid, "state.json"), JSON.stringify({
+    artifacts: { spec: { summary: "old summary", decisions: [{ topic: "style", decision: "CommonJS" }], acceptance_criteria: ["lib/greet.js exists"] } },
+  }));
+  await seedProject("q10", [
+    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "stale-spec", runId: rid },
+  ], "idle");
+  const out = await mgr.reclarify("q10", "F1");
+  assert.strictEqual(out.ok, true, JSON.stringify(out.errors ?? out));
+  await sleep(20);
+  const started = engine.runs.get(out.started[0].runId);
+  assert.match(started.opts.task, /RE-CLARIFICATION CONTEXT/);
+  assert.match(started.opts.task, /stale-spec/);
+  assert.match(started.opts.task, /old summary/);
+  assert.match(started.opts.task, /lib\/greet\.js exists/);
+  fs.rmSync(path.join(ROOT, "runs", rid), { recursive: true, force: true });
+});
+
+await test("Q11: a wave whose starts all fail can't stick the queue at 'clarifying'", async () => {
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, null);
+  await seedProject("q11", [
+    { id: "F1", title: "one", description: "d", status: "done" },
+  ], "idle");
+  const out = await mgr.startClarifyWave("q11", ["F1"]); // done tickets can't clarify
+  assert.strictEqual(out.ok, false);
+  await sleep(10);
+  assert.strictEqual((await store("q11")).queue.state, "idle", "state advanced instead of sticking");
+});
+
 process.on("exit", () => { try { fs.rmSync(path.join(ROOT, "tickets"), { recursive: true, force: true }); } catch {} });
 
 const failed = results.filter(([, ok]) => !ok).length;
