@@ -61,9 +61,6 @@ export default function RunHeader({
       borderRadius="lg"
       bg="surface"
       p={4}
-      position="sticky"
-      top="60px"
-      zIndex={10}
     >
       <Flex gap={3} alignItems="flex-start" flexWrap="wrap">
         <Box flex="1" minW="240px">
