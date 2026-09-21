@@ -1,9 +1,10 @@
-// Queue manager unit tests — TODOs 8–10. Run: node tests/queue.test.mjs
+// Queue manager unit tests — v3 + v3.1 (single-PM waves). Run: node tests/queue.test.mjs
 import { tickets as TICKETS_DIR, runs as RUNS_DIR } from "./_test-dirs.mjs"; // FIRST: isolate stores
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert";
 import { createQueueManager } from "../host/queue.mjs";
+
 const results = [];
 const test = async (name, fn) => {
   try { await fn(); results.push([name, true]); console.log(`PASS  ${name}`); }
@@ -11,40 +12,37 @@ const test = async (name, fn) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const store = async (project) => (await import("../host/tickets.mjs")).loadTickets(project);
-const saveStore = async (project, s) => (await import("../host/tickets.mjs")).saveTickets(project, s);
+
+// Fixture helper: a run state on disk (the source of truth the queue reads).
+function seedRunState(runId, state) {
+  fs.mkdirSync(path.join(RUNS_DIR, runId), { recursive: true });
+  fs.writeFileSync(path.join(RUNS_DIR, runId, "state.json"), JSON.stringify({ id: runId, status: "clarified", ...state }));
+}
+
+// A wave fixture: run state on disk with per-ticket specs (v3.1 wave shape).
+function seedWaveRun(runId, specsByTicket, extra = {}) {
+  seedRunState(runId, {
+    wave: { ticketIds: Object.keys(specsByTicket) },
+    artifacts: { specs: Object.fromEntries(Object.entries(specsByTicket).map(([id, s]) => [id, typeof s === "string" ? { summary: s, decisions: [], acceptance_criteria: [`AC ${id}`] } : s])) },
+    ...extra,
+  });
+}
 
 function fakeEngine() {
   const runs = new Map();
   const gateCancels = [];
-  const promotes = [];
-  const disk = new Map(); // runId -> { status } — what a restart leaves behind
+  const starts = []; // every engine.start opts — the queue now SEEDS builds
+  const disk = new Map(); // runId -> { status } — what a restart left behind
   return {
     runs,
     gateCancels,
-    promotes,
+    starts,
     disk,
     async start(opts) {
-      const r = { id: opts.id, opts, status: "running", holdsTree: !opts.stopAfterClarify, settled: false };
+      starts.push(opts);
+      const r = { id: opts.id, opts, status: "running", holdsTree: opts.clarify === false, settled: false };
       runs.set(opts.id, r);
-      if (opts.stopAfterClarify) {
-        r.status = "clarified";
-        r.settled = true;
-        queueMicrotask(() => opts.onSettled?.("clarified"));
-      }
-      return { id: opts.id };
-    },
-    promote(id, onSettled) {
-      const r = runs.get(id);
-      if (!r) return { ok: false, error: "run not active in this server session" };
-      if (r.status !== "clarified") return { ok: false, error: `status ${r.status}` };
-      const holder = [...runs.values()].find((x) => x !== r && x.holdsTree && !x.settled);
-      if (holder) return { ok: false, error: `the working tree is held by run ${holder.id}` };
-      promotes.push(id);
-      r.status = "running";
-      r.holdsTree = true;
-      r.settled = false; // the run is ACTIVE again after promotion (real engine: new done box)
-      if (typeof onSettled === "function") r.opts.onSettled = onSettled; // build-phase callback replaces the clarify one
-      return { ok: true };
+      return { id: opts.id, status: "running" };
     },
     resume(id) {
       const r = runs.get(id);
@@ -56,13 +54,12 @@ function fakeEngine() {
       r.settled = false;
       return { ok: true };
     },
-    // mirrors the real engine's restart recovery (incl. promote-from-disk)
+    // mirrors the real engine's restart recovery
     resumeFromDisk(id, project, opts = {}) {
       if (runs.has(id)) return { ok: false, error: "run is still active in this server session" };
       const d = disk.get(id);
       if (!d) return { ok: false, error: "unknown run (no state on disk)" };
-      const allowed = ["cancelled", "failed", "interrupted", ...(opts.promote ? ["clarified"] : [])];
-      if (!allowed.includes(d.status)) return { ok: false, error: `run status is "${d.status}"` };
+      if (!["cancelled", "failed", "interrupted"].includes(d.status)) return { ok: false, error: `run status is "${d.status}"` };
       const holder = [...runs.values()].find((x) => x.holdsTree && !x.settled);
       if (holder) return { ok: false, error: `the working tree is held by run ${holder.id}` };
       runs.set(id, { id, status: "running", holdsTree: true, settled: false, opts: { onSettled: opts.onSettled ?? (() => {}) } });
@@ -89,20 +86,15 @@ function fakeEngine() {
       await r.opts.onSettled?.(status);
       await sleep(20);
     },
-    async failBuildWithGate(id, gateType, project, ticketId) {
-      // simulate: a promoted run opens an owner gate (divergence etc.)
-      emitState({ id, state: { status: "awaiting-gate", gate: { type: gateType }, ticketId, project } });
+    // a clarify-stage (wave) run settles — same mechanics, distinct name for readability
+    async settleWave(runId, status) {
+      const r = runs.get(runId);
+      r.settled = true;
+      r.status = status;
+      await r.opts.onSettled?.(status);
+      await sleep(20);
     },
   };
-
-  function emitState(run) {
-    wrappedEmit?.state(run);
-  }
-  let wrappedEmit = null;
-  // expose the wrapped emitter to tests once the manager installs it
-  Object.defineProperty(this, "wrappedEmit", { get: () => wrappedEmit, configurable: true });
-  // the manager replaces .state on the object we pass — keep a handle:
-  this.setEmitter = (e) => { wrappedEmit = e; };
 }
 
 function makeManager(engine, projectDir) {
@@ -122,7 +114,7 @@ function makeManager(engine, projectDir) {
 }
 
 async function seedProject(project, tickets, queueState = "idle") {
-  fs.mkdirSync(path.join(TICKETS_DIR), { recursive: true });
+  fs.mkdirSync(TICKETS_DIR, { recursive: true });
   const full = tickets.map((t, i) => ({
     sourceDoc: null, runId: null, blockedReason: null, status: "draft",
     dependsOn: [], order: i, history: [],
@@ -134,50 +126,70 @@ async function seedProject(project, tickets, queueState = "idle") {
   }, null, 2));
 }
 
-// --- Q1: wave ------------------------------------------------------------------
+// --- Q1: wave — ONE run for the whole batch --------------------------------------
 
-await test("Q1: clarify wave — parallel starts, all settle → clarified, awaiting-release", async () => {
+await test("Q1: a wave starts ONE PM run; settling it clarifies every ticket", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
   await seedProject("q1", [
-    { id: "F1", title: "one", description: "d1" },
-    { id: "F2", title: "two", description: "d2" },
+    { id: "F0", title: "zero", description: "d0", status: "done" },
+    { id: "F1", title: "one", description: "d1", dependsOn: ["F0"] },
+    { id: "F2", title: "two", description: "d2", dependsOn: ["F1"] },
     { id: "F3", title: "three", description: "d3" },
   ]);
   const out = await mgr.startClarifyWave("q1", ["F1", "F2", "F3"]);
   assert.strictEqual(out.ok, true, JSON.stringify(out.errors ?? out));
-  await sleep(20);
+  assert.strictEqual(engine.starts.length, 1, "exactly one engine.run for the wave");
+  const opts = engine.starts[0];
+  assert.deepStrictEqual(opts.waveTickets.map((t) => t.id), ["F1", "F2", "F3"]);
+  assert.ok(opts.stopAfterClarify && opts.clarify, "wave runs clarify-only");
+  assert.match(opts.task, /WAVE of 3 feature/);
+  assert.match(opts.task, /F0 — zero/, "brief lists built features");
+  assert.match(opts.task, /Depends on F0 \(already built\)/, "dependency context marks built deps");
+  assert.match(opts.task, /F1 — one[\s\S]*F2 — two[\s\S]*F3 — three/, "brief lists wave features");
   const st = await store("q1");
-  assert.ok(st.tickets.every((t) => t.status === "clarified"), JSON.stringify(st.tickets.map((t) => t.status)));
-  assert.strictEqual(st.queue.state, "awaiting-release");
-  assert.ok(st.tickets.every((t) => t.runId && t.runId.length > 10));
+  const waveRunId = st.tickets.find((t) => t.id === "F1").runId;
+  assert.ok(st.tickets.filter((t) => t.id !== "F0").every((t) => t.status === "clarifying" && t.runId === waveRunId), "all WAVE tickets clarifying on the one wave run");
+  assert.strictEqual(st.tickets.find((t) => t.id === "F0").status, "done", "done tickets untouched");
+  assert.strictEqual(st.queue.state, "clarifying");
+  await engine.settleWave(waveRunId, "clarified");
+  const st2 = await store("q1");
+  assert.ok(st2.tickets.filter((t) => t.id !== "F0").every((t) => t.status === "clarified" && t.runId === waveRunId), "settle → all clarified");
+  assert.strictEqual(st2.queue.state, "awaiting-release");
 });
 
-// --- Q2: release → sequential pump ---------------------------------------------
+// --- Q2: release → sequential SEEDED builds ---------------------------------------
 
-await test("Q2: release → sequential pump in order → all done → idle", async () => {
+await test("Q2: release seeds one build run per ticket, sequentially, each with its wave spec", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
+  const waveRunId = "run-q2-wave";
   await seedProject("q2", [
-    { id: "F1", title: "one", description: "d", status: "clarified", runId: "run-q2-F1" },
-    { id: "F2", title: "two", description: "d", status: "clarified", runId: "run-q2-F2" },
-    { id: "F3", title: "three", description: "d", status: "clarified", runId: "run-q2-F3" },
+    { id: "F1", title: "one", description: "d", status: "clarified", runId: waveRunId },
+    { id: "F2", title: "two", description: "d", status: "clarified", runId: waveRunId },
+    { id: "F3", title: "three", description: "d", status: "clarified", runId: waveRunId },
   ], "awaiting-release");
-  const runIds = Object.fromEntries((await store("q2")).tickets.map((x) => [x.id, x.runId]));
-  for (const rid of Object.values(runIds)) {
-    engine.runs.set(rid, { id: rid, status: "clarified", holdsTree: false, settled: true, opts: { onSettled: () => {} } });
-  }
+  seedWaveRun(waveRunId, { F1: "spec one", F2: "spec two", F3: "spec three" });
   const rel = mgr.release("q2");
   assert.strictEqual(rel.released, 3);
-  await sleep(20);
-  assert.deepStrictEqual(engine.promotes, [runIds.F1], "pump promotes only the first; next on settle");
-  await engine.finishBuild(runIds.F1, "completed");
-  assert.deepStrictEqual(engine.promotes, [runIds.F1, runIds.F2]);
-  await engine.finishBuild(runIds.F2, "completed");
-  await engine.finishBuild(runIds.F3, "completed");
+  await sleep(30);
+  assert.strictEqual(engine.starts.length, 1, "pump promotes only the first; next on settle");
+  assert.strictEqual(engine.starts[0].ticketId, "F1");
+  assert.strictEqual(engine.starts[0].seedSpec.summary, "spec one", "build seeded with ITS ticket's spec");
+  assert.strictEqual(engine.starts[0].clarify, false);
   const st = await store("q2");
-  assert.ok(st.tickets.every((t) => t.status === "done"));
-  assert.strictEqual(st.queue.state, "idle");
+  const f1BuildRunId = st.tickets.find((t) => t.id === "F1").runId;
+  assert.notStrictEqual(f1BuildRunId, waveRunId, "ticket now points at its BUILD run (D4)");
+  await engine.finishBuild(f1BuildRunId, "completed");
+  await sleep(10);
+  assert.strictEqual(engine.starts.length, 2, "F2 builds after F1 settles");
+  assert.strictEqual(engine.starts[1].ticketId, "F2");
+  assert.strictEqual(engine.starts[1].seedSpec.summary, "spec two");
+  await engine.finishBuild(engine.starts[1].id, "completed");
+  await engine.finishBuild(engine.starts[2].id, "completed");
+  const st2 = await store("q2");
+  assert.ok(st2.tickets.every((t) => t.status === "done"));
+  assert.strictEqual(st2.queue.state, "idle");
 });
 
 // --- Q3: park + cascade ----------------------------------------------------------
@@ -185,22 +197,19 @@ await test("Q2: release → sequential pump in order → all done → idle", asy
 await test("Q3: divergence gate parks the ticket; dependents cascade; independent proceeds", async () => {
   const engine = fakeEngine();
   const { mgr, emitter } = makeManager(engine, null);
+  const waveRunId = "run-q3-wave";
   await seedProject("q3", [
-    { id: "F1", title: "one", description: "d", status: "clarified", runId: "run-q3-F1" },
-    { id: "F2", title: "two", description: "d", dependsOn: ["F1"], status: "clarified", runId: "run-q3-F2" },
-    { id: "F3", title: "three", description: "d", status: "clarified", runId: "run-q3-F3" },
+    { id: "F1", title: "one", description: "d", status: "clarified", runId: waveRunId },
+    { id: "F2", title: "two", description: "d", dependsOn: ["F1"], status: "clarified", runId: waveRunId },
+    { id: "F3", title: "three", description: "d", status: "clarified", runId: waveRunId },
   ], "awaiting-release");
-  for (const t of (await store("q3")).tickets) {
-    if (t.runId) engine.runs.set(t.runId, { id: t.runId, status: "clarified", holdsTree: false, settled: true, opts: { onSettled: () => {} } });
-  }
+  seedWaveRun(waveRunId, { F1: "s1", F2: "s2", F3: "s3" });
   mgr.release("q3");
-  await sleep(20);
-  const f1Run = (await store("q3")).tickets.find((x) => x.id === "F1").runId;
-  assert.deepStrictEqual(engine.promotes, [f1Run]);
-  const st1 = await store("q3");
-  const f1RunId = st1.tickets.find((t) => t.id === "F1").runId;
-  // F1's promoted run opens a divergence gate → watcher parks + cancels
-  emitter.state({ id: f1RunId, state: { status: "awaiting-gate", gate: { type: "divergence" }, ticketId: "F1", project: "q3" } });
+  await sleep(30);
+  assert.strictEqual(engine.starts.length, 1);
+  const f1BuildRunId = engine.starts[0].id;
+  // F1's promoted build opens a divergence gate → watcher parks + cancels
+  emitter.state({ id: f1BuildRunId, state: { status: "awaiting-gate", gate: { type: "divergence" }, ticketId: "F1", project: "q3" } });
   await sleep(40);
   const st = await store("q3");
   const byId = Object.fromEntries(st.tickets.map((t) => [t.id, t]));
@@ -208,26 +217,30 @@ await test("Q3: divergence gate parks the ticket; dependents cascade; independen
   assert.strictEqual(byId.F1.blockedReason, "stale-spec");
   assert.strictEqual(byId.F2.status, "blocked", "dependent cascades to blocked");
   assert.match(byId.F2.blockedReason, /depends on F1/);
-  assert.strictEqual(byId.F3.status, "running", "independent ticket proceeds");
+  assert.strictEqual(byId.F3.status, "running", "independent ticket proceeds after the park settles");
   assert.strictEqual(engine.gateCancels.length, 1, "parked run cancelled (branch/session kept)");
 });
 
 // --- Q4: recovery -----------------------------------------------------------------
 
-await test("Q4: recovery — interrupted runs requeue on boot", async () => {
+await test("Q4: recovery — interrupted BUILD runs requeue AND resume; clarify runs go back to draft", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
-  const rid = `recover-${Date.now()}`;
-  fs.mkdirSync(path.join(RUNS_DIR, rid), { recursive: true });
-  fs.writeFileSync(path.join(RUNS_DIR, rid, "state.json"), JSON.stringify({ id: rid, status: "interrupted" }));
+  const buildRunId = `recover-${Date.now()}`;
+  const waveRunId = `wrec-${Date.now()}`;
+  seedRunState(buildRunId, { status: "interrupted", artifacts: { implDelta: { summary: "partial" } } }); // build was under way
+  seedWaveRun(waveRunId, { F2: "s2" }, { status: "interrupted" }); // the wave itself was interrupted mid-clarify
+  engine.disk.set(buildRunId, { status: "interrupted" });
   await seedProject("q4", [
-    { id: "F1", title: "t", description: "d", runId: rid, status: "running" },
+    { id: "F1", title: "t", description: "d", runId: buildRunId, status: "running" },
+    { id: "F2", title: "u", description: "d", runId: waveRunId, status: "clarifying" },
   ], "running");
   mgr.recoverProject("q4");
   const st = await store("q4");
-  assert.strictEqual(st.tickets[0].status, "queued", "interrupted run requeued");
-  assert.strictEqual(st.queue.state, "running");
-  fs.rmSync(path.join(RUNS_DIR, rid), { recursive: true, force: true });
+  assert.strictEqual(st.tickets[0].status, "running", "interrupted build requeued AND auto-resumed by the pump");
+  assert.strictEqual(st.tickets[0].runId, buildRunId, "resumed in place — milestones kept, never re-seeded");
+  assert.strictEqual(st.tickets[1].status, "draft", "clarify-stage runs go back to draft for a re-wave");
+  assert.strictEqual(engine.starts.length, 0, "no NEW run started for the resumed build");
 });
 
 // --- Q5: backlog flip -------------------------------------------------------------
@@ -238,58 +251,75 @@ await test("Q5: backlog flip on completion (file write, commit skipped without a
   fs.writeFileSync(path.join(projDir, "docs", "features.md"), "## F1 — thing 🔴\nbody\n");
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, projDir);
+  const waveRunId = "flip-wave";
   await seedProject("q5", [
-    { id: "F1", title: "thing", description: "d", sourceDoc: "docs/features.md", status: "queued", runId: "flip-run" },
+    { id: "F1", title: "thing", description: "d", sourceDoc: "docs/features.md", status: "queued", runId: waveRunId },
   ], "running");
-  engine.runs.set("flip-run", { id: "flip-run", status: "clarified", holdsTree: false, settled: true, opts: { onSettled: () => {} } });
-  mgr.pump("q5"); // the QUEUE promotes and registers its own build-settle callback
-  await sleep(10);
-  await engine.finishBuild("flip-run", "completed");
+  seedWaveRun(waveRunId, { F1: "s1" });
+  mgr.pump("q5"); // seeds the build run
+  await sleep(20);
+  const buildRunId = engine.starts[0].id;
+  await engine.finishBuild(buildRunId, "completed");
   const doc = fs.readFileSync(path.join(projDir, "docs", "features.md"), "utf8");
   assert.ok(doc.includes("🟢"), "status flipped to done");
   fs.rmSync(projDir, { recursive: true, force: true });
 });
 
-// --- Q6: promote from disk (restart between wave and release) -------------------
+// --- Q6: release after a restart (the wave run exists only on disk) ---------------
 
-await test("Q6: release after a restart promotes clarified runs from disk", async () => {
+await test("Q6: release after a restart — seeded builds from the wave run's on-disk specs", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
-  // the wave ran BEFORE the restart — the runs exist only on disk
-  engine.disk.set("run-q6-F1", { status: "clarified" });
-  engine.disk.set("run-q6-F2", { status: "clarified" });
+  // the wave ran BEFORE the restart — no in-memory run, only state.json
+  const waveRunId = "run-q6-wave";
+  seedWaveRun(waveRunId, { F1: "disk spec 1", F2: "disk spec 2" });
   await seedProject("q6", [
-    { id: "F1", title: "one", description: "d", status: "clarified", runId: "run-q6-F1" },
-    { id: "F2", title: "two", description: "d", status: "clarified", runId: "run-q6-F2" },
+    { id: "F1", title: "one", description: "d", status: "clarified", runId: waveRunId },
+    { id: "F2", title: "two", description: "d", status: "clarified", runId: waveRunId },
   ], "awaiting-release");
   const rel = mgr.release("q6");
   assert.strictEqual(rel.released, 2);
-  await sleep(20);
-  assert.ok(engine.runs.has("run-q6-F1"), "controller rebuilt from disk (promote fallback)");
-  assert.strictEqual((await store("q6")).tickets.find((t) => t.id === "F1").status, "running");
-  await engine.finishBuild("run-q6-F1", "completed");
-  await engine.finishBuild("run-q6-F2", "completed");
+  await sleep(30);
+  assert.strictEqual(engine.starts.length, 1);
+  assert.strictEqual(engine.starts[0].seedSpec.summary, "disk spec 1", "spec read from the on-disk wave run");
+  await engine.finishBuild(engine.starts[0].id, "completed");
+  await engine.finishBuild(engine.starts[1].id, "completed");
   const st = await store("q6");
-  assert.ok(st.tickets.every((t) => t.status === "done"), "queue learned every settle from the disk-resumed runs");
+  assert.ok(st.tickets.every((t) => t.status === "done"), "restarts never strand the queue");
   assert.strictEqual(st.queue.state, "idle");
 });
 
-// --- Q7: retry re-enters the queue loop -------------------------------------------
+// --- Q7: retry re-enters the queue loop (build-phase park) -------------------------
 
-await test("Q7: retry resumes the parked run from disk and the queue learns the settle", async () => {
+await test("Q7: retry resumes a parked BUILD run from disk and the queue learns the settle", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
+  const buildRunId = `run-q7-${Date.now()}`;
+  seedRunState(buildRunId, { status: "failed", artifacts: { implDelta: { summary: "x" } } }); // build-phase park
   await seedProject("q7", [
-    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "gates-exhausted", runId: "run-q7-F1" },
+    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "gates-exhausted", runId: buildRunId },
   ], "idle");
-  engine.disk.set("run-q7-F1", { status: "failed" }); // parked before the restart
+  engine.disk.set(buildRunId, { status: "failed" });
   const out = mgr.retry("q7", "F1");
   assert.strictEqual(out.ok, true, out.error);
-  assert.ok(engine.runs.has("run-q7-F1"), "run controller rebuilt with the queue's settle callback");
+  assert.ok(engine.runs.has(buildRunId), "run controller rebuilt with the queue's settle callback");
   await sleep(10);
-  await engine.finishBuild("run-q7-F1", "completed");
+  await engine.finishBuild(buildRunId, "completed");
   const st = await store("q7");
   assert.strictEqual(st.tickets[0].status, "done", "the retried run's settle reached the queue");
+});
+
+await test("Q7b: retry on a clarify-stage park points at re-clarify", async () => {
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, null);
+  const waveRunId = "run-q7b-wave";
+  seedWaveRun(waveRunId, { F1: "s1" });
+  await seedProject("q7b", [
+    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "stale-spec", runId: waveRunId },
+  ], "idle");
+  const out = mgr.retry("q7b", "F1");
+  assert.strictEqual(out.ok, false);
+  assert.match(out.error, /re-clarify/);
 });
 
 // --- Q8: the dependency cascade reverses on completion ---------------------------
@@ -297,19 +327,20 @@ await test("Q7: retry resumes the parked run from disk and the queue learns the 
 await test("Q8: completing a blocked ticket un-blocks its dependents (the cascade reverses)", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
+  const f1Run = `run-q8-f1-${Date.now()}`;
+  const f2Wave = "run-q8-wave";
+  seedRunState(f1Run, { status: "failed", artifacts: { implDelta: { summary: "x" } } });
+  seedWaveRun(f2Wave, { F2: "s2", F3: "s3" });
   await seedProject("q8", [
-    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "gates-exhausted", runId: "run-q8-F1" },
-    { id: "F2", title: "two", description: "d", dependsOn: ["F1"], status: "blocked", blockedReason: "depends on F1", runId: "run-q8-F2" },
-    { id: "F3", title: "three", description: "d", status: "blocked", blockedReason: "stale-spec", runId: "run-q8-F3" },
+    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "gates-exhausted", runId: f1Run },
+    { id: "F2", title: "two", description: "d", dependsOn: ["F1"], status: "blocked", blockedReason: "depends on F1", runId: f2Wave },
+    { id: "F3", title: "three", description: "d", status: "blocked", blockedReason: "stale-spec", runId: f2Wave },
   ], "idle");
-  // the runs exist on disk (a restart happened since the cascade)
-  engine.disk.set("run-q8-F1", { status: "failed" });
-  engine.disk.set("run-q8-F2", { status: "clarified" });
-  engine.disk.set("run-q8-F3", { status: "clarified" });
+  engine.disk.set(f1Run, { status: "failed" });
   const out = await mgr.retry("q8", "F1");
   assert.strictEqual(out.ok, true, out.error);
   await sleep(10);
-  await engine.finishBuild("run-q8-F1", "completed");
+  await engine.finishBuild(f1Run, "completed");
   const st = await store("q8");
   const byId = Object.fromEntries(st.tickets.map((t) => [t.id, t]));
   assert.strictEqual(byId.F1.status, "done");
@@ -317,7 +348,7 @@ await test("Q8: completing a blocked ticket un-blocks its dependents (the cascad
   assert.strictEqual(byId.F2.blockedReason, null);
   assert.strictEqual(byId.F3.status, "blocked", "own-gate blocks stay parked for the owner");
   assert.strictEqual(byId.F3.blockedReason, "stale-spec");
-  await engine.finishBuild("run-q8-F2", "completed");
+  await engine.finishBuild(engine.starts.find((s) => s.ticketId === "F2").id, "completed");
   const st2 = await store("q8");
   assert.ok(st2.tickets.filter((t) => t.id !== "F3").every((t) => t.status === "done"));
   assert.strictEqual(st2.queue.state, "idle", "blocked-but-not-pumpable work parks the TICKET, never the queue");
@@ -331,46 +362,45 @@ await test("Q9: backlog flip skipped while another run holds the tree (the doc s
   fs.writeFileSync(path.join(projDir, "docs", "features.md"), "## F1 — thing 🔴\nbody\n");
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, projDir);
+  const waveRunId = "flip9-wave";
   await seedProject("q9", [
-    { id: "F1", title: "thing", description: "d", sourceDoc: "docs/features.md", status: "queued", runId: "flip9" },
+    { id: "F1", title: "thing", description: "d", sourceDoc: "docs/features.md", status: "queued", runId: waveRunId },
   ], "running");
-  engine.runs.set("flip9", { id: "flip9", status: "clarified", holdsTree: false, settled: true, opts: { onSettled: () => {} } });
-  mgr.pump("q9"); // promotes flip9 (tree free at pump time)
-  await sleep(10);
-  // a direct run grabs the tree before flip9's build settles
+  seedWaveRun(waveRunId, { F1: "s1" });
+  mgr.pump("q9"); // seeds the build run (tree free at pump time)
+  await sleep(20);
+  const buildRunId = engine.starts[0].id;
+  // a direct run grabs the tree before the build settles
   engine.runs.set("direct-run", { id: "direct-run", status: "running", holdsTree: true, settled: false, opts: {} });
-  await engine.finishBuild("flip9", "completed");
+  await engine.finishBuild(buildRunId, "completed");
   const doc = fs.readFileSync(path.join(projDir, "docs", "features.md"), "utf8");
   assert.ok(doc.includes("🔴"), "flip skipped — the doc was NOT written into the direct run's branch");
   assert.ok(!doc.includes("🟢"), "no partial flip");
   fs.rmSync(projDir, { recursive: true, force: true });
 });
 
-// --- Q10/Q11: re-clarify seeding + wave-state guard ---------------------------------
+// --- Q10: re-clarify seeding (spec fallback + park reason) -------------------------
 
-await test("Q10: re-clarify seeds the old spec + park reason into the fresh run's task", async () => {
+await test("Q10: re-clarify is a single-ticket wave seeded with the old spec + park reason", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
-  const rid = `recl-${Date.now()}`;
-  fs.mkdirSync(path.join(RUNS_DIR, rid), { recursive: true });
-  fs.writeFileSync(path.join(RUNS_DIR, rid, "state.json"), JSON.stringify({
-    artifacts: { spec: { summary: "old summary", decisions: [{ topic: "style", decision: "CommonJS" }], acceptance_criteria: ["lib/greet.js exists"] } },
-  }));
+  const waveRunId = `recl-${Date.now()}`;
+  seedWaveRun(waveRunId, { F1: "old summary spec" });
   await seedProject("q10", [
-    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "stale-spec", runId: rid },
+    { id: "F1", title: "one", description: "d", status: "blocked", blockedReason: "stale-spec", runId: waveRunId },
   ], "idle");
   const out = await mgr.reclarify("q10", "F1");
   assert.strictEqual(out.ok, true, JSON.stringify(out.errors ?? out));
   await sleep(20);
-  const started = engine.runs.get(out.started[0].runId);
-  assert.match(started.opts.task, /RE-CLARIFICATION CONTEXT/);
-  assert.match(started.opts.task, /stale-spec/);
-  assert.match(started.opts.task, /old summary/);
-  assert.match(started.opts.task, /lib\/greet\.js exists/);
-  fs.rmSync(path.join(RUNS_DIR, rid), { recursive: true, force: true });
+  assert.strictEqual(engine.starts.length, 1);
+  const opts = engine.starts[0];
+  assert.deepStrictEqual(opts.waveTickets.map((t) => t.id), ["F1"]);
+  assert.match(opts.task, /RE-CLARIFICATION CONTEXT/);
+  assert.match(opts.task, /stale-spec/);
+  assert.match(opts.task, /old summary spec/, "seed reads the PER-TICKET spec from the wave run (D6 fallback)");
 });
 
-await test("Q11: a wave whose starts all fail can't stick the queue at 'clarifying'", async () => {
+await test("Q11: a wave whose starts fail can't stick the queue at 'clarifying'", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
   await seedProject("q11", [
@@ -384,32 +414,32 @@ await test("Q11: a wave whose starts all fail can't stick the queue at 'clarifyi
 
 // --- Q12: failed-build classification from the run's error record ------------------
 
-async function seedFailedRunWithError(rid, error) {
-  fs.mkdirSync(path.join(RUNS_DIR, rid), { recursive: true });
-  fs.writeFileSync(path.join(RUNS_DIR, rid, "state.json"), JSON.stringify({ id: rid, status: "failed", error }));
-}
-
 await test("Q12: gates failures vs provider failures classify differently (§2.4)", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
+  const waveRunId = "run-q12-wave";
   await seedProject("q12", [
-    { id: "F1", title: "gates", description: "d", status: "queued", runId: "run-q12-a" },
-    { id: "F2", title: "provider", description: "d", status: "queued", runId: "run-q12-b" },
+    { id: "F1", title: "gates", description: "d", status: "queued", runId: waveRunId },
+    { id: "F2", title: "provider", description: "d", status: "queued", runId: waveRunId },
   ], "running");
-  await seedFailedRunWithError("run-q12-a", "gates still failing after 2 fix round(s): verify: 1 failing check(s)");
-  await seedFailedRunWithError("run-q12-b", "provider stall detected — aborting the session");
-  for (const rid of ["run-q12-a", "run-q12-b"]) {
-    engine.runs.set(rid, { id: rid, status: "clarified", holdsTree: false, settled: true, opts: { onSettled: () => {} } });
-  }
-  mgr.pump("q12"); // promotes F1
-  await sleep(10);
-  await engine.finishBuild("run-q12-a", "failed");
-  await engine.finishBuild("run-q12-b", "failed");
+  seedWaveRun(waveRunId, { F1: "s1", F2: "s2" });
+  const aRun = `run-q12-a-${Date.now()}`;
+  const bRun = `run-q12-b-${Date.now()}`;
+  seedRunState(aRun, { status: "failed", error: "gates still failing after 2 fix round(s): verify: 1 failing check(s)" });
+  seedRunState(bRun, { status: "failed", error: "provider stall detected — aborting the session" });
+  mgr.pump("q12"); // seeds F1's build
+  await sleep(20);
+  const a = engine.starts.find((s) => s.ticketId === "F1");
+  await engine.finishBuild(a.id, "failed");
+  // F2's build: rewrite ITS run-state error before failing it
+  const f2Dir = path.join(RUNS_DIR, engine.starts.find((s) => s.ticketId === "F2").id);
+  fs.mkdirSync(f2Dir, { recursive: true });
+  fs.writeFileSync(path.join(f2Dir, "state.json"), JSON.stringify({ status: "failed", error: "provider stall detected — aborting the session" }));
+  await engine.finishBuild(engine.starts.find((s) => s.ticketId === "F2").id, "failed");
   const st = await store("q12");
   const byId = Object.fromEntries(st.tickets.map((t) => [t.id, t]));
   assert.strictEqual(byId.F1.blockedReason, "gates-exhausted", "a gate verdict parks as gates-exhausted");
   assert.strictEqual(byId.F2.blockedReason, "provider-failures", "a provider-type error parks as provider-failures");
-  for (const rid of ["run-q12-a", "run-q12-b"]) fs.rmSync(path.join(RUNS_DIR, rid), { recursive: true, force: true });
 });
 
 // --- Q13: queue state derives from tickets (re-clarify during a build) ---------
@@ -417,22 +447,23 @@ await test("Q12: gates failures vs provider failures classify differently (§2.4
 await test("Q13: re-clarify mid-build doesn't corrupt the queue state chip", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
+  const waveRunId = `run-q13-wave-${Date.now()}`;
   await seedProject("q13", [
-    { id: "F1", title: "building", description: "d", status: "queued", runId: "run-q13-F1" },
-    { id: "F2", title: "parked", description: "d", status: "blocked", blockedReason: "stale-spec", runId: "run-q13-F2" },
+    { id: "F1", title: "building", description: "d", status: "queued", runId: waveRunId },
+    { id: "F2", title: "parked", description: "d", status: "blocked", blockedReason: "stale-spec", runId: waveRunId },
   ], "running");
-  engine.disk.set("run-q13-F1", { status: "clarified" }); // clarified before a restart
-  mgr.pump("q13"); // promotes F1 (wires the manager's settle callback)
-  await sleep(10);
+  seedWaveRun(waveRunId, { F1: "s1", F2: "s2" });
+  mgr.pump("q13"); // F1 build runs
+  await sleep(20);
   assert.strictEqual((await store("q13")).tickets[0].status, "running");
-  engine.disk.set("run-q13-F2", { status: "clarified" }); // F2's old clarify run on disk
-  const out = await mgr.reclarify("q13", "F2");
+  const out = await mgr.reclarify("q13", "F2"); // single-ticket wave
   assert.strictEqual(out.ok, true, JSON.stringify(out.errors ?? out));
-  await sleep(20); // wave settles → old code flipped the chip to awaiting-release here
+  await engine.settleWave(engine.starts[engine.starts.length - 1].id, "clarified"); // the re-clarify wave settles
+  await sleep(20); // → old code flipped the chip to awaiting-release here
   const st = await store("q13");
   assert.strictEqual(st.queue.state, "running", "a build is still in flight — the chip must not say awaiting-release");
   assert.strictEqual(st.tickets.find((t) => t.id === "F2").status, "clarified");
-  await engine.finishBuild("run-q13-F1", "completed");
+  await engine.finishBuild(engine.starts.find((s) => s.ticketId === "F1").id, "completed");
   const st2 = await store("q13");
   assert.strictEqual(st2.queue.state, "awaiting-release", "builds drained → awaiting-release");
 });
@@ -442,10 +473,11 @@ await test("Q13: re-clarify mid-build doesn't corrupt the queue state chip", asy
 await test("Q14: direct run settles → the queue pump that deferred on its tree lock resumes", async () => {
   const engine = fakeEngine();
   const { mgr, emitter } = makeManager(engine, null);
+  const waveRunId = "run-q14-wave";
   await seedProject("q14", [
-    { id: "F1", title: "one", description: "d", status: "queued", runId: "run-q14-F1" },
+    { id: "F1", title: "one", description: "d", status: "queued", runId: waveRunId },
   ], "running");
-  engine.disk.set("run-q14-F1", { status: "clarified" }); // clarified before a restart
+  seedWaveRun(waveRunId, { F1: "s1" });
   // a direct run holds the tree — release/pump defers
   engine.runs.set("direct-q14", { id: "direct-q14", status: "running", holdsTree: true, settled: false, opts: {} });
   mgr.pump("q14");
@@ -457,14 +489,11 @@ await test("Q14: direct run settles → the queue pump that deferred on its tree
   direct.settled = true;
   direct.holdsTree = false;
   emitter.state({ id: "direct-q14", state: { status: "completed", project: "q14" } });
-  await sleep(20);
+  await sleep(30);
   const st = await store("q14");
-  assert.strictEqual(st.tickets[0].status, "running", "queue promoted once the tree freed");
-  await engine.finishBuild("run-q14-F1", "completed");
+  assert.strictEqual(st.tickets[0].status, "running", "queue seeded a build once the tree freed");
+  await engine.finishBuild(engine.starts[0].id, "completed");
   assert.strictEqual((await store("q14")).queue.state, "idle");
 });
 
-
-const failed = results.filter(([, ok]) => !ok).length;
-console.log(`\n${results.length - failed}/${results.length} queue tests passed`);
-process.exit(failed ? 1 : 0);
+process.on("exit", () => { try { fs.rmSync(TICKETS_DIR, { recursive: true, force: true }); fs.rmSync(RUNS_DIR, { recursive: true, force: true }); } catch {} });

@@ -845,6 +845,99 @@ await test("v3: hard cancel (out-of-band, owner) fires onSettled — queue ticke
   assert.deepStrictEqual(settled, ["cancelled"], "no duplicate settle after the cancelled turn unwinds");
 });
 
+await test("v3.1: seedSpec — a build run starts with its wave spec; clarify skipped", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  let builderPromptText = null;
+  const scripts = {
+    build: [
+      async ({ tools, text }) => {
+        builderPromptText = text;
+        assert.match(text, /SEED-SPEC-MARKER/, "builder prompt carries the seeded spec");
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_verify", verifyArtifact(true));
+        await callTool(tools, "submit_audit", auditArtifact(false));
+      },
+    ],
+  };
+  const emit = { state: () => {}, event: () => {} };
+  const engine = createEngine({
+    modelRuntime: {}, emit, webTools: {},
+    adapters: { openStepSession: makeFakeOpen(scripts), runNode: async () => { throw new Error("clarify must not run for a seeded build"); }, runMechanicalChecks: async () => [] },
+  });
+  const st = await engine.start({
+    id: `seed-${Date.now()}`, task: "t", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: false, maxFixRounds: 2, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
+    seedSpec: { summary: "SEED-SPEC-MARKER summary", decisions: [{ topic: "style", decision: "CommonJS" }], acceptance_criteria: ["AC-SEED"] },
+    ticketId: "F06",
+  });
+  const deadline = Date.now() + 15_000;
+  while (!["completed", "failed", "cancelled"].includes(st.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.strictEqual(st.artifacts.spec.summary, "SEED-SPEC-MARKER summary", "spec seeded into artifacts");
+  assert.ok(builderPromptText.includes("CommonJS"), "seeded decisions flow into the build");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "clarify").length, 0, "no clarify session");
+});
+
+await test("v3.1: wave clarify — one PM run locks one spec per ticket; REJECTED on bad ticket_id", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const prompts = [];
+  let turns = 0;
+  const waveRunNode = async (opts) => {
+    if (opts.nodeId !== "clarify") return;
+    prompts.push(opts.prompt);
+    const fin = (opts.customTools ?? []).find((t) => t.name === "finalize_spec");
+    turns += 1;
+    if (turns === 1) {
+      const bad = await fin.execute("x", { ticket_id: "F99", summary: "s", decisions: [], acceptance_criteria: ["AC"] });
+      assert.match(bad.content[0].text, /REJECTED.*F99/, "unknown ticket_id rejected with guidance");
+      const dup = await fin.execute("x", { ticket_id: "F06", summary: "F06 spec v1", decisions: [], acceptance_criteria: ["AC6"] });
+      assert.match(dup.content[0].text, /RECORDED.*1\/2/);
+      return;
+    }
+    // turn 2: overwrite F06 then lock F07 — coverage completes the phase
+    const again = await fin.execute("x", { ticket_id: "F06", summary: "F06 spec FINAL", decisions: [], acceptance_criteria: ["AC6b"] });
+    assert.match(again.content[0].text, /RECORDED/);
+    const last = await fin.execute("x", { ticket_id: "F07", summary: "F07 spec", decisions: [], acceptance_criteria: ["AC7"] });
+    assert.match(last.content[0].text, /fully clarified \(2\/2\)/);
+  };
+  const emit = { state: () => {}, event: () => {} };
+  const engine = createEngine({
+    modelRuntime: {}, emit, webTools: {},
+    adapters: { openStepSession: makeFakeOpen({ build: [async () => { throw new Error("build must not run"); }] }), runNode: waveRunNode, runMechanicalChecks: async () => [] },
+  });
+  const st = await engine.start({
+    id: `wave-${Date.now()}`, task: "WAVE BRIEF", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: true, maxFixRounds: 2, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
+    stopAfterClarify: true, waveTickets: [{ id: "F06", title: "Refresh-all" }, { id: "F07", title: "Auto-refresh" }],
+    ticketId: null,
+  });
+  const deadline = Date.now() + 15_000;
+  while (!["clarified", "failed", "cancelled"].includes(st.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "clarified", st.error);
+  assert.deepStrictEqual(st.wave.ticketIds, ["F06", "F07"], "wave recorded in state");
+  assert.strictEqual(st.artifacts.specs.F06.summary, "F06 spec FINAL", "re-finalize overwrites");
+  assert.strictEqual(st.artifacts.specs.F07.summary, "F07 spec");
+  assert.match(prompts[1] ?? "", /WAVE PROGRESS.*Still to finalize: F07/, "round-2 prompt carries wave progress");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "build").length, 0, "no build session");
+  assert.strictEqual(st.artifacts.spec, undefined, "no single run spec on a wave run");
+});
+
+await test("v3.1: waveTickets without clarify is rejected", async () => {
+  const engine = createEngine({ modelRuntime: {}, emit: { state: () => {}, event: () => {} }, webTools: {}, adapters: {} });
+  await assert.rejects(
+    () => engine.start({ id: `wv-${Date.now()}`, task: "t", project: { name: "sandbox", path: FIXTURE }, models: {}, clarify: false, maxFixRounds: 0, git: false, audit: false, approvePlan: false, remoteChecks: false, security: "off", waveTickets: [{ id: "F1" }] }),
+    /waveTickets requires clarify/,
+  );
+});
+
 // --- summary ---------------------------------------------------------------------------
 
 const failed = results.filter(([, ok]) => !ok);

@@ -232,6 +232,7 @@ const server = http.createServer(async (req, res) => {
           items.push({
             runId: st.id,
             ticketId: st.ticketId ?? st.options?.ticketId ?? null,
+            waveTicketIds: st.wave?.ticketIds ?? null, // v3.1: one PM item for the whole wave
             round: st.gate.round ?? 1,
             questions: st.gate.questions ?? [],
           });

@@ -1,6 +1,6 @@
 # nano-cycle v3.1 — Single-PM clarification waves
 
-**Status:** PLANNED — implements on `v3-ticket-queue` before the v3.0.0 merge.  
+**Status:** IMPLEMENTED on `v3-ticket-queue` — 22 engine scenarios (3 new v3.1) + 15 queue tests (reworked Q1–Q14 + Q7b) green; GUI/mcp/runbook updated. Owner live validation re-run (W1–W8) before the v3.0.0 merge.  
 **Supersedes:** the wave mechanics of `docs/PLAN-v3-ticket-queue.md` §2.4 (one PM run per ticket). Everything else in v3 — sequential delivery, park-don't-block, dependency cascade, release gate, backlog flip — is unchanged.  
 **Evidence:** live glm-monitor wave 2026-09-21 13:44 — F06 and F07 clarified as two isolated PM runs; F07's PM, seeing a tree where F06 doesn't exist yet, asked the owner whether it should build both. Cross-feature decisions were impossible to make coherently; the owner paid for two investigations of the same repo and got a confused question as the dividend.
 
@@ -229,26 +229,26 @@ Live validation: W1–W8 re-run; W4's criteria as in §6.
 
 ### Phase 0 — Engine
 
-- [ ] **1. `seedSpec` on `start()`** — seed `run.spec`/`state.artifacts.spec`,
+- [x] **1. `seedSpec` on `start()`** — seed `run.spec`/`state.artifacts.spec`,
       clarify skipped; harness: seeded build carries the spec.
-- [ ] **2. `waveTickets` + wave clarify loop** — brief-aware finalize_spec
+- [x] **2. `waveTickets` + wave clarify loop** — brief-aware finalize_spec
       with `ticket_id`, validation, incremental `artifacts.specs`, coverage
       exit; `state.wave`; harness: happy path + REJECTED/overwrite/continue.
 
 ### Phase 1 — Queue
 
-- [ ] **3. Single-run waves** — one `engine.start`, all-wave-ticket settle
+- [x] **3. Single-run waves** — one `engine.start`, all-wave-ticket settle
       mapping; Q15.
-- [ ] **4. `specForTicket` + `startOrResumeBuildRun`** — pump seeded starts
+- [x] **4. `specForTicket` + `startOrResumeBuildRun`** — pump seeded starts
       vs resume discriminator; no-spec park; Q16, Q18 (rework Q2/Q6).
-- [ ] **5. retry guard + reclarify seed fallback + recovery verify** — Q17;
+- [x] **5. retry guard + reclarify seed fallback + recovery verify** — Q17;
       rework Q5/Q8/Q9/Q10 fixtures.
 
 ### Phase 2 — Surfaces
 
-- [ ] **6. Inbox `waveTicketIds` + label; ReleaseReview spec dedupe/fallback;
+- [x] **6. Inbox `waveTicketIds` + label; ReleaseReview spec dedupe/fallback;
       hint texts; run-page wave-specs card (if needed).**
-- [ ] **7. MCP description + runbook W1/W4 wording; plan-doc amendment note.**
+- [x] **7. MCP description + runbook W1/W4 wording; plan-doc amendment note.**
 
 ### Phase 3 — Ship gate
 

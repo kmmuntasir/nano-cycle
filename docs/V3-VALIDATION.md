@@ -75,12 +75,13 @@ and an empty array. Run node --test test/csv.test.js.
 ```
 
 **2. Clarify wave** — **◎ Clarify Wave** → pick models (flash for all) → **Start Wave →**.
-All three tickets flip to `clarifying` (parallel PM runs — the tree lock does
-not apply to them).
+All three tickets flip to `clarifying` and ONE PM run starts for the whole
+wave (one conversation, one investigation — the tree lock does not apply).
 
-**3. PM Inbox** — questions appear grouped by ticket. Answer each batch
-(**Submit Answers** per ticket). Suggested answers — keep them minimal, the
-specs are intentionally simple:
+**3. PM Inbox** — the wave's questions appear as ONE item ("Wave: F01, F02,
+F03"). Answer the batch (**Submit Answers** once) — shared concerns get asked
+once, cross-feature decisions stay coherent. Suggested answers — keep them
+minimal, the specs are intentionally simple:
 
 ```text
 F01: Node built-ins only, no dependencies. CommonJS.
@@ -91,8 +92,9 @@ F03: Node built-ins only, no dependencies. CommonJS.
 (or whatever the PM actually asks about — the point is one sitting, three tickets)
 
 **4. Release gate** — when all three are `clarified`, the queue shows
-**awaiting-release**. Review the specs (open each run's Review tab if you want
-detail), then **▶ Release 3 Ticket(s)**.
+**awaiting-release**. Review the three specs in the batch gate (each is
+rendered from the wave run's per-ticket spec), then **▶ Release 3 Ticket(s)**.
+Each ticket then builds in its OWN run, seeded with its spec, sequentially.
 
 **Pass:**
 - Tickets promoted **one at a time** — F01 runs fully (build → verify →
@@ -184,12 +186,13 @@ answer the PM's questions (mention the greeting changed) → release → done.
 diverging — same as V4; if F21 just completes, that's legitimate behavior, the
 gate path stays harness-covered.)
 
-## W4 — parallel clarify from one Inbox (covered by W1; skip unless isolating)
+## W4 — single-PM wave from one Inbox (covered by W1; skip unless isolating)
 
-W1 already proves 3 parallel clarify runs + one Inbox. To isolate: start a
-clarify wave for 3 tickets, DON'T answer, and confirm all three runs sit in
-`awaiting-answers` simultaneously (server state.json per run) with no tree
-contention — the sandbox tree stays untouched while all three PMs investigate.
+W1 already proves the single-PM wave + one Inbox item. To isolate: start a
+clarify wave for 3 tickets, DON'T answer, and confirm there is exactly ONE
+run in `awaiting-answers` (its state.json has `wave.ticketIds` = all three)
+with no tree contention — the sandbox tree stays untouched while the one PM
+investigates for the whole wave.
 
 ## W5 — pause / resume / reorder the queue
 

@@ -40,7 +40,7 @@ const STATUS_ICON: Record<string, { Icon: typeof Circle; color: string; spin?: b
 
 const QUEUE_STATE_HINT: Record<string, string> = {
   idle: "Idle — add tickets, then run a clarify wave",
-  clarifying: "PM clarification wave in flight — answer in the Inbox below",
+  clarifying: "PM clarification wave in flight — one PM for the whole batch; answer in the Inbox below",
   "awaiting-release": "Specs locked — review them and release the queue",
   running: "Delivering tickets sequentially",
   paused: "Paused — the current ticket finishes, then the queue waits",
@@ -218,7 +218,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
                 refresh();
               } finally { setBusy(false); }
             }}
-            title="Start PM clarification runs for every draft/blocked/clarified ticket — answer them together in the Inbox."
+            title="One PM conversation for every draft/blocked/clarified ticket — it investigates once, asks one batched round of questions, and locks one spec per ticket. Answer in the Inbox."
           >
             {showModels ? "Start Wave →" : (
               <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
@@ -688,10 +688,11 @@ function InboxTicket({ item, onAnswer }: { item: InboxItem; onAnswer: (answers: 
     <Box border="1px solid" borderColor="line" borderRadius="md" p={3}>
       <HStack mb={2} flexWrap="wrap">
         <Text fontSize="12px" fontWeight={700} color="accent" fontFamily="ui-monospace, monospace">
-          {item.ticketId ?? item.runId}
+          {item.waveTicketIds?.length ? `Wave: ${item.waveTicketIds.join(", ")}` : item.ticketId ?? item.runId}
         </Text>
         <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
           Round {item.round} · {item.questions.length} question(s)
+          {item.waveTicketIds?.length ? ` · one PM for ${item.waveTicketIds.length} tickets` : ""}
         </Text>
       </HStack>
       <Stack gap={2}>
@@ -768,18 +769,29 @@ function ReleaseReview({ tickets, busy, onClose, onRelease }: {
   const idsKey = tickets.map((t) => t.id).join(",");
   useEffect(() => {
     let live = true;
-    for (const t of tickets) {
-      if (!t.runId) continue;
-      api.getRun(t.runId)
-        .then((r) => {
-          if (!live) return;
-          const spec = (r.state.artifacts as Record<string, unknown>).spec as SpecDigest | undefined;
-          setSpecs((s) => ({ ...s, [t.id]: spec ?? null }));
-        })
-        .catch(() => {
-          if (live) setSpecs((s) => ({ ...s, [t.id]: null }));
-        });
-    }
+    // One fetch per RUN (a wave run carries every ticket's spec in
+    // artifacts.specs) — each ticket reads specs[t.id] ?? spec (legacy).
+    const runs = [...new Set(tickets.filter((t) => t.runId).map((t) => t.runId!))];
+    Promise.all(
+      runs.map(async (rid) => {
+        try {
+          const r = await api.getRun(rid);
+          const a = r.state.artifacts as { spec?: unknown; specs?: Record<string, unknown> };
+          return [rid, a ?? {}] as const;
+        } catch {
+          return [rid, null] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (!live) return;
+      const byRun = new Map(entries);
+      const next: Record<string, SpecDigest | null> = {};
+      for (const t of tickets) {
+        const a = t.runId ? byRun.get(t.runId) : null;
+        next[t.id] = a ? (((a.specs as Record<string, unknown>)?.[t.id] ?? a.spec) as SpecDigest | undefined) ?? null : null;
+      }
+      setSpecs(next);
+    });
     return () => {
       live = false;
     };

@@ -100,7 +100,42 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     };
   }
 
-  // --- clarify wave ------------------------------------------------------------
+  // --- clarify wave (v3.1: ONE PM conversation for the whole batch) --------------
+
+  // The wave brief (plan §3): one PM, the full picture — what's already built,
+  // the wave's features in build order with dependency context, what's later.
+  function composeWaveBrief(store, waveTickets) {
+    const byId = new Map(store.tickets.map((t) => [t.id, t]));
+    const waveIds = new Set(waveTickets.map((t) => t.id));
+    const done = store.tickets.filter((t) => t.status === "done");
+    const later = store.tickets.filter((t) => !waveIds.has(t.id) && t.status !== "done");
+    const depNote = (t) => {
+      const parts = (t.dependsOn ?? []).map((d) => {
+        if (byId.get(d)?.status === "done") return `${d} (already built)`;
+        if (waveIds.has(d)) return `${d} (also in this wave, ${waveTickets.findIndex((x) => x.id === d) < waveTickets.findIndex((x) => x.id === t.id) ? "earlier" : "later"})`;
+        return `${d} (outside this wave)`;
+      });
+      return parts.length ? `Depends on ${parts.join(", ")}.` : "No dependencies.";
+    };
+    const sections = [];
+    if (done.length > 0) {
+      sections.push(`## Already built (present in the working tree — investigate these, don't re-ask about them)\n${done.map((t) => `- ${t.id} — ${t.title}`).join("\n")}`);
+    }
+    sections.push(
+      `## This wave — lock ONE spec per feature (they will be BUILT SEQUENTIALLY in this order)\n` +
+        waveTickets.map((t) => `### ${t.id} — ${t.title}\n${depNote(t)}\n\n${t.description ?? ""}`).join("\n\n"),
+    );
+    if (later.length > 0) {
+      sections.push(`## Later (NOT part of this wave — do not spec these)\n${later.map((t) => `- ${t.id} — ${t.title}`).join("\n")}`);
+    }
+    return [
+      `You are the PRODUCT MANAGER for a WAVE of ${waveTickets.length} feature(s) of this project.`,
+      `Ask questions ONCE for shared concerns (stack, style, conventions), resolve cross-feature decisions coherently,`,
+      `then call finalize_spec once per feature (ticket_id) until every wave ticket has a spec.`,
+      ``,
+      sections.join("\n\n"),
+    ].join("\n");
+  }
 
   async function startClarifyWave(project, ticketIds, { taskSuffix = "" } = {}) {
     const store = loadTickets(project);
@@ -111,59 +146,64 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
     }
-    const started = [];
     const errors = [];
-    setQueueState(project, { state: "clarifying" }); // before the loop — settles may arrive within the same tick
-    for (const id of ticketIds) {
+    const waveTickets = [];
+    for (const id of ticketIds ?? []) {
       const t = store.tickets.find((x) => x.id === id);
       if (!t) { errors.push(`unknown ticket "${id}"`); continue; }
       if (!["draft", "blocked", "clarified"].includes(t.status)) {
         errors.push(`ticket "${id}" is ${t.status} — only draft/blocked/clarified tickets can (re-)clarify`);
         continue;
       }
-      // newRunId() has millisecond precision — a wave loop can start two runs
-      // within one tick, so suffix the ticket id to keep runs/<id> unique.
-      const runId = `${newRunId()}-${String(id).toLowerCase().replace(/[^\w-]/g, "")}`;
-      setTicketStatus(project, id, "clarifying", { runId });
-      const task = [t.title, t.description].filter(Boolean).join("\n\n") + taskSuffix;
-      try {
-        await engine.start({
-          id: runId,
-          task,
-          project: projectRef,
-          models: cfg.models,
-          clarify: true,
-          requireQuestions: false,
-          maxFixRounds: cfg.options.maxFixRounds ?? 2,
-          git: cfg.options.git === true,
-          audit: cfg.options.audit !== false,
-          approvePlan: false, // queue law: the spec is the owner's gate, the plan is not
-          remoteChecks: cfg.options.remoteChecks === true,
-          security: cfg.options.security ?? "off",
-          stopAfterClarify: true,
-          ticketId: id,
-          onSettled: (status) => onClarifySettled(project, id, runId, status),
-        });
-        started.push({ id, runId });
-      } catch (e) {
-        setTicketStatus(project, id, "blocked", { reason: "provider-failures", note: String(e?.message ?? e) });
-        errors.push(`${id}: ${e?.message ?? e}`);
-      }
+      waveTickets.push(t);
     }
-    // A wave whose every start failed (or that was empty) never produces a
-    // settle — sync here so the queue can't stick at 'clarifying'.
+    if (waveTickets.length === 0) {
+      syncQueueState(project);
+      broadcastQueue(project);
+      return { ok: false, started: [], errors: errors.length > 0 ? errors : ["no tickets to clarify"] };
+    }
+    setQueueState(project, { state: "clarifying" }); // eager — settles may arrive within the same tick
+    const waveRunId = `${newRunId()}-wave`;
+    const waveIds = waveTickets.map((t) => t.id);
+    for (const t of waveTickets) setTicketStatus(project, t.id, "clarifying", { runId: waveRunId });
+    try {
+      await engine.start({
+        id: waveRunId,
+        task: composeWaveBrief(store, waveTickets) + taskSuffix,
+        project: projectRef,
+        models: cfg.models,
+        clarify: true,
+        requireQuestions: false,
+        maxFixRounds: cfg.options.maxFixRounds ?? 2,
+        git: cfg.options.git === true,
+        audit: cfg.options.audit !== false,
+        approvePlan: false, // queue law: the spec is the owner's gate, the plan is not
+        remoteChecks: cfg.options.remoteChecks === true,
+        security: cfg.options.security ?? "off",
+        stopAfterClarify: true,
+        waveTickets: waveTickets.map((t) => ({ id: t.id, title: t.title })),
+        ticketId: null, // the wave run belongs to no single ticket
+        onSettled: (status) => onWaveSettled(project, waveRunId, waveIds, status),
+      });
+    } catch (e) {
+      for (const t of waveTickets) setTicketStatus(project, t.id, "blocked", { reason: "provider-failures", note: String(e?.message ?? e) });
+      errors.push(`wave start failed: ${e?.message ?? e}`);
+    }
+    // A wave whose start failed never produces a settle — sync here so the
+    // queue can't stick at 'clarifying'.
     syncQueueState(project);
     broadcastQueue(project);
-    return { ok: errors.length === 0, started, errors };
+    return { ok: errors.length === 0, started: [{ runId: waveRunId, tickets: waveIds }], errors };
   }
 
-  function onClarifySettled(project, ticketId, runId, status) {
-    const store = loadTickets(project);
-    const t = store.tickets.find((x) => x.id === ticketId);
-    if (!t || t.runId !== runId) return; // a newer run owns this ticket
-    if (status === "clarified") setTicketStatus(project, ticketId, "clarified", { runId });
-    else if (status === "cancelled") setTicketStatus(project, ticketId, "draft", { runId });
-    else setTicketStatus(project, ticketId, "blocked", { reason: "provider-failures", runId, note: `clarify run ${status}` });
+  function onWaveSettled(project, waveRunId, waveIds, status) {
+    for (const id of waveIds) {
+      const t = loadTickets(project).tickets.find((x) => x.id === id);
+      if (!t || t.runId !== waveRunId) continue; // a newer run owns this ticket
+      if (status === "clarified") setTicketStatus(project, id, "clarified", { runId: waveRunId });
+      else if (status === "cancelled") setTicketStatus(project, id, "draft", { runId: waveRunId });
+      else setTicketStatus(project, id, "blocked", { reason: "provider-failures", runId: waveRunId, note: `clarify wave ${status}` });
+    }
     syncQueueState(project); // wave done → awaiting-release (or running if builds are mid-flight)
     broadcastQueue(project);
   }
@@ -191,7 +231,14 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       .sort((a, b) => (a.order ?? 999) - (b.order ?? 999) || String(a.createdAt).localeCompare(String(b.createdAt)));
   }
 
+  const pumpInFlight = new Set();
   function pump(project) {
+    if (pumpInFlight.has(project)) return; // the fresh-start await is in flight
+    pumpInFlight.add(project);
+    Promise.resolve(pumpOnce(project)).catch(() => {}).finally(() => pumpInFlight.delete(project));
+  }
+
+  async function pumpOnce(project) {
     const store = loadTickets(project);
     if (store.queue.state === "paused") return;
     if (engine.treeLockHolder(resolveProject(project).path)) return; // a build is in flight; onSettled re-pumps
@@ -203,33 +250,97 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     }
     const t = ready[0];
     if (!t.runId) {
-      // clarified without a run (imported/stale store) — cannot promote
+      // clarified without a run (imported/stale store) — cannot build
       setTicketStatus(project, t.id, "blocked", { reason: "provider-failures", note: "clarified ticket has no run — re-clarify" });
       broadcastQueue(project);
       return pump(project);
     }
-    const out = promoteRun(project, t);
+    const out = await startOrResumeBuildRun(project, t);
     if (!out.ok) {
+      if (out.park) {
+        setTicketStatus(project, t.id, "blocked", { reason: "provider-failures", note: String(out.error ?? "cannot start") });
+        broadcastQueue(project);
+        return pump(project);
+      }
       // Holder appeared between checks (a direct run, another queue) — the
       // next settle re-pumps. Leave the ticket queued.
       emit.event?.(t.runId, "_run", { t: "notice", s: `queue: promotion deferred (${out.error})` });
       return;
     }
-    setTicketStatus(project, t.id, "running", { runId: t.runId });
+    setTicketStatus(project, t.id, "running", { runId: out.runId });
     syncQueueState(project);
     broadcastQueue(project);
   }
 
-  // Promote a ticket's clarified run into build. In-session first; when the
-  // server restarted since the wave (the run exists only on disk), continue it
-  // from disk with promote semantics — restarts must not strand the queue.
-  function promoteRun(project, t) {
-    const cb = (status) => onBuildSettled(project, t.id, t.runId, status);
-    let out = engine.promote(t.runId, cb);
-    if (!out.ok && /not active in this server session/.test(String(out.error ?? ""))) {
-      out = engine.resumeFromDisk(t.runId, resolveProject(project), { promote: true, onSettled: cb });
+  function readRunState(runId) {
+    if (!runId) return null;
+    try {
+      return JSON.parse(fs.readFileSync(path.join(runsDir(), runId, "state.json"), "utf8"));
+    } catch {
+      return null;
     }
-    return out;
+  }
+
+  // D6: the ticket's spec — wave runs keep a per-ticket map; legacy clarified
+  // runs keep a single spec. Disk is the source of truth (restart-safe).
+  function specForTicket(t) {
+    const rs = readRunState(t.runId);
+    return rs?.artifacts?.specs?.[t.id] ?? rs?.artifacts?.spec ?? null;
+  }
+
+  // v3.1: the pump SEEDS a fresh build run per ticket (its wave spec rides
+  // along) — except when a BUILD run already exists (interrupted/failed/
+  // cancelled), which is resumed with milestones kept, never re-seeded.
+  async function startOrResumeBuildRun(project, t) {
+    const rs = readRunState(t.runId);
+    const isClarifyStage = !rs || rs.status === "clarified" || (rs.wave?.ticketIds?.length ?? 0) > 0;
+    if (!isClarifyStage) {
+      // the runId never changes on resume — the closure stays valid
+      const cb = (status) => onBuildSettled(project, t.id, t.runId, status);
+      let out = engine.resume(t.runId);
+      if (!out.ok && /not active in this server session/.test(String(out.error ?? ""))) {
+        out = engine.resumeFromDisk(t.runId, resolveProject(project), { onSettled: cb });
+      }
+      return { ok: out.ok === true, runId: t.runId, error: out.error };
+    }
+    const spec = specForTicket(t);
+    if (!spec) return { ok: false, park: true, error: "no spec on the clarify run — re-clarify" };
+    const store = loadTickets(project);
+    const cfg = store.config;
+    let projectRef;
+    try {
+      projectRef = resolveProject(project);
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+    // newRunId() has millisecond precision — suffix the ticket id to keep
+    // runs/<id> unique.
+    const buildRunId = `${newRunId()}-${String(t.id).toLowerCase().replace(/[^\w-]/g, "")}`;
+    // the settle callback MUST carry the BUILD run id — the ticket's runId
+    // changes to it (D4), and onBuildSettled joins on (ticketId, runId).
+    const cb = (status) => onBuildSettled(project, t.id, buildRunId, status);
+    try {
+      await engine.start({
+        id: buildRunId,
+        task: [t.title, t.description].filter(Boolean).join("\n\n"),
+        project: projectRef,
+        models: cfg.models,
+        clarify: false,
+        requireQuestions: false,
+        maxFixRounds: cfg.options.maxFixRounds ?? 2,
+        git: cfg.options.git === true,
+        audit: cfg.options.audit !== false,
+        approvePlan: false, // queue law: the spec is the owner's gate, the plan is not
+        remoteChecks: cfg.options.remoteChecks === true,
+        security: cfg.options.security ?? "off",
+        seedSpec: spec,
+        ticketId: t.id,
+        onSettled: cb,
+      });
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+    return { ok: true, runId: buildRunId };
   }
 
   function onBuildSettled(project, ticketId, runId, status) {
@@ -348,8 +459,14 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (!t) return { ok: false, error: `unknown ticket "${ticketId}"` };
     if (t.status !== "blocked") return { ok: false, error: `ticket "${ticketId}" is not blocked` };
     if (!t.runId) return { ok: false, error: `ticket "${ticketId}" has no run to retry — re-clarify instead` };
-    // Resume the parked run (gates/branch/session kept). In-session first (the
-    // settle callback from its promote is still wired); after a restart the
+    // Resuming a clarify-stage (wave) run makes no sense for one ticket —
+    // park-phase at clarify means re-clarify.
+    const rs = readRunState(t.runId);
+    if (!rs || rs.status === "clarified" || (rs.wave?.ticketIds?.length ?? 0) > 0) {
+      return { ok: false, error: "ticket is parked at the clarify stage — use re-clarify" };
+    }
+    // Resume the parked BUILD run (gates/branch/session kept). In-session
+    // first (its settle callback is still wired); after a restart the
     // controller is rebuilt from disk WITH the queue's settle callback.
     let out = engine.resume(t.runId);
     if (!out.ok && !/only cancelled or failed runs can be resumed|still winding down/.test(String(out.error ?? ""))) {
@@ -376,9 +493,8 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (t.blockedReason) parts.push(`This ticket was previously parked with reason: "${t.blockedReason}".`);
     if (t.runId) {
       try {
-        const runFile = path.join(runsDir(), t.runId, "state.json");
-        const st = JSON.parse(fs.readFileSync(runFile, "utf8"));
-        const spec = st.artifacts?.spec;
+        const st = readRunState(t.runId);
+        const spec = st?.artifacts?.specs?.[t.id] ?? st?.artifacts?.spec;
         if (spec) {
           const digest = [
             `Summary: ${spec.summary ?? ""}`,

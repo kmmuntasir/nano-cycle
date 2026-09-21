@@ -247,6 +247,8 @@ export interface TicketStore {
 export interface InboxItem {
   runId: string;
   ticketId: string | null;
+  /** v3.1 wave runs: every ticket the single PM run is clarifying */
+  waveTicketIds?: string[] | null;
   round: number;
   questions: ClarifyQuestion[];
 }

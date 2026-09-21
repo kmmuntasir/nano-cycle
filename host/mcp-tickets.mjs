@@ -152,7 +152,7 @@ const TOOLS = [
   {
     name: "nano_queue",
     description:
-      "Drive the queue. Actions: clarify (ticketIds — parallel PM runs, answer via nano_inbox), release (ticketIds optional — sequential build/verify/security per ticket), pause, resume, retry (ticketId — resume a parked run), reclarify (ticketId — fresh PM run seeded with the old spec + blocker), reorder (orderedIds — full desired order), config (models/options — run defaults).",
+      "Drive the queue. Actions: clarify (ticketIds — ONE PM run clarifies the whole batch, one spec per ticket; answer via nano_inbox), release (ticketIds optional — sequential build/verify/security per ticket, each seeded with its wave spec), pause, resume, retry (ticketId — resume a parked BUILD run), reclarify (ticketId — fresh single-ticket PM run seeded with the old spec + blocker), reorder (orderedIds — full desired order), config (models/options — run defaults).",
     inputSchema: {
       type: "object",
       properties: {

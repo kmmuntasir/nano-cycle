@@ -337,6 +337,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
   // --- Step 1: clarify (v1, lifted with steps-state instead of nodes) ----------
 
   async function clarifyPhase(run) {
+    // Wave mode (v3.1): ONE PM conversation locks one spec PER wave ticket —
+    // finalize_spec carries ticket_id and specs accumulate in
+    // state.artifacts.specs until every wave ticket is covered.
+    const waveIds = run.state.wave?.ticketIds ?? null;
+    if (waveIds) run.state.artifacts.specs ??= {};
     const rounds = (run.state.qa ?? []).map((r) => ({ questions: r.questions, answers: r.answers }));
     let emptyRounds = 0;
     let round = rounds.length;
@@ -374,6 +379,17 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }));
       const mode = run.options.requireQuestions && rounds.length === 0 ? "questions-only" : "both";
       let prompt = clarifyPrompt(run.task, history, run.projectPath);
+      if (waveIds) {
+        const specs = run.state.artifacts.specs ?? {};
+        const locked = waveIds.filter((id) => specs[id]);
+        const missing = waveIds.filter((id) => !specs[id]);
+        if (locked.length > 0 && missing.length > 0) {
+          prompt +=
+            `\n\nWAVE PROGRESS: specs already locked for ${locked.join(", ")}. Still to finalize: ${missing.join(", ")}.` +
+            ` Do not re-ask answered questions — investigate only what the remaining ticket(s) need,` +
+            ` then call finalize_spec(ticket_id=…) once per remaining ticket.`;
+        }
+      }
       if (mode === "questions-only") {
         prompt += "\n\nOWNER POLICY: at least one clarification round is REQUIRED before the spec may lock. finalize_spec is unavailable this round — investigate the project, then ask your highest-leverage questions via ask_questions.";
       }
@@ -383,6 +399,17 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       const result = await clarifyNode(run, prompt, mode);
 
       if (result.type === "spec") {
+        if (waveIds) {
+          const missing = waveIds.filter((id) => !run.state.artifacts.specs[id]);
+          if (missing.length === 0) {
+            emit.event(run.id, "clarify", {
+              t: "notice",
+              s: `wave clarification complete — specs locked for ${waveIds.join(", ")} after ${rounds.length} round(s)`,
+            });
+            return; // wave covered — the run parks as clarified
+          }
+          continue; // partially covered — loop asks / finalizes the rest
+        }
         emit.event(run.id, "clarify", {
           t: "notice",
           s: `spec finalized after ${rounds.length} clarification round(s): ${result.spec.acceptance_criteria?.length ?? 0} acceptance criteria`,
@@ -494,13 +521,49 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     // question round was asked — finalize_spec is structurally WITHHELD on the
     // first round, not merely discouraged.
     if (mode !== "questions-only") {
+      const waveIds = run.state.wave?.ticketIds ?? null;
+      const specSchema = ARTIFACT_SCHEMAS.spec;
       tools.push(
-        makeTool({
+        defineTool({
           name: "finalize_spec",
           label: "Finalize spec",
-          description: "Finalize the requirements spec.",
-          schema: ARTIFACT_SCHEMAS.spec,
-          onCall: (p) => (store.result = { type: "spec", spec: p }),
+          description: waveIds
+            ? `Finalize the spec for ONE wave ticket. ticket_id is required — exactly one of: ${waveIds.join(", ")}. Call it once per ticket until every wave ticket has a spec.`
+            : "Finalize the requirements spec.",
+          parameters: waveIds
+            ? Type.Object({
+                ticket_id: Type.String({ description: `Which wave ticket this spec is for — exactly one of: ${waveIds.join(", ")}` }),
+                ...specSchema.properties,
+              })
+            : specSchema,
+          execute: async (_id, p) => {
+            if (waveIds) {
+              const tid = String(p?.ticket_id ?? "").trim();
+              if (!waveIds.includes(tid)) {
+                return {
+                  content: [{ type: "text", text: `REJECTED by the driver — ticket_id "${tid || "(missing)"}" is not part of this wave. Call finalize_spec again with ticket_id exactly one of: ${waveIds.join(", ")}.` }],
+                  details: {},
+                };
+              }
+              const { ticket_id, ...spec } = p ?? {};
+              (run.state.artifacts.specs ??= {})[tid] = spec;
+              const covered = waveIds.filter((wid) => run.state.artifacts.specs[wid]);
+              emit.event(run.id, "clarify", {
+                t: "notice",
+                s: `spec locked for ${tid} (${spec.acceptance_criteria?.length ?? 0} acceptance criteria) — ${covered.length}/${waveIds.length} wave tickets covered`,
+              });
+              emit.state(run);
+              store.result = { type: "spec", ticketId: tid, spec };
+              return {
+                content: [{ type: "text", text: covered.length < waveIds.length
+                  ? `RECORDED — spec for ${tid} locked (${covered.length}/${waveIds.length} of the wave). Now finalize the remaining ticket(s): ${waveIds.filter((wid) => !run.state.artifacts.specs[wid]).join(", ")}.`
+                  : `RECORDED — spec for ${tid} locked. The wave is fully clarified (${covered.length}/${waveIds.length}) — STOP now; the run parks for the release gate.` }],
+                details: {},
+              };
+            }
+            store.result = { type: "spec", spec: p ?? {} };
+            return { content: [{ type: "text", text: "Recorded. Nothing else to do." }], details: {} };
+          },
         }),
       );
     }
@@ -1439,10 +1502,16 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
 
       // STEP 1 — clarify.
       if (run.options.clarify && !run.spec) {
-        const spec = await clarifyPhase(run);
-        run.spec = spec;
-        run.state.artifacts.spec = spec;
-        run.sourceDocCache = undefined; // re-resolve against the real spec
+        if (run.state.wave) {
+          // Wave mode: one PM conversation locks one spec per ticket into
+          // state.artifacts.specs — there is no single run spec.
+          await clarifyPhase(run);
+        } else {
+          const spec = await clarifyPhase(run);
+          run.spec = spec;
+          run.state.artifacts.spec = spec;
+          run.sourceDocCache = undefined; // re-resolve against the real spec
+        }
         emit.state(run);
       }
 
@@ -1454,9 +1523,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         run.state.status = "clarified";
         emit.event(run.id, "_run", {
           t: "notice",
-          s: run.spec
-            ? "clarification complete — spec locked; run parked as clarified (awaiting queue promotion)"
-            : "clarify disabled — run parked as clarified (awaiting queue promotion)",
+          s: run.state.wave
+            ? `wave clarification complete — ${Object.keys(run.state.artifacts.specs ?? {}).length}/${run.state.wave.ticketIds.length} spec(s) locked; run parked as clarified (awaiting release)`
+            : run.spec
+              ? "clarification complete — spec locked; run parked as clarified (awaiting queue promotion)"
+              : "clarify disabled — run parked as clarified (awaiting queue promotion)",
         });
         await integrate(run, false);
         // A clarify-only run builds nothing — its run branch would just litter
@@ -1650,9 +1721,25 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       security: securityRequested,
       stopAfterClarify,
       ticketId,
+      seedSpec,
+      waveTickets,
       onSettled,
     }) {
       const options0 = { stopAfterClarify: !!stopAfterClarify };
+      // v3.1 wave mode: ONE clarify conversation for the whole batch of
+      // tickets (finalize_spec carries ticket_id; specs land in
+      // state.artifacts.specs). Requires clarify — a wave without a PM is
+      // meaningless.
+      let wave = null;
+      if (Array.isArray(waveTickets) && waveTickets.length > 0) {
+        if (!clarify) throw new Error("waveTickets requires clarify");
+        wave = [];
+        for (const wt of waveTickets) {
+          const wid = String(wt?.id ?? "").trim();
+          if (!wid) throw new Error("waveTickets entries need an id");
+          if (!wave.some((x) => x.id === wid)) wave.push({ id: wid, title: String(wt?.title ?? "").trim() });
+        }
+      }
       // Phase-aware tree lock: clarify-only runs (stopAfterClarify) are
       // read-only — many may overlap; only tree-holding runs exclude each other.
       for (const other of runs.values()) {
@@ -1725,7 +1812,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         round: 0,
         securityRound: 0,
         qa: [],
-        artifacts: {},
+        wave: wave ? { ticketIds: wave.map((wt) => wt.id) } : null,
+        artifacts: seedSpec ? { spec: seedSpec } : {},
         gate: null,
         pendingPlanGate: null,
         pendingQuestions: null,
@@ -1742,7 +1830,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         projectPath: project.path,
         options,
         models,
-        spec: null,
+        spec: seedSpec ?? null, // v3.1: seeded build runs start with their wave spec
         sourceDocCache: undefined,
         state,
         current: new Map(),
