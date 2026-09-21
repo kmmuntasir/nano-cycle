@@ -45,13 +45,72 @@ else
   warn "no .env at $ENV_FILE — copy .env.example and fill in PI_AUTH_JSON"
 fi
 
-# --- hard prerequisites ----------------------------------------------------------
-command -v node >/dev/null || die "node not found — nano-cycle needs Node >= 24 (https://nodejs.org)"
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-[[ "$NODE_MAJOR" -ge 24 ]] || die "node $(node -v) is too old — nano-cycle needs >= 24"
-ok "node $(node -v)"
-command -v git >/dev/null || die "git not found — required for queue runs (verdict-gated merges)"
+# --- hard prerequisites (auto-installed when running as root) ---------------------
+# VPS deployments run as root: missing packages are installed via the system
+# package manager. Non-root: fail with instructions.
+PKG="" # apt | dnf | yum | apk | pacman — detected once
+if command -v apt-get >/dev/null; then PKG=apt
+elif command -v dnf >/dev/null; then PKG=dnf
+elif command -v yum >/dev/null; then PKG=yum
+elif command -v apk >/dev/null; then PKG=apk
+elif command -v pacman >/dev/null; then PKG=pacman
+fi
+EUID_VAL="$(id -u)"
+as_root() { [[ "$EUID_VAL" -eq 0 ]]; }
+
+pkg_install() { # pkg_install pkg...
+  as_root || return 1
+  case "$PKG" in
+    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1 || return 1 ;;
+    dnf) dnf install -y "$@" >/dev/null 2>&1 || return 1 ;;
+    yum) yum install -y "$@" >/dev/null 2>&1 || return 1 ;;
+    apk) apk add "$@" >/dev/null 2>&1 || return 1 ;;
+    pacman) pacman -Sy --noconfirm "$@" >/dev/null 2>&1 || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+refresh_pkgs() {
+  case "$PKG" in
+    apt) DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 || true ;;
+    pacman) pacman -Sy >/dev/null 2>&1 || true ;;
+    *) true ;;
+  esac
+}
+
+systemd_alive() { ps -p 1 -o comm= 2>/dev/null | grep -qi systemd; }
+
+if ! command -v git >/dev/null; then
+  [[ -n "$PKG" && "$(id -u)" -eq 0 ]] && { say "installing git…"; refresh_pkgs; pkg_install git || die "git install failed"; } \
+    || die "git not found — install it (required for queue runs)"
+fi
 ok "git $(git --version | awk '{print $3}')"
+# curl is used by the script itself (probes, NodeSource, obscura download).
+if ! command -v curl >/dev/null; then
+  [[ -n "$PKG" && "$(id -u)" -eq 0 ]] && { refresh_pkgs; pkg_install curl ca-certificates || die "curl install failed"; } \
+    || die "curl not found — install it"
+fi
+ok "curl $(curl --version | awk '{print $2}' | head -1)"
+
+if command -v node >/dev/null; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+  [[ "$NODE_MAJOR" -ge 24 ]] || { [[ -n "$PKG" ]] && as_root && { say "node $(node -v) too old — installing Node 24…"; } || die "node $(node -v) is too old — nano-cycle needs >= 24"; }
+fi
+if ! command -v node >/dev/null || [[ "$NODE_MAJOR" -lt 24 ]]; then
+  if [[ -n "$PKG" ]] && as_root; then
+    case "$PKG" in
+      apt) say "installing Node 24 (NodeSource)…"; curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1 || die "NodeSource setup failed"; pkg_install nodejs || die "nodejs install failed" ;;
+      dnf|yum) say "installing Node 24 (NodeSource)…"; curl -fsSL https://rpm.nodesource.com/setup_24.x | bash - >/dev/null 2>&1 || die "NodeSource setup failed"; pkg_install nodejs || die "nodejs install failed" ;;
+      apk) say "installing nodejs (apk)…"; refresh_pkgs; pkg_install nodejs npm || die "nodejs install failed" ;;
+      pacman) say "installing nodejs…"; refresh_pkgs; pkg_install nodejs npm || die "nodejs install failed" ;;
+    esac
+  else
+    die "node >= 24 not found — install it (https://nodejs.org) or re-run as root on a supported distro"
+  fi
+fi
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+[[ "$NODE_MAJOR" -ge 24 ]] || die "node $(node -v) still too old after install — nano-cycle needs >= 24"
+ok "node $(node -v)"
 
 # --- credentials → ~/.pi/agent ---------------------------------------------------
 if [[ -z "${PI_AUTH_JSON:-}" ]]; then
@@ -80,77 +139,25 @@ else
   fi
 fi
 
-# --- searxng (installed by default — local docker container) ----------------------
+# --- searxng (installed by default — standalone first, docker as fallback) --------
 # The server probes http://127.0.0.1:8888 at boot: web_search turns on when
-# this container answers, so no .env entry is needed.
+# it answers, so no .env entry is needed.
 SEARXNG_URL="${NANO_SEARXNG_URL:-http://127.0.0.1:8888}"
-if curl -s -m 6 "${SEARXNG_URL}/search?q=test&format=json" 2>/dev/null | grep -q '"results"'; then
-  ok "searxng already answering at $SEARXNG_URL"
-elif command -v docker >/dev/null; then
-  say "installing searxng (docker container on 127.0.0.1:8888)…"
-  SEARXNG_CFG="${HOME}/.nano-cycle/searxng"
+SEARXNG_SRC="${HOME}/.nano-cycle/searxng-src"
+SEARXNG_VENV="${HOME}/.nano-cycle/searxng-venv"
+SEARXNG_CFG="${HOME}/.nano-cycle/searxng"
+
+write_searxng_settings() {
   mkdir -p "$SEARXNG_CFG"
   if [[ ! -f "$SEARXNG_CFG/settings.yml" ]]; then
     # json format ON (the API web_search uses), limiter OFF (loopback only),
     # random secret (searxng refuses to boot without one).
-    SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
+    local secret
+    secret="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
     cat > "$SEARXNG_CFG/settings.yml" << EOF
 use_default_settings: true
 server:
-  secret_key: "$SECRET"
-  limiter: false
-search:
-  formats:
-    - html
-    - json
-EOF
-    chmod 600 "$SEARXNG_CFG/settings.yml"
-  fi
-  if docker inspect nano-cycle-searxng >/dev/null 2>&1; then
-    # re-run: start the existing container (settings/state preserved) — never recreate
-    docker start nano-cycle-searxng >/dev/null 2>&1 || true
-    ok "searxng container already exists — started"
-  elif docker run -d --name nano-cycle-searxng --restart unless-stopped \
-    -p 127.0.0.1:8888:8080 -v "$SEARXNG_CFG:/etc/searxng" searxng/searxng:latest >/dev/null 2>&1; then
-    ok "searxng container created (restart: unless-stopped)"
-  else
-    warn "searxng container failed to start — web_search stays off (registry unreachable?)"
-  fi
-  # first boot initializes the DB — wait briefly for the API
-  SEARXNG_UP=0
-  for _ in $(seq 1 15); do
-    if curl -s -m 2 "${SEARXNG_URL}/search?q=test&format=json" 2>/dev/null | grep -q '"results"'; then
-      SEARXNG_UP=1
-      break
-    fi
-    sleep 2
-  done
-  [[ "$SEARXNG_UP" -eq 1 ]] && ok "searxng healthy — web_search enabled" \
-    || warn "searxng not answering yet — web_search enables once it is (check: docker logs nano-cycle-searxng)"
-
-# --- searxng STANDALONE tier (no docker): venv from source + systemd --user ------
-elif command -v python3 >/dev/null && command -v git >/dev/null; then
-  say "installing searxng standalone (venv from source → ~/.nano-cycle/searxng)…"
-  SRC="$HOME/.nano-cycle/searxng-src"
-  VENV="$HOME/.nano-cycle/searxng-venv"
-  CFG="$HOME/.nano-cycle/searxng"
-  mkdir -p "$CFG"
-  if [[ ! -f "$SRC/searx/webapp.py" ]]; then
-    git clone --depth 1 https://github.com/searxng/searxng "$SRC" \
-      || die "searxng clone failed — check network access to github.com"
-  fi
-  python3 -m venv "$VENV" || die "python3 venv unavailable — install python3-venv"
-  # Run-from-source, per searxng's dev flow: requirements into the venv, then
-  # `python -m searx.webapp` from the src dir. (pip install -e . is fragile:
-  # setup.py imports runtime deps at metadata time.)
-  "$VENV/bin/pip" install -q -r "$SRC/requirements.txt" \
-    || die "searxng requirements install failed — see the error above (python3-dev/build tools may be needed)"
-  if [[ ! -f "$CFG/settings.yml" ]]; then
-    SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
-    cat > "$CFG/settings.yml" << EOF
-use_default_settings: true
-server:
-  secret_key: "$SECRET"
+  secret_key: "$secret"
   limiter: false
   bind_address: "127.0.0.1"
   port: 8888
@@ -159,44 +166,118 @@ search:
     - html
     - json
 EOF
-    chmod 600 "$CFG/settings.yml"
+    chmod 600 "$SEARXNG_CFG/settings.yml"
   fi
-  # persistence: systemd --user service when available, else a background process
-  if command -v systemctl >/dev/null && systemctl --user status >/dev/null 2>&1; then
-    mkdir -p "$HOME/.config/systemd/user"
-    cat > "$HOME/.config/systemd/user/nano-cycle-searxng.service" << EOF
+}
+
+wait_searxng() {
+  local up=0
+  for _ in $(seq 1 20); do
+    if curl -s -m 2 "${SEARXNG_URL}/search?q=test&format=json" 2>/dev/null | grep -q '"results"'; then
+      up=1
+      break
+    fi
+    sleep 2
+  done
+  [[ "$up" -eq 1 ]] && ok "searxng healthy — web_search enabled" \
+    || warn "searxng not answering yet — web_search enables once it is"
+}
+
+if curl -s -m 6 "${SEARXNG_URL}/search?q=test&format=json" 2>/dev/null | grep -q '"results"'; then
+  ok "searxng already answering at $SEARXNG_URL"
+else
+  # TIER 1 — STANDALONE (no docker): python3 + venv + run-from-source.
+  # NOTE: `import venv` succeeds on Ubuntu even without python3-venv — the
+  # real requirement is ensurepip, which actually creates the venv.
+  if ! command -v python3 >/dev/null || ! python3 -c "import venv, ensurepip" >/dev/null 2>&1; then
+    if [[ -n "$PKG" ]] && as_root; then
+      say "installing python3 + venv…"
+      refresh_pkgs
+      case "$PKG" in
+        apt) pkg_install python3 python3-venv python3-pip ;;
+        dnf|yum) pkg_install python3 python3-pip ;;
+        apk) pkg_install python3 py3-venv py3-pip ;;
+        pacman) pkg_install python ;;
+      esac
+    fi
+  fi
+  if command -v python3 >/dev/null && python3 -c "import venv, ensurepip" >/dev/null 2>&1; then
+    say "installing searxng standalone (venv from source → ~/.nano-cycle/searxng)…"
+    mkdir -p "$SEARXNG_CFG"
+    if [[ ! -f "$SEARXNG_SRC/searx/webapp.py" ]]; then
+      git clone --depth 1 https://github.com/searxng/searxng "$SEARXNG_SRC" \
+        || die "searxng clone failed — check network access to github.com"
+    fi
+    python3 -m venv "$SEARXNG_VENV" || die "python3 venv creation failed"
+    # Run-from-source, per searxng's dev flow: requirements into the venv, then
+    # `python -m searx.webapp` from the src dir. (pip install -e . is fragile:
+    # setup.py imports runtime deps at metadata time.)
+    "$SEARXNG_VENV/bin/pip" install -q -r "$SEARXNG_SRC/requirements.txt" \
+      || die "searxng requirements install failed — see the error above (python3-dev/build tools may be needed)"
+    write_searxng_settings
+    # persistence: a real service when systemd is alive (system unit for root,
+    # user unit otherwise); containers/minimal systems fall back to nohup.
+    if command -v systemctl >/dev/null && systemd_alive; then
+      if as_root; then
+        cat > /etc/systemd/system/nano-cycle-searxng.service << EOF
 [Unit]
 Description=SearXNG (nano-cycle web_search)
 After=network.target
 
 [Service]
-WorkingDirectory=$SRC
-ExecStart=$VENV/bin/python -m searx.webapp
-Environment=SEARXNG_SETTINGS_PATH=$CFG/settings.yml
+WorkingDirectory=$SEARXNG_SRC
+ExecStart=$SEARXNG_VENV/bin/python -m searx.webapp
+Environment=SEARXNG_SETTINGS_PATH=$SEARXNG_CFG/settings.yml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable --now nano-cycle-searxng.service >/dev/null 2>&1 || true
+        ok "searxng system service enabled"
+      else
+        mkdir -p "$HOME/.config/systemd/user"
+        cat > "$HOME/.config/systemd/user/nano-cycle-searxng.service" << EOF
+[Unit]
+Description=SearXNG (nano-cycle web_search)
+After=network.target
+
+[Service]
+WorkingDirectory=$SEARXNG_SRC
+ExecStart=$SEARXNG_VENV/bin/python -m searx.webapp
+Environment=SEARXNG_SETTINGS_PATH=$SEARXNG_CFG/settings.yml
 Restart=on-failure
 
 [Install]
 WantedBy=default.target
 EOF
-    systemctl --user daemon-reload
-    systemctl --user enable --now nano-cycle-searxng.service 2>/dev/null || true
-    say "  boot persistence needs one-time: sudo loginctl enable-linger $USER"
-  else
-    warn "systemd user session unavailable — starting searxng in the background (nohup; it will not survive reboot)"
-    ( cd "$SRC" && SEARXNG_SETTINGS_PATH="$CFG/settings.yml" nohup "$VENV/bin/python" -m searx.webapp > "$CFG/searxng.log" 2>&1 & )
-  fi
-  SEARXNG_UP=0
-  for _ in $(seq 1 20); do
-    if curl -s -m 2 "${SEARXNG_URL}/search?q=test&format=json" 2>/dev/null | grep -q '"results"'; then
-      SEARXNG_UP=1
-      break
+        systemctl --user daemon-reload
+        systemctl --user enable --now nano-cycle-searxng.service 2>/dev/null || true
+        say "  boot persistence needs one-time: sudo loginctl enable-linger $USER"
+      fi
+    else
+      warn "systemd not running — starting searxng in the background (nohup; it will not survive reboot)"
+      ( cd "$SEARXNG_SRC" && SEARXNG_SETTINGS_PATH="$SEARXNG_CFG/settings.yml" nohup "$SEARXNG_VENV/bin/python" -m searx.webapp > "$SEARXNG_CFG/searxng.log" 2>&1 & )
     fi
-    sleep 2
-  done
-  [[ "$SEARXNG_UP" -eq 1 ]] && ok "searxng (standalone) healthy — web_search enabled" \
-    || warn "searxng not answering yet — check $CFG/searxng.log or the user service logs"
-else
-  warn "searxng not reachable; docker AND python3/git missing — web_search stays off"
+    wait_searxng
+  # TIER 2 — DOCKER fallback (standalone path unavailable).
+  elif command -v docker >/dev/null; then
+    say "python3 unavailable — installing searxng via docker (127.0.0.1:8888)…"
+    write_searxng_settings
+    if docker inspect nano-cycle-searxng >/dev/null 2>&1; then
+      docker start nano-cycle-searxng >/dev/null 2>&1 || true
+      ok "searxng container already exists — started"
+    elif docker run -d --name nano-cycle-searxng --restart unless-stopped \
+      -p 127.0.0.1:8888:8080 -v "$SEARXNG_CFG:/etc/searxng" searxng/searxng:latest >/dev/null 2>&1; then
+      ok "searxng container created (restart: unless-stopped)"
+    else
+      warn "searxng container failed to start — web_search stays off (registry unreachable?)"
+    fi
+    wait_searxng
+  else
+    warn "searxng not reachable; python3/git/docker all missing — web_search stays off"
+  fi
 fi
 
 # --- optional tools (recommended; each degrades gracefully) ----------------------
@@ -218,7 +299,16 @@ else
     && tar -xzf "$TMPD/obscura.tar.gz" -C "$TMPD" \
     && find "$TMPD" -type f -name obscura -exec install -m 755 {} "$HOME/.local/bin/obscura" \; ; then
     command -v obscura >/dev/null && ok "obscura installed — web_reader tool available" \
-      || warn "obscura binary installed to ~/.local/bin — ensure ~/.local/bin is on PATH"
+      || {
+        # installed but not on PATH — persist it for future shells
+        case ":$PATH:" in
+          *":$HOME/.local/bin:"*) ;;
+          *) echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc" ;;
+        esac
+        export PATH="$HOME/.local/bin:$PATH"
+        command -v obscura >/dev/null && ok "obscura installed (~/.local/bin added to PATH in .bashrc) — web_reader available" \
+          || warn "obscura installed to ~/.local/bin but not detected — check your PATH"
+      }
   else
     warn "obscura download failed — web_reader stays off (manual: https://docs.obscura.sh/quickstart/installation)"
   fi
