@@ -90,9 +90,12 @@ function pathTokensIn(text) {
   return out;
 }
 
-// Commit suffix honors the project's ticket-id convention (v1).
+// Commit suffix honors the project's ticket-id convention (v1). A queue-owned
+// run knows ITS ticket — that outranks scanning the task text (a description
+// starting "Builds on: F05." would otherwise pin the wrong id).
 const COMMIT_ID_RE = /\b(OMNI-\d{1,4}|F\d{1,3}|#\d+)\b/i;
-function commitSuffixFor(task, runId) {
+function commitSuffixFor(task, runId, ticketId) {
+  if (ticketId && COMMIT_ID_RE.test(`(${ticketId})`)) return `(${String(ticketId).toUpperCase()})`;
   const m = String(task ?? "").match(COMMIT_ID_RE);
   return m ? `(${m[1].toUpperCase()})` : `(nano ${runId})`;
 }
@@ -807,7 +810,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         // Milestone commit on the run branch (feat: on round 0, fix: after).
         const title = String(p.summary ?? run.task).replace(/\s+/g, " ").trim().slice(0, 48) || "implementation";
         const type = (run.state.steps.find((s) => s.id === "build")?.rounds ?? 0) > 0 ? "fix" : "feat";
-        const suffix = commitSuffixFor(run.task, run.id);
+        const suffix = commitSuffixFor(run.task, run.id, run.options.ticketId ?? undefined);
         const maxTitle = Math.max(16, 72 - type.length - 2 - suffix.length - 1);
         commitMilestone(run, `${type}: ${title.slice(0, maxTitle)} ${suffix}`, p.files_written);
         emit.state(run);
