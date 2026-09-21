@@ -413,6 +413,58 @@ await test("Q12: gates failures vs provider failures classify differently (§2.4
   for (const rid of ["run-q12-a", "run-q12-b"]) fs.rmSync(path.join(ROOT, "runs", rid), { recursive: true, force: true });
 });
 
+// --- Q13: queue state derives from tickets (re-clarify during a build) ---------
+
+await test("Q13: re-clarify mid-build doesn't corrupt the queue state chip", async () => {
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, null);
+  await seedProject("q13", [
+    { id: "F1", title: "building", description: "d", status: "queued", runId: "run-q13-F1" },
+    { id: "F2", title: "parked", description: "d", status: "blocked", blockedReason: "stale-spec", runId: "run-q13-F2" },
+  ], "running");
+  engine.disk.set("run-q13-F1", { status: "clarified" }); // clarified before a restart
+  mgr.pump("q13"); // promotes F1 (wires the manager's settle callback)
+  await sleep(10);
+  assert.strictEqual((await store("q13")).tickets[0].status, "running");
+  engine.disk.set("run-q13-F2", { status: "clarified" }); // F2's old clarify run on disk
+  const out = await mgr.reclarify("q13", "F2");
+  assert.strictEqual(out.ok, true, JSON.stringify(out.errors ?? out));
+  await sleep(20); // wave settles → old code flipped the chip to awaiting-release here
+  const st = await store("q13");
+  assert.strictEqual(st.queue.state, "running", "a build is still in flight — the chip must not say awaiting-release");
+  assert.strictEqual(st.tickets.find((t) => t.id === "F2").status, "clarified");
+  await engine.finishBuild("run-q13-F1", "completed");
+  const st2 = await store("q13");
+  assert.strictEqual(st2.queue.state, "awaiting-release", "builds drained → awaiting-release");
+});
+
+// --- Q14: a direct run settling re-pumps a deferred queue -------------------------
+
+await test("Q14: direct run settles → the queue pump that deferred on its tree lock resumes", async () => {
+  const engine = fakeEngine();
+  const { mgr, emitter } = makeManager(engine, null);
+  await seedProject("q14", [
+    { id: "F1", title: "one", description: "d", status: "queued", runId: "run-q14-F1" },
+  ], "running");
+  engine.disk.set("run-q14-F1", { status: "clarified" }); // clarified before a restart
+  // a direct run holds the tree — release/pump defers
+  engine.runs.set("direct-q14", { id: "direct-q14", status: "running", holdsTree: true, settled: false, opts: {} });
+  mgr.pump("q14");
+  await sleep(10);
+  assert.strictEqual((await store("q14")).tickets[0].status, "queued", "promotion deferred while the direct run holds the tree");
+  // the direct run (no ticketId) completes → its terminal state broadcast re-pumps
+  // (the real engine releases the tree BEFORE emitting the terminal state)
+  const direct = engine.runs.get("direct-q14");
+  direct.settled = true;
+  direct.holdsTree = false;
+  emitter.state({ id: "direct-q14", state: { status: "completed", project: "q14" } });
+  await sleep(20);
+  const st = await store("q14");
+  assert.strictEqual(st.tickets[0].status, "running", "queue promoted once the tree freed");
+  await engine.finishBuild("run-q14-F1", "completed");
+  assert.strictEqual((await store("q14")).queue.state, "idle");
+});
+
 process.on("exit", () => { try { fs.rmSync(path.join(ROOT, "tickets"), { recursive: true, force: true }); } catch {} });
 
 const failed = results.filter(([, ok]) => !ok).length;

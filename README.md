@@ -100,6 +100,15 @@ Beyond single runs, each project has a **ticket backlog** (the "☰ Tickets & Qu
 The engine stays a four-step state machine; the queue (`host/queue.mjs`) sits
 above it and drives the existing run API.
 
+### Chat — a standalone coding agent per project
+
+The **Chat** tab runs a direct coding-agent session against the selected
+project, outside the four-step pipeline: create/resume/delete sessions, pick
+model + thinking level, stream text and thinking live, watch each tool call
+(with diffs for edits), abort mid-turn. Sessions persist per project (the pi
+SDK's session store) — useful for small jobs that don't need the
+spec/verify/security law of a full run.
+
 ### Agent access — the nano-cycle MCP server
 
 No parser covers every features-doc shape. For anything unusual, let your

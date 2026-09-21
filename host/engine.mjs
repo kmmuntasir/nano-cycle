@@ -1459,6 +1459,16 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             : "clarify disabled — run parked as clarified (awaiting queue promotion)",
         });
         await integrate(run, false);
+        // A clarify-only run builds nothing — its run branch would just litter
+        // the repo (created at start, never merged). Remove it when empty.
+        if (run.git?.enabled && (run.state.git?.commits ?? []).length === 0) {
+          try {
+            await git.deleteBranch(run.projectPath, run.git.runBranch);
+            emit.event(run.id, "_run", { t: "notice", s: `git: empty clarify branch ${run.git.runBranch} removed` });
+          } catch {
+            /* branch cleanup is best-effort */
+          }
+        }
         settle(run);
         return;
       }

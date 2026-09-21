@@ -44,6 +44,23 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     }
   }
 
+  // The queue chip DERIVES from the tickets — no hand-maintained transitions
+  // to drift out of sync (a re-clarify during a running build used to flip
+  // the state to clarifying → awaiting-release while delivery was mid-flight).
+  // `paused` is owner authority: only resume clears it (survives restarts).
+  function syncQueueState(project) {
+    const store = loadTickets(project);
+    if (store.queue.state === "paused") return;
+    const next = store.tickets.some((t) => t.status === "clarifying")
+      ? "clarifying"
+      : store.tickets.some((t) => ["queued", "running"].includes(t.status))
+        ? "running"
+        : store.tickets.some((t) => t.status === "clarified")
+          ? "awaiting-release"
+          : "idle";
+    if (next !== store.queue.state) setQueueState(project, { state: next });
+  }
+
   // Wrap emit.state once: watch queue-owned runs for parked conditions.
   function installStateWatcher() {
     if (watcherInstalled) return;
@@ -69,6 +86,14 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
               engine.gate(run.id, "cancel"); // release the run; branch + session kept for retry
             }
           }
+        }
+        // A DIRECT (non-queue) run settled: if it held the tree while the pump
+        // deferred a promotion (e.g. released mid-manual-run), nothing else
+        // would re-pump — do it here. Queue-owned runs drive their own pumps
+        // via onBuildSettled (deferring to it also keeps the backlog-flip
+        // commit sequenced BEFORE the next promote).
+        if (!run.state.ticketId && ["completed", "failed", "cancelled", "clarified"].includes(run.state.status)) {
+          pump(run.state.project);
         }
       } catch {
         /* watcher must never break a run */
@@ -127,11 +152,8 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       }
     }
     // A wave whose every start failed (or that was empty) never produces a
-    // settle — advance the state here so the queue can't stick at 'clarifying'.
-    const fresh = loadTickets(project);
-    if (fresh.queue.state === "clarifying" && !fresh.tickets.some((x) => x.status === "clarifying")) {
-      setQueueState(project, { state: fresh.tickets.some((x) => x.status === "clarified") ? "awaiting-release" : "idle" });
-    }
+    // settle — sync here so the queue can't stick at 'clarifying'.
+    syncQueueState(project);
     broadcastQueue(project);
     return { ok: errors.length === 0, started, errors };
   }
@@ -143,11 +165,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (status === "clarified") setTicketStatus(project, ticketId, "clarified", { runId });
     else if (status === "cancelled") setTicketStatus(project, ticketId, "draft", { runId });
     else setTicketStatus(project, ticketId, "blocked", { reason: "provider-failures", runId, note: `clarify run ${status}` });
-    // Wave done? → awaiting-release
-    const fresh = loadTickets(project);
-    if (!fresh.tickets.some((x) => x.status === "clarifying") && fresh.queue.state === "clarifying") {
-      setQueueState(project, { state: "awaiting-release" });
-    }
+    syncQueueState(project); // wave done → awaiting-release (or running if builds are mid-flight)
     broadcastQueue(project);
   }
 
@@ -160,7 +178,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     const pick = Array.isArray(onlyIds) && onlyIds.length > 0 ? (t) => onlyIds.includes(t.id) : () => true;
     const clarified = store.tickets.filter((t) => t.status === "clarified" && pick(t));
     for (const t of clarified) setTicketStatus(project, t.id, "queued");
-    setQueueState(project, { state: "running" });
+    syncQueueState(project);
     broadcastQueue(project);
     pump(project);
     return { released: clarified.length };
@@ -180,8 +198,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (engine.treeLockHolder(resolveProject(project).path)) return; // a build is in flight; onSettled re-pumps
     const ready = nextReady(store);
     if (ready.length === 0) {
-      const busy = store.tickets.some((t) => ["queued", "running", "clarifying"].includes(t.status));
-      if (!busy) setQueueState(project, { state: "idle" });
+      syncQueueState(project);
       broadcastQueue(project);
       return;
     }
@@ -200,7 +217,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       return;
     }
     setTicketStatus(project, t.id, "running", { runId: t.runId });
-    setQueueState(project, { state: "running" });
+    syncQueueState(project);
     broadcastQueue(project);
   }
 
@@ -437,9 +454,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
         touched = true;
       }
     }
-    if (touched || ["running", "clarifying"].includes(store.queue.state)) {
-      setQueueState(project, { state: "running" });
-    }
+    syncQueueState(project); // re-derive from reconciled tickets (keeps a owner-set pause)
     if (projectPath) pump(project);
     broadcastQueue(project);
   }
