@@ -11,6 +11,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { resolveProject } from "./projects.mjs";
+import { tokenHygiene } from "./token-hygiene.mjs";
 
 /** Normalize usage fields from pi SDK. */
 function normUsage(u) {
@@ -314,6 +315,9 @@ export function createChatManager({ modelRuntime, broadcast }) {
     const loader = new DefaultResourceLoader({
       cwd: project.path,
       agentDir: getAgentDir(),
+      // pi keeps its default system prompt; token hygiene (caveman-lite + rtk)
+      // is appended so every chat session runs with the same discipline.
+      appendSystemPrompt: [tokenHygiene()],
     });
     await loader.reload().catch(() => {});
 

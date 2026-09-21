@@ -73,6 +73,20 @@ evidence.
 prompts FORCE loading the phase skill before its milestone tool. Repo-local
 skills stay ignored by design; the driver owns context.
 
+## Token hygiene (every agent run)
+
+Every agent session — pipeline steps, clarify/analyst/coder children, and chat
+— gets a **token-hygiene** block injected into its system prompt
+(`host/token-hygiene.mjs`): **caveman-lite** output discipline (terse, no
+filler, technical terms and error strings verbatim; security findings and
+irreversible-action warnings stay in full plain prose) adapted from
+[JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman), plus
+**rtk** usage when the [rtk](https://github.com/cantrelldev/rtk) CLI is
+installed — agents prefer `rtk git status|diff|log|test|…` for read-only,
+output-heavy commands so filtered output reaches the context instead of raw
+dumps. Milestones and artifacts are structured tool calls; style never touches
+machine-parsed output.
+
 ## Ticket queue (v3)
 
 Beyond single runs, each project has a **ticket backlog** (the "☰ Tickets & Queue" view):

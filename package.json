@@ -12,7 +12,7 @@
     "build": "vite build",
     "dev:web": "vite",
     "start": "node host/server.mjs",
-    "test": "node tests/engine-harness.mjs && node tests/watchdog.test.mjs && node tests/tickets.test.mjs && node tests/backlog.test.mjs && node tests/queue.test.mjs && node tests/mcp.test.mjs && node tests/chat.test.mjs",
+    "test": "node tests/engine-harness.mjs && node tests/watchdog.test.mjs && node tests/tickets.test.mjs && node tests/backlog.test.mjs && node tests/queue.test.mjs && node tests/mcp.test.mjs && node tests/chat.test.mjs && node tests/token-hygiene.test.mjs",
     "mcp": "node host/mcp-tickets.mjs"
   },
   "dependencies": {

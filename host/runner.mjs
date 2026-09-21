@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { tokenHygiene } from "./token-hygiene.mjs";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -191,8 +192,9 @@ function buildLoader({ cwd, systemPrompt, stepId }) {
     cwd,
     agentDir: getAgentDir(),
     // The driver owns the context — no runtime discovery of anything EXCEPT
-    // nano-cycle's own bundled skills (filtered per step in v2).
-    systemPromptOverride: () => systemPrompt,
+    // nano-cycle's own bundled skills (filtered per step in v2). Token
+    // hygiene (caveman-lite + rtk) rides on EVERY agent run.
+    systemPromptOverride: () => `${systemPrompt}\n\n${tokenHygiene()}`,
     agentsFilesOverride: () => ({ agentsFiles: [] }),
     skillsOverride: (current) => ({
       skills: bundled.skills,
