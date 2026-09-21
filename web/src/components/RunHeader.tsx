@@ -28,6 +28,7 @@ export default function RunHeader({
   live,
   onCancel,
   onResume,
+  onFixResume,
 }: {
   state: RunState;
   wall: number;
@@ -36,6 +37,7 @@ export default function RunHeader({
   live: boolean;
   onCancel: () => void;
   onResume: () => void;
+  onFixResume: () => void;
 }) {
   const totalUsage = (state.steps ?? state.nodes ?? []).reduce(
     (acc, n) => ({ input: acc.input + n.usage.input, output: acc.output + n.usage.output }),
@@ -149,9 +151,19 @@ export default function RunHeader({
         )}
         {(state.status === "cancelled" || state.status === "failed") && (
           <Box textAlign="right">
-            <PrimaryButton onClick={onResume}>
+            {state.status === "failed" && state.artifacts?.verify && (
+              <Box mb={2}>
+                <PrimaryButton onClick={onFixResume}>
+                  Fix From Last Verify
+                </PrimaryButton>
+                <Text fontSize="10px" color="muted" mt={1} fontFamily="system-ui, sans-serif">
+                  One Build Turn Against The Last Report — No Re-Verify First
+                </Text>
+              </Box>
+            )}
+            <OutlineButton onClick={onResume}>
               Resume Run
-            </PrimaryButton>
+            </OutlineButton>
             <Text fontSize="10px" color="muted" mt={1} fontFamily="system-ui, sans-serif">
               Continues From Last Unfinished Node
             </Text>

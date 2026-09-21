@@ -237,10 +237,10 @@ export default function App() {
     if (runId) api.gate(runId, action, comments);
   };
 
-  const handleResume = async () => {
+  const handleResume = async (fix = false) => {
     if (!runId) return;
     try {
-      await api.resume(runId);
+      await api.resume(runId, { fix });
       await loadRun(runId);
       setTab("pipeline");
       refreshRuns();
@@ -422,7 +422,7 @@ export default function App() {
             </Box>
           ) : view === "runs" ? (
             <Stack gap={3}>
-              <RunHeader state={state} wall={wall} work={work} gateMs={gateMs} live={live} onCancel={() => setConfirmCancel(true)} onResume={handleResume} />
+              <RunHeader state={state} wall={wall} work={work} gateMs={gateMs} live={live} onCancel={() => setConfirmCancel(true)} onResume={() => handleResume(false)} onFixResume={() => handleResume(true)} />
               <GateBanner state={state} onJump={() => setTab("qa")} showJump={tab !== "qa"} />
 
               {/* tabs */}

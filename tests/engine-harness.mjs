@@ -85,6 +85,11 @@ const auditArtifact = (blocking) => ({
     ? [{ category: "requirement-conformity", blocking: true, file: "README.md", issue: "criterion not honored as written", fix: "rewrite section" }]
     : [],
 });
+// Fails on round 0 only — the "one criterion short" shape the fix-resume flow targets.
+const failingOnce = (n) => ({
+  verdict: "gaps-found",
+  checks: [{ criterion: "filler check to fail once", pass: n >= 1, evidence: n >= 1 ? "fixed after the resume turn" : "always broken" }],
+});
 
 // --- harness ------------------------------------------------------------------------
 
@@ -936,6 +941,88 @@ await test("v3.1: waveTickets without clarify is rejected", async () => {
     () => engine.start({ id: `wv-${Date.now()}`, task: "t", project: { name: "sandbox", path: FIXTURE }, models: {}, clarify: false, maxFixRounds: 0, git: false, audit: false, approvePlan: false, remoteChecks: false, security: "off", waveTickets: [{ id: "F1" }] }),
     /waveTickets requires clarify/,
   );
+});
+
+await test("gates exhausted → run settles 'failed' exactly once (V12 second verse)", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const failing = (n) => ({
+    verdict: "gaps-found",
+    checks: [
+      { criterion: "GET /health returns 200 JSON", pass: n >= 2, evidence: n >= 2 ? "fixed" : "404" },
+      { criterion: "filler check to fail every round", pass: false, evidence: "always broken" },
+    ],
+  });
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [
+      async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(true)); await callTool(tools, "submit_audit", auditArtifact(true)); },
+      async ({ tools }) => { await callTool(tools, "submit_verify", failing(0)); },
+      async ({ tools }) => { await callTool(tools, "submit_verify", failing(1)); },
+    ],
+    // (maxFixRounds 2 → rounds 0,1,2; three verify sessions)
+  };
+  const { state, events } = await runEngine({ scripts, maxFixRounds: 2, mechanical: () => [] });
+  assert.strictEqual(state.status, "failed", state.error);
+  assert.match(state.error ?? "", /gates still failing after 2 fix round/);
+  const settled = events.filter((e) => e.t === "notice" && /run failed/.test(e.s ?? ""));
+  assert.ok(settled.length >= 1, "failure notice emitted");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "security").length, 0, "security skipped");
+});
+
+await test("v3.1: fix-resume — resume({fix}) builds from the LAST verify report, skipping re-verify", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+      async ({ tools, text }) => {
+        // the fix-resume turn: the prompt must carry the LAST verify gaps
+        assert.match(text, /verification \(fix-resume\)/);
+        assert.match(text, /always broken/, "the still-failing criterion rides as feedback");
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [
+      async ({ tools }) => { await callTool(tools, "submit_verify", failingOnce(0)); },
+      async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(true)); await callTool(tools, "submit_audit", auditArtifact(false)); },
+    ],
+  };
+  const emit = { state: () => {}, event: () => {} };
+  const engine = createEngine({
+    modelRuntime: {}, emit, webTools: {},
+    adapters: { openStepSession: makeFakeOpen(scripts), runNode: async () => {}, runMechanicalChecks: async () => [] },
+  });
+  const id = `fx-${Date.now()}`;
+  const settled = [];
+  const st = await engine.start({
+    id, task: "t", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: false, maxFixRounds: 0, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
+    onSettled: (s) => settled.push(s),
+  });
+  const deadline = Date.now() + 15_000;
+  while (!["failed", "completed", "cancelled"].includes(st.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "failed", "round 0 fails with maxFixRounds 0");
+  assert.deepStrictEqual(settled, ["failed"], "gates-exhausted settle fires (the bug)");
+  // THE FEATURE: fix-resume from the failed run
+  const out = engine.resume(id, { fix: true });
+  assert.ok(out.ok, out.error);
+  assert.strictEqual(st.fixResume, false, "flag consumed by execute()");
+  while (!["completed", "failed", "cancelled"].includes(st.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.deepStrictEqual(settled, ["failed", "completed"], "settle fired on both");
+  // ONE build session resumed; the fix turn ran; verify ran exactly once more
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "build" && c.resumed).length, 1, "the fix turn reopens the SAME persisted build session");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, 2, "verify round 0 + the post-fix re-verify — no extra re-verify");
 });
 
 // --- summary ---------------------------------------------------------------------------

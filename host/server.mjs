@@ -479,10 +479,12 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ok: pipeline.cancel(id) });
       }
       if (req.method === "POST" && action === "resume") {
-        let out = pipeline.resume(id);
+        const body = await readBody(req);
+        const opts = { fix: body.fix === true };
+        let out = pipeline.resume(id, opts);
         if (!out.ok && /not active in this server session/.test(String(out.error ?? ""))) {
           // restart recovery: rebuild the controller from runs/<id>/state.json
-          out = pipeline.resumeFromDisk(id);
+          out = pipeline.resumeFromDisk(id, undefined, opts);
         }
         return json(res, out.ok ? 200 : 409, out);
       }

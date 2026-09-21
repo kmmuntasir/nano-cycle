@@ -465,13 +465,17 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (!rs || rs.status === "clarified" || (rs.wave?.ticketIds?.length ?? 0) > 0) {
       return { ok: false, error: "ticket is parked at the clarify stage — use re-clarify" };
     }
-    // Resume the parked BUILD run (gates/branch/session kept). In-session
-    // first (its settle callback is still wired); after a restart the
-    // controller is rebuilt from disk WITH the queue's settle callback.
-    let out = engine.resume(t.runId);
+    // Resume the parked BUILD run (gates/branch/session kept). A gates-failed
+    // run with a verify report resumes in FIX mode: one build turn against the
+    // last report, no wasted re-verify. In-session first (its settle callback
+    // is still wired); after a restart the controller is rebuilt from disk
+    // WITH the queue's settle callback.
+    const hasVerify = !!readRunState(t.runId)?.artifacts?.verify;
+    let out = engine.resume(t.runId, { fix: hasVerify });
     if (!out.ok && !/only cancelled or failed runs can be resumed|still winding down/.test(String(out.error ?? ""))) {
       out = engine.resumeFromDisk(t.runId, resolveProject(project), {
         onSettled: (status) => onBuildSettled(project, ticketId, t.runId, status),
+        fix: hasVerify,
       });
     }
     if (out.ok) setTicketStatus(project, ticketId, "running", { runId: t.runId });

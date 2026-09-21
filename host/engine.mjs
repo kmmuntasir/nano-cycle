@@ -1398,6 +1398,18 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
 
   // --- execute: the state machine ----------------------------------------------------
 
+  // Gap list shared by the verify loop and fix-resume (single source of truth).
+  function assembleGaps(rec, ab) {
+    return [
+      ...rec.gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
+      ...rec.mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
+      ...rec.remoteFailing.map(
+        (c) => `[remote-ci] ${c.criterion}: ${c.evidence}\n  → the failed-log excerpt names the cause — fix it, including files OUTSIDE the original task assignments if the log points there`,
+      ),
+      ...ab.map((f) => `[audit/${f.category}]${f.file ? ` ${f.file}:` : ""} ${f.issue}${f.fix ? ` (fix: ${f.fix})` : ""}`),
+    ];
+  }
+
   function assembleFailureReasons(run) {
     const reasons = [];
     const vf = (run.state.artifacts.verify?.checks ?? []).filter((c) => {
@@ -1569,6 +1581,27 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         if (!run.state.artifacts.implDelta) throw new Error("build ended without an impl-delta report");
       }
 
+      // Fix-resume (owner-triggered): ONE build feedback turn driven by the
+      // LAST verify report — the stale verify/audit artifacts are consumed as
+      // feedback and cleared; the loop below then re-verifies fresh.
+      if (run.state.fixResume && run.state.artifacts.verify) {
+        const rec = reconcileVerify(run, run.state.artifacts.verify);
+        const ab = auditBlocking(run);
+        const gaps = assembleGaps(rec, ab);
+        run.state.fixResume = false;
+        emit.event(run.id, "build", {
+          t: "notice",
+          s: `fix-resume: building against the LAST verify report (${gaps.length} gap(s)) — no re-verify until the fix lands`,
+        });
+        emit.state(run);
+        await buildTurn(run, { feedback: { round: (run.state.round ?? 0) + 1, source: "verification (fix-resume)", gaps } });
+        if (run.cancelRequested) throw new Error("cancelled");
+        if (!run.state.artifacts.implDelta) throw new Error("fix-resume turn ended without a new impl-delta");
+        run.state.artifacts.verify = null;
+        run.state.artifacts.audit = null;
+        emit.state(run);
+      }
+
       // STEP 3 — verify loop (bounded fix rounds; feedback resumes the build session).
       let accepted = false;
       for (let round = run.state.round ?? 0; round <= run.options.maxFixRounds; round++) {
@@ -1583,14 +1616,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           endStep(run, "verify");
           break;
         }
-        const gaps = [
-          ...rec.gatingChecks.map((c) => `${c.criterion}: ${c.evidence ?? ""}`),
-          ...rec.mechFailing.map((c) => `[mechanical] ${c.title}: ${c.evidence}`),
-          ...rec.remoteFailing.map(
-            (c) => `[remote-ci] ${c.criterion}: ${c.evidence}\n  → the failed-log excerpt names the cause — fix it, including files OUTSIDE the original task assignments if the log points there`,
-          ),
-          ...ab.map((f) => `[audit/${f.category}]${f.file ? ` ${f.file}:` : ""} ${f.issue}${f.fix ? ` (fix: ${f.fix})` : ""}`),
-        ];
+        const gaps = assembleGaps(rec, ab);
         if (round < run.options.maxFixRounds) {
           emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1} (resuming the build session)` });
           await buildTurn(run, { feedback: { round: round + 1, source: "verification", gaps } });
@@ -1610,6 +1636,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           `gates still failing after ${run.options.maxFixRounds} fix round(s): ${assembleFailureReasons(run) ?? "verification did not accept"}`;
         emit.event(run.id, "_run", { t: "notice", s: `run failed: ${run.state.error}` });
         await integrate(run, false);
+        settle(run); // the V12 lesson, second verse — every exit path MUST settle
         return;
       }
 
@@ -1965,7 +1992,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       return true;
     },
 
-    resume(id) {
+    resume(id, opts = {}) {
       const run = runs.get(id);
       if (!run) return { ok: false, error: "run not active in this server session — use resumeFromDisk for restart recovery" };
       if (!["cancelled", "failed"].includes(run.state.status)) {
@@ -1973,6 +2000,23 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
       if (!run.done.promiseSettled) {
         return { ok: false, error: "run is still winding down — try again in a moment" };
+      }
+      // fix mode: skip re-verify — ONE build turn against the LAST verify report
+      let notice;
+      if (opts.fix) {
+        if (!run.state.artifacts.verify) {
+          return { ok: false, error: "no verify report on this run — plain resume instead" };
+        }
+        run.state.fixResume = true;
+        for (const s of run.state.steps) {
+          if (s.id === "build" && ["cancelled", "failed", "running"].includes(s.status)) {
+            s.status = "queued";
+            s.error = null;
+            s.startedAt = null;
+            s.endedAt = null;
+          }
+        }
+        return restartExecute(run, "fix-resume: building against the last verify report (verify re-runs after the fix)");
       }
       let requeued = 0;
       for (const s of run.state.steps) {
@@ -1984,7 +2028,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           requeued += 1;
         }
       }
-      return restartExecute(run, `resumed by owner — ${requeued} step(s) requeued, milestones/artifacts kept (build session resumes from disk)`);
+      notice = `resumed by owner — ${requeued} step(s) requeued, milestones/artifacts kept (build session resumes from disk)`;
+      return restartExecute(run, notice);
     },
 
     // v3: continue a "clarified" run (queue mode) into build/verify/security.
@@ -2060,6 +2105,12 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           s.status = "queued";
           s.error = null;
         }
+      }
+      if (opts.fix) {
+        // fix-resume from disk: ONE build turn against the LAST verify report;
+        // the verify loop then re-verifies fresh with the round budget it had
+        if (!state.artifacts?.verify) return { ok: false, error: "no verify report on this run — plain resume instead" };
+        state.fixResume = true;
       }
       if (opts.promote) state.options.stopAfterClarify = false; // persists via state.options
       const run = {
