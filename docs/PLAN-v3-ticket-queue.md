@@ -330,7 +330,7 @@ stopAfterClarify/promote/tree-lock/onSettled.
   tests; `npm test` wires them all.
 - [~] **18. Live W1–W8** — **deferred to owner** (same discipline as V1–V12: implement on the branch, validate against the real system, record in `docs/V3-VALIDATION.md`).
 - [x] **19. README + docs refresh** — queue mode section, Inbox, tickets, guardrails.
-- [ ] **20. Merge + tag** — BLOCKED ON OWNER VALIDATION (W1–W8): ff-merge `v3-ticket-queue` → `main`, tag `v3.0.0`, push.
+- [x] **20. Merge + tag** — RELEASED as v3.1.0 (owner-validated live: W1 wave→specs→release→sequential verified/merged/flipped deliveries on glm-monitor F06/F07).
 
 ---
 

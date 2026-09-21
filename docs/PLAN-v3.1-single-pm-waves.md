@@ -1,6 +1,6 @@
 # nano-cycle v3.1 — Single-PM clarification waves
 
-**Status:** IMPLEMENTED on `v3-ticket-queue` — 22 engine scenarios (3 new v3.1) + 15 queue tests (reworked Q1–Q14 + Q7b) green; GUI/mcp/runbook updated. Owner live validation re-run (W1–W8) before the v3.0.0 merge.  
+**Status:** RELEASED in v3.1.0 — owner-validated live on glm-monitor (one PM wave for F06+F07 → batch release → two sequential verified/merged/flipped deliveries).  
 **Supersedes:** the wave mechanics of `docs/PLAN-v3-ticket-queue.md` §2.4 (one PM run per ticket). Everything else in v3 — sequential delivery, park-don't-block, dependency cascade, release gate, backlog flip — is unchanged.  
 **Evidence:** live glm-monitor wave 2026-09-21 13:44 — F06 and F07 clarified as two isolated PM runs; F07's PM, seeing a tree where F06 doesn't exist yet, asked the owner whether it should build both. Cross-feature decisions were impossible to make coherently; the owner paid for two investigations of the same repo and got a confused question as the dividend.
 
@@ -252,9 +252,9 @@ Live validation: W1–W8 re-run; W4's criteria as in §6.
 
 ### Phase 3 — Ship gate
 
-- [ ] **8. Full suite green (65+ checks), GUI build, headless smoke of a
+- [x] **8. Full suite green (65+ checks), GUI build, headless smoke of a
       2-ticket wave → one Inbox item → release → sequential builds.**
-- [ ] **9. Owner live validation W1–W8 → then the v3.0.0 merge+tag.**
+- [x] **9. Owner live validation W1–W8 → then the v3.0.0 merge+tag.**
 
 ## 11. Risks
 
