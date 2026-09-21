@@ -1529,15 +1529,27 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
               ? "clarification complete — spec locked; run parked as clarified (awaiting queue promotion)"
               : "clarify disabled — run parked as clarified (awaiting queue promotion)",
         });
-        await integrate(run, false);
-        // A clarify-only run builds nothing — its run branch would just litter
-        // the repo (created at start, never merged). Remove it when empty.
-        if (run.git?.enabled && (run.state.git?.commits ?? []).length === 0) {
+        // A clarify run builds nothing and merges nothing — checkout base and
+        // report exactly that. The generic integrate(run, false) would set a
+        // misleading "merge failed — branch kept" error on a run that has
+        // nothing to merge.
+        if (run.git?.enabled) {
           try {
-            await git.deleteBranch(run.projectPath, run.git.runBranch);
-            emit.event(run.id, "_run", { t: "notice", s: `git: empty clarify branch ${run.git.runBranch} removed` });
-          } catch {
-            /* branch cleanup is best-effort */
+            run.buildHandle?.close();
+            run.buildHandle = null;
+            await git.checkout(run.projectPath, run.git.baseBranch);
+          } catch (e) {
+            emit.event(run.id, "_run", { t: "notice", s: `git: checkout ${run.git.baseBranch} failed: ${e?.message ?? e}` });
+          }
+          if ((run.state.git?.commits ?? []).length === 0) {
+            try {
+              await git.deleteBranch(run.projectPath, run.git.runBranch);
+              emit.event(run.id, "_run", { t: "notice", s: `git: empty clarify branch ${run.git.runBranch} removed` });
+            } catch {
+              /* branch cleanup is best-effort */
+            }
+          } else {
+            run.state.git.mergeError = "clarify-only run — specs only, nothing to merge; branch kept";
           }
         }
         settle(run);
