@@ -127,8 +127,76 @@ EOF
   done
   [[ "$SEARXNG_UP" -eq 1 ]] && ok "searxng healthy — web_search enabled" \
     || warn "searxng not answering yet — web_search enables once it is (check: docker logs nano-cycle-searxng)"
+
+# --- searxng STANDALONE tier (no docker): venv from source + systemd --user ------
+elif command -v python3 >/dev/null && command -v git >/dev/null; then
+  say "installing searxng standalone (venv from source → ~/.nano-cycle/searxng)…"
+  SRC="$HOME/.nano-cycle/searxng-src"
+  VENV="$HOME/.nano-cycle/searxng-venv"
+  CFG="$HOME/.nano-cycle/searxng"
+  mkdir -p "$CFG"
+  if [[ ! -f "$SRC/searx/webapp.py" ]]; then
+    git clone --depth 1 https://github.com/searxng/searxng "$SRC" \
+      || die "searxng clone failed — check network access to github.com"
+  fi
+  python3 -m venv "$VENV" || die "python3 venv unavailable — install python3-venv"
+  # Run-from-source, per searxng's dev flow: requirements into the venv, then
+  # `python -m searx.webapp` from the src dir. (pip install -e . is fragile:
+  # setup.py imports runtime deps at metadata time.)
+  "$VENV/bin/pip" install -q -r "$SRC/requirements.txt" \
+    || die "searxng requirements install failed — see the error above (python3-dev/build tools may be needed)"
+  if [[ ! -f "$CFG/settings.yml" ]]; then
+    SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
+    cat > "$CFG/settings.yml" << EOF
+use_default_settings: true
+server:
+  secret_key: "$SECRET"
+  limiter: false
+  bind_address: "127.0.0.1"
+  port: 8888
+search:
+  formats:
+    - html
+    - json
+EOF
+    chmod 600 "$CFG/settings.yml"
+  fi
+  # persistence: systemd --user service when available, else a background process
+  if command -v systemctl >/dev/null && systemctl --user status >/dev/null 2>&1; then
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/nano-cycle-searxng.service" << EOF
+[Unit]
+Description=SearXNG (nano-cycle web_search)
+After=network.target
+
+[Service]
+WorkingDirectory=$SRC
+ExecStart=$VENV/bin/python -m searx.webapp
+Environment=SEARXNG_SETTINGS_PATH=$CFG/settings.yml
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now nano-cycle-searxng.service 2>/dev/null || true
+    say "  boot persistence needs one-time: sudo loginctl enable-linger $USER"
+  else
+    warn "systemd user session unavailable — starting searxng in the background (nohup; it will not survive reboot)"
+    ( cd "$SRC" && SEARXNG_SETTINGS_PATH="$CFG/settings.yml" nohup "$VENV/bin/python" -m searx.webapp > "$CFG/searxng.log" 2>&1 & )
+  fi
+  SEARXNG_UP=0
+  for _ in $(seq 1 20); do
+    if curl -s -m 2 "${SEARXNG_URL}/search?q=test&format=json" 2>/dev/null | grep -q '"results"'; then
+      SEARXNG_UP=1
+      break
+    fi
+    sleep 2
+  done
+  [[ "$SEARXNG_UP" -eq 1 ]] && ok "searxng (standalone) healthy — web_search enabled" \
+    || warn "searxng not answering yet — check $CFG/searxng.log or the user service logs"
 else
-  warn "searxng not reachable and docker missing — web_search stays off (install docker and re-run, or set NANO_SEARXNG_URL)"
+  warn "searxng not reachable; docker AND python3/git missing — web_search stays off"
 fi
 
 # --- optional tools (recommended; each degrades gracefully) ----------------------

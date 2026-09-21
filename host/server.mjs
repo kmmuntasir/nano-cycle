@@ -13,7 +13,8 @@ import { loadTickets, saveTickets, createTicket, updateTicket, deleteTicket, set
 import { importFromFile, parseFeaturesMarkdown } from "./backlog.mjs";
 import { createQueueManager } from "./queue.mjs";
 import * as git from "./git.mjs";
-import { detectWebCapabilities, makeWebReaderTool, makeWebSearchTool } from "./webtools.mjs";
+import { makeWebReaderTool, makeWebSearchTool } from "./webtools.mjs";
+import { webCapabilities } from "./token-hygiene.mjs";
 import { newRunId, runsDir, saveState, appendEvent, listRuns, loadRun } from "./state.mjs";
 import { createChatManager } from "./chat.mjs";
 
@@ -53,10 +54,10 @@ try {
 }
 
 // Optional research capabilities for clarify/plan nodes. SearXNG defaults to
-// the endpoint scripts/deploy.sh installs (local docker); the boot probe
-// disables web_search when nothing answers there.
-const searxngUrl = process.env.NANO_SEARXNG_URL ?? "http://127.0.0.1:8888";
-const webCaps = detectWebCapabilities(searxngUrl);
+// the endpoint scripts/deploy.sh installs (local docker); webCapabilities()
+// probes once per process (shared with the token-hygiene prompt block) and
+// disables web tools that don't answer.
+const webCaps = webCapabilities();
 const webTools = {
   search: webCaps.search ? makeWebSearchTool(searxngUrl) : null,
   reader: webCaps.reader ? makeWebReaderTool() : null,

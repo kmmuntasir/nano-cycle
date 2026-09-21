@@ -1,7 +1,7 @@
 // Token-hygiene injection tests — caveman-lite + rtk in every agent run.
 // Run: node tests/token-hygiene.test.mjs
 import assert from "node:assert";
-import { tokenHygiene, rtkAvailable } from "../host/token-hygiene.mjs";
+import { tokenHygiene, rtkAvailable, webCapabilities } from "../host/token-hygiene.mjs";
 import { clarifySystem, builderSystem, verifierSystem, securitySystem } from "../host/prompts.mjs";
 
 const results = [];
@@ -30,13 +30,23 @@ test("tokenHygiene block: caveman-lite discipline + clarity-wins rules", () => {
   assert.match(block, /error strings stay EXACT|error strings/i);
 });
 
-test("tokenHygiene block: rtk section follows availability; stable (cached)", () => {
+test("tokenHygiene block: rtk + research sections follow availability; stable (cached)", () => {
   const block = tokenHygiene();
   if (rtkAvailable()) {
     assert.match(block, /rtk git status/, "rtk usage table present when installed");
     assert.match(block, /fall back to the plain command/, "fallback rule present");
   } else {
     assert.doesNotMatch(block, /rtk git status/, "no rtk advertising when absent");
+  }
+  const caps = webCapabilities();
+  if (caps.search) {
+    assert.match(block, /web_search \(SearXNG\)/, "web_search guidance present when searxng answers");
+    assert.match(block, /verify rather than guess/);
+  } else {
+    assert.doesNotMatch(block, /web_search \(SearXNG\)/, "no web_search guidance when searxng absent");
+  }
+  if (caps.reader) {
+    assert.match(block, /web_reader \(obscura browser\)/, "web_reader guidance present when obscura answers");
   }
   assert.strictEqual(tokenHygiene(), block, "static block built once (no per-session churn)");
 });
