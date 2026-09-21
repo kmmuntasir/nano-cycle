@@ -57,9 +57,10 @@ try {
 // the endpoint scripts/deploy.sh installs (local docker); webCapabilities()
 // probes once per process (shared with the token-hygiene prompt block) and
 // disables web tools that don't answer.
+const SEARXNG_URL = process.env.NANO_SEARXNG_URL ?? "http://127.0.0.1:8888";
 const webCaps = webCapabilities();
 const webTools = {
-  search: webCaps.search ? makeWebSearchTool(searxngUrl) : null,
+  search: webCaps.search ? makeWebSearchTool(SEARXNG_URL) : null,
   reader: webCaps.reader ? makeWebReaderTool() : null,
 };
 
