@@ -4,14 +4,14 @@ import type { RunSummary } from "../api";
 
 const dot = (status: string): string =>
   status === "completed"
-    ? "#4fd6a8"
+    ? "good"
     : status === "running"
-      ? "#7aa2f7"
+      ? "accent"
       : status === "failed" || status === "interrupted"
-        ? "#f16a6a"
+        ? "bad"
         : status.startsWith("awaiting")
-          ? "#f0b429"
-          : "#8b91a0";
+          ? "warn"
+          : "muted";
 
 function Row({
   r,
@@ -48,7 +48,7 @@ function Row({
         >
           {r.id}
         </Text>
-        <Text fontSize="11px" color="#c9cdd8" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap" fontFamily="system-ui, sans-serif">
+        <Text fontSize="11px" color="ink" overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap" fontFamily="system-ui, sans-serif">
           {r.task.slice(0, 48) || "(No Task)"}
         </Text>
         <Text fontSize="10px" color="muted" fontFamily="system-ui, sans-serif">
@@ -107,12 +107,12 @@ export default function RunsSidebar({
         bg="surface2"
         borderColor="line"
         color="ink"
-        _placeholder={{ color: "#8b91a0" }}
+        _placeholder={{ color: "muted" }}
         fontFamily="system-ui, sans-serif"
       />
       {filtered.length === 0 && (
-        <Text fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
-          {runs.length === 0 ? "No runs yet — start one with ＋ New Run." : "No Matches"}
+        <Text fontSize="11px" color="ink" fontFamily="system-ui, sans-serif">
+          {runs.length === 0 ? "No runs yet — start one with + New Run." : "No Matches"}
         </Text>
       )}
       {group("Needs Input", gated)}

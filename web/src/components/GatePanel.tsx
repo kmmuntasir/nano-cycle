@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Box, HStack, Input, Stack, Text, Textarea } from "@chakra-ui/react";
+import { ClipboardList, Hourglass, ShieldAlert, Star, TriangleAlert } from "lucide-react";
 import { DangerOutlineButton, PrimaryButton, WarningButton } from "../ui/buttons";
 import type { RunState } from "../api";
 
@@ -20,9 +21,9 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
         zIndex={10}
       >
         <HStack gap={2} flexWrap="wrap" alignItems="center">
-          <Text fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
-            ⏳ Clarification Round {gate.round ?? 1} Needs Your Answers
-          </Text>
+          <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
+            <Hourglass size={14} /> Clarification Round {gate.round ?? 1} Needs Your Answers
+          </Box>
           <Text fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
             {gate.questions.length} Question(s) · Pipeline Paused
           </Text>
@@ -40,9 +41,9 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
     return (
       <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={3} bg="#221b08" position="sticky" top="60px" zIndex={10}>
         <HStack gap={2} flexWrap="wrap">
-          <Text fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
-            ⚠ Divergence Gate — {gate.nodeId}
-          </Text>
+          <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
+            <TriangleAlert size={14} /> Divergence Gate — {gate.nodeId}
+          </Box>
           <Box flex="1" />
           {showJump && (
             <WarningButton onClick={onJump}>
@@ -57,9 +58,9 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
     return (
       <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={3} bg="#221b08" position="sticky" top="60px" zIndex={10}>
         <HStack gap={2} flexWrap="wrap">
-          <Text fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
-            📋 Plan Ready — Approval Needed
-          </Text>
+          <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
+            <ClipboardList size={14} /> Plan Ready — Approval Needed
+          </Box>
           <Text fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
             No Code Runs Until You Approve
           </Text>
@@ -77,9 +78,9 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
     return (
       <Box border="1px solid" borderColor="#f16a6a" borderRadius="md" p={3} bg="#230f0f" position="sticky" top="60px" zIndex={10}>
         <HStack gap={2} flexWrap="wrap">
-          <Text fontSize="13px" fontWeight={700} color="#f16a6a" fontFamily="system-ui, sans-serif">
-            🛡 Security Override Needed — {gate.findings?.length ?? 0} unfixable critical/high finding(s)
-          </Text>
+          <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="13px" fontWeight={700} color="#f16a6a" fontFamily="system-ui, sans-serif">
+            <ShieldAlert size={14} /> Security Override Needed — {gate.findings?.length ?? 0} unfixable critical/high finding(s)
+          </Box>
           <Box flex="1" />
           {showJump && (
             <WarningButton onClick={onJump}>
@@ -152,15 +153,17 @@ export default function GatePanel({
                           borderRadius="md"
                           cursor="pointer"
                           border="1px solid"
-                          borderColor={active ? "#7aa2f7" : "line"}
-                          bg={active ? "#1b2130" : "transparent"}
-                          color={active ? "#7aa2f7" : "ink"}
+                          borderColor={active ? "accent" : "line"}
+                          bg={active ? "surface2" : "transparent"}
+                          color={active ? "accent" : "ink"}
                           onClick={() => setAnswerDrafts({ ...answerDrafts, [q.id]: o.label })}
                           fontFamily="system-ui, sans-serif"
                           title={o.tradeoff ?? o.label}
                         >
-                          {o.label}
-                          {o.recommended ? " ★" : ""}
+                          <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                            {o.label}
+                            {o.recommended ? <Star size={11} /> : null}
+                          </Box>
                         </Box>
                         {o.tradeoff && (
                           <Text fontSize="10px" color="muted" mt={1} maxW="220px" fontFamily="system-ui, sans-serif">
@@ -172,7 +175,7 @@ export default function GatePanel({
                   })}
                 </HStack>
               )}
-              <Text fontSize="10px" color="#c9cdd8" mt={2} fontFamily="system-ui, sans-serif">
+              <Text fontSize="10px" color="ink" mt={2} fontFamily="system-ui, sans-serif">
                 Your answer {q.suggested ? `(suggested: ${q.suggested})` : ""} — click an option to fill, or type below:
               </Text>
               <Input
@@ -183,7 +186,7 @@ export default function GatePanel({
                 bg="surface2"
                 borderColor="line"
                 color="ink"
-                _placeholder={{ color: "#8b91a0" }}
+                _placeholder={{ color: "muted" }}
                 fontFamily="system-ui, sans-serif"
               />
             </Box>

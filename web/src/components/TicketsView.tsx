@@ -1,19 +1,41 @@
 import { useCallback, useEffect, useState } from "react";
 import { Box, Flex, HStack, Input, Stack, Text, Textarea } from "@chakra-ui/react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Ban,
+  Check,
+  CheckSquare,
+  Circle,
+  Diamond,
+  Download,
+  Inbox,
+  LoaderCircle,
+  MessagesSquare,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  Scale,
+  Settings,
+  Square,
+  Star,
+  X,
+} from "lucide-react";
 import { DangerOutlineButton, OutlineButton, PrimaryButton, WarningButton } from "../ui/buttons";
 import ModelPicker from "../ui/ModelPicker";
 import { SelectEl, selectStyleMini } from "../ui/controls";
 import { api, ticketsApi } from "../api";
 import type { InboxItem, ModelInfo, RunState, Ticket, TicketStore } from "../api";
 
-const STATUS_ICON: Record<string, { glyph: string; color: string }> = {
-  draft: { glyph: "○", color: "#8b91a0" },
-  clarifying: { glyph: "◌", color: "#7aa2f7" },
-  clarified: { glyph: "◆", color: "#7aa2f7" },
-  queued: { glyph: "◇", color: "#8b91a0" },
-  running: { glyph: "▶", color: "#7aa2f7" },
-  done: { glyph: "✓", color: "#4fd6a8" },
-  blocked: { glyph: "⛔", color: "#f16a6a" },
+const STATUS_ICON: Record<string, { Icon: typeof Circle; color: string; spin?: boolean; fill?: boolean }> = {
+  draft: { Icon: Circle, color: "var(--chakra-colors-muted)" },
+  clarifying: { Icon: LoaderCircle, color: "var(--chakra-colors-accent)", spin: true },
+  clarified: { Icon: Diamond, color: "var(--chakra-colors-accent)", fill: true },
+  queued: { Icon: Diamond, color: "var(--chakra-colors-muted)" },
+  running: { Icon: Play, color: "var(--chakra-colors-accent)", fill: true },
+  done: { Icon: Check, color: "var(--chakra-colors-good)" },
+  blocked: { Icon: Ban, color: "var(--chakra-colors-bad)" },
 };
 
 const QUEUE_STATE_HINT: Record<string, string> = {
@@ -129,7 +151,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
   if (!store) {
     return (
       <Box border="1px dashed" borderColor="line" borderRadius="md" p={6} textAlign="center">
-        <Text fontSize="13px" color="#c9cdd8" fontFamily="system-ui, sans-serif">Loading tickets…</Text>
+        <Text fontSize="13px" color="ink" fontFamily="system-ui, sans-serif">Loading tickets…</Text>
       </Box>
     );
   }
@@ -148,8 +170,8 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
           <Text fontSize="14px" fontWeight={700} fontFamily="system-ui, sans-serif">
             Ticket Queue
           </Text>
-          <Box px={2} py={0.5} borderRadius="sm" border="1px solid" borderColor={q.state === "running" ? "#2b3a5c" : "line"} bg={q.state === "running" ? "#1b2130" : "transparent"}>
-            <Text fontSize="11px" color={q.state === "running" ? "#7aa2f7" : "muted"} fontFamily="ui-monospace, monospace">
+          <Box px={2} py={0.5} borderRadius="sm" border="1px solid" borderColor={q.state === "running" ? "accent" : "line"} bg={q.state === "running" ? "surface2" : "transparent"}>
+            <Text fontSize="11px" color={q.state === "running" ? "accent" : "muted"} fontFamily="ui-monospace, monospace">
               {q.state}
             </Text>
           </Box>
@@ -169,7 +191,9 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
             onClick={() => setShowReview(true)}
             title="Review every locked spec in a batch, then release the selected tickets for sequential delivery."
           >
-            ⚖ Review &amp; Release{clarified.length > 0 ? ` ${clarified.length}` : ""}
+            <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
+              <Scale size={13} /> Review &amp; Release{clarified.length > 0 ? ` ${clarified.length}` : ""}
+            </Box>
           </PrimaryButton>
           {q.state !== "paused" ? (
             <OutlineButton disabled={busy || q.state !== "running"} onClick={() => act({ action: "pause" })}>
@@ -196,7 +220,11 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
             }}
             title="Start PM clarification runs for every draft/blocked/clarified ticket — answer them together in the Inbox."
           >
-            {showModels ? "Start Wave →" : "◎ Clarify Wave"}
+            {showModels ? "Start Wave →" : (
+              <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
+                <MessagesSquare size={13} /> Clarify Wave
+              </Box>
+            )}
           </OutlineButton>
           <Box flex="1" />
           <OutlineButton
@@ -207,9 +235,15 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
             }}
             title="Queue-mode run defaults — models, fix rounds, security, git. Every wave/promotion runs with these."
           >
-            ⚙ Config
+            <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
+              <Settings size={13} /> Config
+            </Box>
           </OutlineButton>
-          <OutlineButton disabled={busy} onClick={refresh}>⟳ Refresh</OutlineButton>
+          <OutlineButton disabled={busy} onClick={refresh}>
+            <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
+              <RefreshCw size={13} /> Refresh
+            </Box>
+          </OutlineButton>
         </HStack>
 
         {showConfig && cfgDraft && (
@@ -265,13 +299,15 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
                   as="button"
                   px={2} py={1.5} fontSize="11px" borderRadius="sm"
                   border="1px solid"
-                  borderColor={cfgDraft.options[key] ? "#2b3a5c" : "line"}
-                  bg={cfgDraft.options[key] ? "#1b2130" : "transparent"}
-                  color={cfgDraft.options[key] ? "#7aa2f7" : "muted"}
+                  borderColor={cfgDraft.options[key] ? "accent" : "line"}
+                  bg={cfgDraft.options[key] ? "surface2" : "transparent"}
+                  color={cfgDraft.options[key] ? "accent" : "muted"}
                   onClick={() => setCfgDraft({ ...cfgDraft, options: { ...cfgDraft.options, [key]: !cfgDraft.options[key] } })}
                   fontFamily="system-ui, sans-serif"
                 >
-                  {cfgDraft.options[key] ? "☑" : "☐"} {label}
+                  <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                    {cfgDraft.options[key] ? <CheckSquare size={12} /> : <Square size={12} />} {label}
+                  </Box>
                 </Box>
               ))}
               <PrimaryButton
@@ -310,7 +346,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
         )}
 
         {err && (
-          <Text fontSize="11px" color="#f16a6a" mt={2} fontFamily="system-ui, sans-serif">
+          <Text fontSize="11px" color="bad" mt={2} fontFamily="system-ui, sans-serif">
             {err}
           </Text>
         )}
@@ -331,11 +367,12 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
 
       {/* PM inbox */}
       {(inbox.length > 0 || q.state === "clarifying") && (
-        <Box border="1px solid" borderColor={inbox.length > 0 ? "#f0b429" : "line"} borderRadius="lg" bg="surface" p={4}>
+        <Box border="1px solid" borderColor={inbox.length > 0 ? "warn" : "line"} borderRadius="lg" bg="surface" p={4}>
           <HStack mb={3}>
-            <Text fontSize="14px" fontWeight={700} color={inbox.length > 0 ? "#f0b429" : "muted"} fontFamily="system-ui, sans-serif">
-              {inbox.length > 0 ? `📥 PM Inbox — ${inbox.length} ticket(s) awaiting your answers` : "📥 PM Inbox"}
-            </Text>
+            <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="14px" fontWeight={700} color={inbox.length > 0 ? "warn" : "muted"} fontFamily="system-ui, sans-serif">
+              <Inbox size={15} />
+              {inbox.length > 0 ? `PM Inbox — ${inbox.length} ticket(s) awaiting your answers` : "PM Inbox"}
+            </Box>
           </HStack>
           {inbox.length === 0 ? (
             <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
@@ -365,8 +402,16 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
             Backlog — {store.project}
           </Text>
           <Box flex="1" />
-          <OutlineButton onClick={() => setShowCreate(!showCreate)}>＋ Ticket</OutlineButton>
-          <OutlineButton onClick={() => setShowImport(!showImport)}>⤓ Import</OutlineButton>
+          <OutlineButton onClick={() => setShowCreate(!showCreate)}>
+            <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+              <Plus size={12} /> Ticket
+            </Box>
+          </OutlineButton>
+          <OutlineButton onClick={() => setShowImport(!showImport)}>
+            <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+              <Download size={12} /> Import
+            </Box>
+          </OutlineButton>
         </Flex>
 
         {showCreate && (
@@ -515,11 +560,12 @@ function TicketRow({
   const [order, setOrder] = useState(String(t.order ?? 0));
   const meta = STATUS_ICON[t.status] ?? STATUS_ICON.draft;
   const editable = !["running", "clarifying"].includes(t.status);
+  const StatusIcon = meta.Icon;
   return (
-    <Flex alignItems="flex-start" gap={2} py={2} px={2} borderRadius="md" border="1px solid" borderColor={t.status === "blocked" ? "#5c2a2a" : "line"} bg={t.status === "running" ? "#141b2e" : "transparent"} flexWrap="wrap">
-      <Text fontSize="13px" color={meta.color} fontFamily="ui-monospace, monospace" title={t.status} mt="2px">
-        {meta.glyph}
-      </Text>
+    <Flex alignItems="flex-start" gap={2} py={2} px={2} borderRadius="md" border="1px solid" borderColor={t.status === "blocked" ? "bad" : "line"} bg={t.status === "running" ? "surface2" : "transparent"} flexWrap="wrap">
+      <Box mt="2px" color={meta.color} style={meta.spin ? { animation: "ncSpin 1.2s linear infinite" } : undefined} title={t.status}>
+        <StatusIcon size={14} fill={meta.fill ? "currentColor" : "none"} />
+      </Box>
       <Box flex="1" minW="220px">
         <HStack gap={2} flexWrap="wrap">
           <Text fontSize="12px" fontWeight={700} color={ACCENT(t.status)} fontFamily="ui-monospace, monospace">
@@ -535,7 +581,7 @@ function TicketRow({
           )}
         </HStack>
         {t.blockedReason && (
-          <Text fontSize="10.5px" color="#f16a6a" fontFamily="system-ui, sans-serif">
+          <Text fontSize="10.5px" color="bad" fontFamily="system-ui, sans-serif">
             blocked: {t.blockedReason}
           </Text>
         )}
@@ -603,27 +649,37 @@ function TicketRow({
         )}
         {t.status === "queued" && (
           <>
-            <OutlineButton size="xs" disabled={isFirstQueued} onClick={() => onMove(t, -1)} title="Move earlier in the build order (queued tickets only).">↑</OutlineButton>
-            <OutlineButton size="xs" disabled={isLastQueued} onClick={() => onMove(t, 1)} title="Move later in the build order (queued tickets only).">↓</OutlineButton>
+            <OutlineButton size="xs" disabled={isFirstQueued} onClick={() => onMove(t, -1)} title="Move earlier in the build order (queued tickets only).">
+              <ArrowUp size={12} />
+            </OutlineButton>
+            <OutlineButton size="xs" disabled={isLastQueued} onClick={() => onMove(t, 1)} title="Move later in the build order (queued tickets only).">
+              <ArrowDown size={12} />
+            </OutlineButton>
           </>
         )}
         {["draft", "blocked"].includes(t.status) && (
           <OutlineButton size="xs" onClick={() => onRunNow(t)} title="Start a plain run for this ticket now — bypasses the queue, respects the tree lock.">
-            ▶ Run
+            <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+              <Play size={12} /> Run
+            </Box>
           </OutlineButton>
         )}
         {editable && (
-          <OutlineButton size="xs" onClick={() => setEditing(!editing)} title="Edit title, description, dependencies, order.">✎</OutlineButton>
+          <OutlineButton size="xs" onClick={() => setEditing(!editing)} title="Edit title, description, dependencies, order.">
+            <Pencil size={12} />
+          </OutlineButton>
         )}
         {["draft", "blocked"].includes(t.status) && (
-          <DangerOutlineButton size="xs" onClick={onDelete}>✕</DangerOutlineButton>
+          <DangerOutlineButton size="xs" onClick={onDelete}>
+            <X size={12} />
+          </DangerOutlineButton>
         )}
       </HStack>
     </Flex>
   );
 }
-const ACCENT = (_s: string) => "#7aa2f7";
-const INKC = "#e4e4e7";
+const ACCENT = (_s: string) => "accent";
+const INKC = "ink";
 
 /** One inbox ticket: its pending questions + an answer form. */
 function InboxTicket({ item, onAnswer }: { item: InboxItem; onAnswer: (answers: Record<string, string>) => void }) {
@@ -631,7 +687,7 @@ function InboxTicket({ item, onAnswer }: { item: InboxItem; onAnswer: (answers: 
   return (
     <Box border="1px solid" borderColor="line" borderRadius="md" p={3}>
       <HStack mb={2} flexWrap="wrap">
-        <Text fontSize="12px" fontWeight={700} color="#7aa2f7" fontFamily="ui-monospace, monospace">
+        <Text fontSize="12px" fontWeight={700} color="accent" fontFamily="ui-monospace, monospace">
           {item.ticketId ?? item.runId}
         </Text>
         <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
@@ -654,15 +710,15 @@ function InboxTicket({ item, onAnswer }: { item: InboxItem; onAnswer: (answers: 
                       as="button"
                       px={2} py={1} fontSize="11px" borderRadius="sm"
                       border="1px solid"
-                      borderColor={active ? "#7aa2f7" : "line"}
-                      bg={active ? "#1b2130" : "transparent"}
-                      color={active ? "#7aa2f7" : "muted"}
+                      borderColor={active ? "accent" : "line"}
+                      bg={active ? "surface2" : "transparent"}
+                      color={active ? "accent" : "muted"}
                       onClick={() => setDrafts({ ...drafts, [q.id]: o.label })}
                       fontFamily="system-ui, sans-serif"
                       title={o.tradeoff ?? o.label}
                     >
                       {o.label}
-                      {o.recommended ? " ★" : ""}
+                      {o.recommended ? <Star size={11} /> : null}
                     </Box>
                   );
                 })}
@@ -674,7 +730,7 @@ function InboxTicket({ item, onAnswer }: { item: InboxItem; onAnswer: (answers: 
               placeholder="Your answer…"
               mt={1.5}
               bg="surface2" borderColor="line" color="ink" fontSize="12px"
-              _placeholder={{ color: "#8b91a0" }}
+              _placeholder={{ color: "muted" }}
             />
           </Box>
         ))}
@@ -731,35 +787,39 @@ function ReleaseReview({ tickets, busy, onClose, onRelease }: {
   }, [idsKey]);
   const selected = tickets.filter((t) => checked[t.id] !== false);
   return (
-    <Box border="1px solid" borderColor="#7aa2f7" borderRadius="lg" bg="surface" p={4}>
+    <Box border="1px solid" borderColor="accent" borderRadius="lg" bg="surface" p={4}>
       <HStack mb={3} flexWrap="wrap">
-        <Text fontSize="14px" fontWeight={700} color="#7aa2f7" fontFamily="system-ui, sans-serif">
-          ⚖ Release Gate — review {tickets.length} locked spec(s)
-        </Text>
+        <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="14px" fontWeight={700} color="accent" fontFamily="system-ui, sans-serif">
+          <Scale size={15} /> Release Gate — review {tickets.length} locked spec(s)
+        </Box>
         <Box flex="1" />
-        <OutlineButton size="xs" onClick={onClose}>✕ Close</OutlineButton>
+        <OutlineButton size="xs" onClick={onClose}>
+          <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+            <X size={12} /> Close
+          </Box>
+        </OutlineButton>
       </HStack>
       <Stack gap={2}>
         {tickets.map((t) => {
           const spec = t.runId ? specs[t.id] : null;
           const on = checked[t.id] !== false;
           return (
-            <Box key={t.id} border="1px solid" borderColor={on ? "line" : "#5c2a2a"} borderRadius="md" p={3}>
+            <Box key={t.id} border="1px solid" borderColor={on ? "line" : "bad"} borderRadius="md" p={3}>
               <Flex gap={2} alignItems="flex-start">
                 <Box
                   as="button"
                   mt="2px"
                   onClick={() => setChecked({ ...checked, [t.id]: !on })}
                   fontSize="14px"
-                  color={on ? "#7aa2f7" : "muted"}
+                  color={on ? "accent" : "muted"}
                   title={on ? "Release this ticket" : "Hold this ticket back"}
                 >
-                  {on ? "☑" : "☐"}
+                  {on ? <CheckSquare size={15} /> : <Square size={15} />}
                 </Box>
                 <Box flex="1">
                   <HStack gap={2} flexWrap="wrap">
-                    <Text fontSize="12px" fontWeight={700} color="#7aa2f7" fontFamily="ui-monospace, monospace">{t.id}</Text>
-                    <Text fontSize="12.5px" color="#e4e4e7" fontFamily="system-ui, sans-serif">{t.title}</Text>
+                    <Text fontSize="12px" fontWeight={700} color="accent" fontFamily="ui-monospace, monospace">{t.id}</Text>
+                    <Text fontSize="12.5px" color="ink" fontFamily="system-ui, sans-serif">{t.title}</Text>
                   </HStack>
                   {spec === undefined ? (
                     <Text fontSize="10.5px" color="muted" fontFamily="system-ui, sans-serif" mt={1}>loading spec…</Text>
@@ -769,7 +829,7 @@ function ReleaseReview({ tickets, busy, onClose, onRelease }: {
                     </Text>
                   ) : (
                     <Box mt={1}>
-                      <Text fontSize="11.5px" color="#c9cdd8" fontFamily="system-ui, sans-serif">{spec.summary}</Text>
+                      <Text fontSize="11.5px" color="ink" fontFamily="system-ui, sans-serif">{spec.summary}</Text>
                       {(spec.decisions ?? []).length > 0 && (
                         <Text fontSize="10.5px" color="muted" fontFamily="system-ui, sans-serif" mt={1}>
                           {(spec.decisions ?? []).map((d) => `${d.topic}: ${d.decision}`).join(" · ")}
@@ -779,7 +839,7 @@ function ReleaseReview({ tickets, busy, onClose, onRelease }: {
                         <Stack gap={0.5} mt={1}>
                           <Text fontSize="10px" color="muted" fontWeight={700} fontFamily="system-ui, sans-serif">acceptance criteria</Text>
                           {(spec.acceptance_criteria ?? []).map((c, i) => (
-                            <Text key={i} fontSize="10.5px" color="#c9cdd8" fontFamily="system-ui, sans-serif">- {c}</Text>
+                            <Text key={i} fontSize="10.5px" color="ink" fontFamily="system-ui, sans-serif">- {c}</Text>
                           ))}
                         </Stack>
                       )}
@@ -797,7 +857,9 @@ function ReleaseReview({ tickets, busy, onClose, onRelease }: {
           onClick={() => onRelease(selected.map((t) => t.id))}
           title="Queue the selected tickets for sequential delivery (build → verify → security per ticket)."
         >
-          ▶ Release {selected.length} Ticket(s) →
+          <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
+            <Play size={13} /> Release {selected.length} Ticket(s) →
+          </Box>
         </PrimaryButton>
       </HStack>
     </Box>

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Box, Flex, HStack, Stack, Text, Textarea } from "@chakra-ui/react";
+import { Check } from "lucide-react";
 import { OutlineButton, PrimaryButton } from "../ui/buttons";
 import ModelPicker from "../ui/ModelPicker";
 import type { ModelInfo, SecurityMode } from "../api";
@@ -103,7 +104,7 @@ export default function StartForm({
             bg="surface2"
             borderColor="line"
             color="ink"
-            _placeholder={{ color: "#8b91a0" }}
+            _placeholder={{ color: "muted" }}
             fontSize="13px"
             placeholder="Describe what to build… acceptance criteria go to the verifier verbatim."
             fontFamily="system-ui, sans-serif"
@@ -128,11 +129,11 @@ export default function StartForm({
                   p={3}
                   borderRadius="md"
                   border="1px solid"
-                  borderColor={active ? "#7aa2f7" : "line"}
-                  bg={active ? "#1b2130" : "transparent"}
+                  borderColor={active ? "accent" : "line"}
+                  bg={active ? "surface2" : "transparent"}
                   onClick={() => setSecurity(mode)}
                 >
-                  <Text fontSize="13px" fontWeight={800} color={active ? "#7aa2f7" : "ink"} fontFamily="system-ui, sans-serif">
+                  <Text fontSize="13px" fontWeight={800} color={active ? "accent" : "ink"} fontFamily="system-ui, sans-serif">
                     {label}
                   </Text>
                   <Text fontSize="10px" color="muted" mt={1} fontFamily="system-ui, sans-serif" lineHeight="1.4">
@@ -150,7 +151,9 @@ export default function StartForm({
           </Text>
           <HStack gap={2} flexWrap="wrap">
             <OutlineButton active={clarify} onClick={() => setClarify(!clarify)}>
-              {clarify ? "✓ Clarify First" : "Clarify First"}
+              <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                {clarify ? <Check size={12} /> : null} Clarify First
+              </Box>
             </OutlineButton>
             <OutlineButton
               active={clarify && requireQuestions}
@@ -158,7 +161,9 @@ export default function StartForm({
               title="Force at least one PM question round before the spec may lock — finalize is withheld until questions were asked."
               onClick={() => setRequireQuestions(!requireQuestions)}
             >
-              {clarify && requireQuestions ? "✓ PM Must Ask" : "PM Must Ask"}
+              <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                {clarify && requireQuestions ? <Check size={12} /> : null} PM Must Ask
+              </Box>
             </OutlineButton>
             <OutlineButton
               active={git}
@@ -166,21 +171,27 @@ export default function StartForm({
               title={"Branch per run, milestone commits, ff-merge on acceptance. For the sandbox: run \"git init && git add -A && git commit -m init\" inside sandbox/ first — it must be its own repository."}
               onClick={() => setGit(!git)}
             >
-              {git ? "✓ Git" : "Git Off"}
+              <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                {git ? <Check size={12} /> : null} {git ? "Git" : "Git Off"}
+              </Box>
             </OutlineButton>
             <OutlineButton
               active={audit}
               title="Second gate after verify: conformity to the spec and repo rules, code quality, best practices."
               onClick={() => setAudit(!audit)}
             >
-              {audit ? "✓ Audit" : "Audit Off"}
+              <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                {audit ? <Check size={12} /> : null} {audit ? "Audit" : "Audit Off"}
+              </Box>
             </OutlineButton>
             <OutlineButton
               active={approvePlan}
               title="Pause after the plan is submitted for owner review before any code is written."
               onClick={() => setApprovePlan(!approvePlan)}
             >
-              {approvePlan ? "✓ Plan Approval" : "Plan Approval Off"}
+              <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                {approvePlan ? <Check size={12} /> : null} {approvePlan ? "Plan Approval" : "Plan Approval Off"}
+              </Box>
             </OutlineButton>
             <OutlineButton
               active={remoteChecks && git}
@@ -192,7 +203,9 @@ export default function StartForm({
               }
               onClick={() => setRemoteChecks(!remoteChecks)}
             >
-              {remoteChecks && git ? "✓ Remote CI" : "Remote CI Off"}
+              <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                {remoteChecks && git ? <Check size={12} /> : null} {remoteChecks && git ? "Remote CI" : "Remote CI Off"}
+              </Box>
             </OutlineButton>
             <Flex alignItems="center" gap={1}>
               <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">Fix Rounds:</Text>
@@ -250,7 +263,7 @@ export default function StartForm({
             {starting ? "Starting…" : "Start Run →"}
           </PrimaryButton>
           {!task.trim() && (
-            <Text fontSize="11px" color="#f0b429" fontFamily="system-ui, sans-serif">Describe the task to enable Start.</Text>
+            <Text fontSize="11px" color="warn" fontFamily="system-ui, sans-serif">Describe the task to enable Start.</Text>
           )}
           <Text fontSize="10px" color="muted" fontFamily="system-ui, sans-serif">
             {clarify ? "Clarify loop first (PM asks, you answer) · " : ""}{maxFixRounds} fix round(s) · {security === "off" ? "no security step" : `security: ${security}`} · runs in {project}

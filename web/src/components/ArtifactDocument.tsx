@@ -3,15 +3,15 @@
 // a floating raw-JSON toggle, instead of raw JSON blobs.
 import { useMemo, useState } from "react";
 import { Box, Flex, HStack, Link, Stack, Text } from "@chakra-ui/react";
-import { CheckCircle, XCircle, Circle, AlertTriangle } from "lucide-react";
+import { Check, CheckCircle, Code2, XCircle, Circle, AlertTriangle, FileText } from "lucide-react";
 
-const INK = "#e4e4e7";
-const MUTED = "#9aa1b5";
-const RULE = "#262b38";
-const GOOD = "#4fd6a8";
-const BAD = "#f16a6a";
-const WARN = "#f0b429";
-const ACCENT = "#7aa2f7";
+const INK = "ink";
+const MUTED = "muted";
+const RULE = "line";
+const GOOD = "good";
+const BAD = "bad";
+const WARN = "warn";
+const ACCENT = "accent";
 const FAIL_BG = "rgba(241,106,106,0.10)";
 const PASS_BG = "rgba(79,214,168,0.12)";
 
@@ -69,7 +69,7 @@ function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) 
       borderColor={RULE}
       color={MUTED}
       cursor="pointer"
-      _hover={{ color: INK, borderColor: "#3a4358" }}
+      _hover={{ color: INK, borderColor: "line" }}
       fontFamily="system-ui, sans-serif"
       onClick={(e: React.MouseEvent) => {
         e.stopPropagation();
@@ -80,7 +80,11 @@ function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) 
         navigator.clipboard?.writeText(text).then(() => finish(true), () => finish(false));
       }}
     >
-      {done ? "Copied ✓" : label}
+      {done ? (
+        <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+          <Check size={11} /> Copied
+        </Box>
+      ) : label}
     </Box>
   );
 }
@@ -96,7 +100,7 @@ function FilterButton({ label, count, active, onClick }: { label: string; count:
       border="1px solid"
       borderColor={active ? INK : RULE}
       bg={active ? INK : "transparent"}
-      color={active ? "#151821" : MUTED}
+      color={active ? "surface" : MUTED}
       cursor="pointer"
       _hover={{ color: INK }}
       fontFamily="system-ui, sans-serif"
@@ -168,7 +172,7 @@ function EvidenceBlock({ text, fail }: { text: string; fail?: boolean }) {
         <Text
           fontSize="12px"
           lineHeight={1.7}
-          color="#c9cdd8"
+          color="ink"
           borderLeft="2px solid"
           borderLeftColor={fail ? BAD : RULE}
           pl={3}
@@ -187,8 +191,8 @@ function NotesBlock({ notes }: { notes?: string }) {
   if (!notes) return null;
   return (
     <DocSection title="notes">
-      <Box bg="#1b2130" borderLeft="4px solid" borderColor={ACCENT} borderRadius="0 4px 4px 0" p={4}>
-        <Text fontSize="12px" lineHeight={1.7} color="#c9cdd8" whiteSpace="pre-wrap" fontFamily="system-ui, sans-serif">
+      <Box bg="surface2" borderLeft="4px solid" borderColor={ACCENT} borderRadius="0 4px 4px 0" p={4}>
+        <Text fontSize="12px" lineHeight={1.7} color="ink" whiteSpace="pre-wrap" fontFamily="system-ui, sans-serif">
           {notes}
         </Text>
         <Box mt={2}>
@@ -308,7 +312,7 @@ function AuditDoc({ data }: { data: any }) {
               </Text>
             </Flex>
             {f.fix && (
-              <Text fontSize="11.5px" color="#c9cdd8" mt={2} pl={3} borderLeft="2px solid" borderLeftColor={RULE} fontFamily="system-ui, sans-serif">
+              <Text fontSize="11.5px" color="ink" mt={2} pl={3} borderLeft="2px solid" borderLeftColor={RULE} fontFamily="system-ui, sans-serif">
                 fix: {f.fix}
               </Text>
             )}
@@ -370,7 +374,7 @@ function SecurityDoc({ data }: { data: any }) {
                 {f.file}
               </Text>
             )}
-            <Text fontSize="12px" color="#c9cdd8" mt={1} pl={3} borderLeft="2px solid" borderLeftColor={RULE} whiteSpace="pre-wrap" fontFamily="system-ui, sans-serif">
+            <Text fontSize="12px" color="ink" mt={1} pl={3} borderLeft="2px solid" borderLeftColor={RULE} whiteSpace="pre-wrap" fontFamily="system-ui, sans-serif">
               {f.evidence}
             </Text>
             {f.fix && (
@@ -393,7 +397,7 @@ function SecurityDoc({ data }: { data: any }) {
 
 // --- plan / tasks / implDelta / spec ----------------------------------------
 
-function List({ items, color = "#c9cdd8", mark = "•" }: { items: string[]; color?: string; mark?: string }) {
+function List({ items, color = "ink", mark = "•" }: { items: string[]; color?: string; mark?: string }) {
   return (
     <Stack gap={1}>
       {items.map((it, i) => (
@@ -416,7 +420,7 @@ function PlanDoc({ data }: { data: any }) {
       </DocSection>
       {data?.approach && (
         <DocSection title="approach">
-          <Text fontSize="12px" color="#c9cdd8" fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+          <Text fontSize="12px" color="ink" fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
             {data.approach}
           </Text>
         </DocSection>
@@ -469,7 +473,7 @@ function TasksDoc({ data }: { data: any }) {
             </Text>
             <Tag color={MUTED} bg="transparent">{t.size}</Tag>
           </Flex>
-          <Text fontSize="12px" color="#c9cdd8" fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+          <Text fontSize="12px" color="ink" fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
             {t.description}
           </Text>
           {t.files?.length > 0 && (
@@ -507,7 +511,7 @@ function ImplDeltaDoc({ data }: { data: any }) {
         <DocSection title={`files written (${data.files_written.length})`}>
           <Flex gap={1.5} flexWrap="wrap">
             {data.files_written.map((f: string) => (
-              <Box key={f} px={2} py={1} borderRadius="sm" border="1px solid" borderColor={RULE} bg="#1b2130">
+              <Box key={f} px={2} py={1} borderRadius="sm" border="1px solid" borderColor={RULE} bg="surface2">
                 <Text fontSize="11px" color={INK} fontFamily="ui-monospace, monospace">
                   {f}
                 </Text>
@@ -535,7 +539,7 @@ function ImplDeltaDoc({ data }: { data: any }) {
       )}
       {data?.notes && (
         <DocSection title="notes">
-          <Text fontSize="12px" color="#c9cdd8" fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+          <Text fontSize="12px" color="ink" fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
             {data.notes}
           </Text>
         </DocSection>
@@ -559,7 +563,7 @@ function SpecDoc({ data }: { data: any }) {
               <Text fontSize="12px" fontWeight={600} color={INK} fontFamily="system-ui, sans-serif">
                 {d.topic}
               </Text>
-              <Text fontSize="11.5px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
+              <Text fontSize="11.5px" color="ink" fontFamily="system-ui, sans-serif">
                 {d.decision}
               </Text>
             </Box>
@@ -595,7 +599,7 @@ function StatusRows({ rows }: { rows: { id: string; title?: string; status: stri
               {c.id}
               {c.title ? <Text as="span" color={MUTED} fontWeight={400} fontFamily="system-ui, sans-serif"> — {c.title}</Text> : null}
             </Text>
-            <Text fontSize="11.5px" color="#c9cdd8" mt={0.5} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap" wordBreak="break-word">
+            <Text fontSize="11.5px" color="ink" mt={0.5} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap" wordBreak="break-word">
               {c.evidence}
             </Text>
           </Box>
@@ -636,7 +640,7 @@ function RemoteCiDoc({ data }: { data: any }) {
           driver-observed hosted CI — round {data?.round ?? "?"}
         </Text>
         <Stamp verdict={ok ? "pass" : data?.status === "fail" ? "gaps-found" : "skipped"} />
-        <Text fontSize="11.5px" color="#c9cdd8" mt={2} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+        <Text fontSize="11.5px" color="ink" mt={2} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
           {data?.evidence}
         </Text>
       </Box>
@@ -658,7 +662,7 @@ function RemoteCiDoc({ data }: { data: any }) {
                 )}
               </Flex>
               {r.log && (
-                <Text fontSize="11.5px" color="#c9cdd8" mt={1} pl={3} borderLeft="2px solid" borderLeftColor={BAD} whiteSpace="pre-wrap" fontFamily="system-ui, sans-serif">
+                <Text fontSize="11.5px" color="ink" mt={1} pl={3} borderLeft="2px solid" borderLeftColor={BAD} whiteSpace="pre-wrap" fontFamily="system-ui, sans-serif">
                   {String(r.log).slice(0, 1200)}
                 </Text>
               )}
@@ -694,7 +698,7 @@ function ScannersDoc({ data }: { data: any }) {
                   {f.title}
                 </Text>
               </Flex>
-              <Text fontSize="11.5px" color="#c9cdd8" mt={1} fontFamily="system-ui, sans-serif">
+              <Text fontSize="11.5px" color="ink" mt={1} fontFamily="system-ui, sans-serif">
                 {f.evidence}
               </Text>
             </Box>
@@ -762,7 +766,7 @@ export default function ArtifactDocument({ name, data, raw }: { name: string; da
           borderRadius="full"
           border="1px solid"
           borderColor={showRaw ? ACCENT : RULE}
-          bg="#1b2130"
+          bg="surface2"
           color={showRaw ? ACCENT : MUTED}
           fontSize="11px"
           cursor="pointer"
@@ -772,7 +776,10 @@ export default function ArtifactDocument({ name, data, raw }: { name: string; da
           onClick={() => setShowRaw(!showRaw)}
           title="Toggle between the document view and the raw JSON"
         >
-          {showRaw ? "📄 Document" : "{ } Raw JSON"}
+          <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+            {showRaw ? <FileText size={12} /> : <Code2 size={12} />}
+            {showRaw ? "Document" : "Raw JSON"}
+          </Box>
         </Box>
       </Box>
       {showRaw || !Renderer ? (

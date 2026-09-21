@@ -1,4 +1,5 @@
 import { Badge, Box, Flex, HStack, Text } from "@chakra-ui/react";
+import { GitBranch, Timer } from "lucide-react";
 import { DangerOutlineButton, PrimaryButton } from "../ui/buttons";
 import { fmtDuration, fmtTokens } from "../lib/format";
 import type { RunState } from "../api";
@@ -81,26 +82,26 @@ export default function RunHeader({
             {state.task}
           </Text>
           <HStack gap={2} mt={2} flexWrap="wrap">
-            <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
-              ⏱ {fmtDuration(wall)} total · {fmtDuration(work)} work
+            <Box as="span" display="inline-flex" alignItems="center" gap={1} fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
+              <Timer size={11} /> {fmtDuration(wall)} total · {fmtDuration(work)} work
               {gateMs > 0 ? ` · waited ${fmtDuration(gateMs)}` : ""}
-            </Text>
+            </Box>
             <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
               ▲{fmtTokens(totalUsage.input)} ▼{fmtTokens(totalUsage.output)}
             </Text>
             {state.git?.enabled && (
-              <Text fontSize="11px" color={state.git.merged ? "#4fd6a8" : "muted"} fontFamily="ui-monospace, monospace">
-                ⎇ {state.git.runBranch} → {state.git.baseBranch}
+              <Box as="span" display="inline-flex" alignItems="center" gap={1} fontSize="11px" color={state.git.merged ? "good" : "muted"} fontFamily="ui-monospace, monospace">
+                <GitBranch size={11} /> {state.git.runBranch} → {state.git.baseBranch}
                 {state.git.merged ? " (merged)" : ` · ${state.git.commits.length} commit(s)`}
-              </Text>
+              </Box>
             )}
             {state.git?.mergeError && (
-              <Text fontSize="11px" color="#f16a6a" fontFamily="system-ui, sans-serif">
+              <Text fontSize="11px" color="bad" fontFamily="system-ui, sans-serif">
                 Merge failed — branch kept.
               </Text>
             )}
             {state.error && (
-              <Text fontSize="11px" color="#f16a6a" fontFamily="system-ui, sans-serif">
+              <Text fontSize="11px" color="bad" fontFamily="system-ui, sans-serif">
                 {state.error}
               </Text>
             )}
@@ -114,8 +115,8 @@ export default function RunHeader({
               </Box>
             )}
             {state.pendingQuestions && (
-              <Box px={2} py={0.5} borderRadius="sm" border="1px solid" borderColor="#5c4a12" bg="#221b08">
-                <Text fontSize="10px" color="#f0b429" fontFamily="ui-monospace, monospace">
+              <Box px={2} py={0.5} borderRadius="sm" border="1px solid" borderColor="warn" bg="surface2">
+                <Text fontSize="10px" color="warn" fontFamily="ui-monospace, monospace">
                   Clarification: answers pending
                 </Text>
               </Box>
@@ -134,10 +135,10 @@ export default function RunHeader({
                 py={0.5}
                 borderRadius="sm"
                 border="1px solid"
-                borderColor={c.on ? "#2b3a5c" : "line"}
-                bg={c.on ? "#1b2130" : "transparent"}
+                borderColor={c.on ? "accent" : "line"}
+                bg={c.on ? "surface2" : "transparent"}
               >
-                <Text fontSize="10px" color={c.on ? "#7aa2f7" : "muted"} fontFamily="ui-monospace, monospace">
+                <Text fontSize="10px" color={c.on ? "accent" : "muted"} fontFamily="ui-monospace, monospace">
                   {c.label}
                 </Text>
               </Box>

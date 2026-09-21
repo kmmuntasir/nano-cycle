@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>nano-cycle</title>
+    <script>
+      // Apply the saved theme before first paint (avoids a dark/light flash).
+      try {
+        var t = localStorage.getItem("nano-cycle-theme") || "system";
+        var dark = t === "dark" || (t === "system" && !window.matchMedia("(prefers-color-scheme: light)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+        document.documentElement.classList.toggle("light", !dark);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

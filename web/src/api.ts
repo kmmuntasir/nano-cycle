@@ -283,7 +283,133 @@ export const ticketsApi = {
     jfetch<{ project: string; items: InboxItem[] }>(`/api/inbox/${encodeURIComponent(project)}?_=${Date.now()}`),
 };
 
-export function openWs(onMessage: (msg: { type: string; runId?: string; state?: RunState; nodeId?: string; ev?: RunEvent["ev"] }) => void): WebSocket {
+// --- Standalone Project Coding Agent Chat ---
+
+export interface ChatSessionSummary {
+  id: string;
+  file: string;
+  name: string | null;
+  firstMessage: string | null;
+  messageCount: number;
+  createdAt: string | null;
+  modifiedAt: string | null;
+}
+
+export interface ChatToolResult {
+  toolCallId: string;
+  toolName: string;
+  isError: boolean;
+  content: string;
+  details?: {
+    diff?: string;
+    patch?: string;
+    firstChangedLine?: number;
+    [key: string]: unknown;
+  } | null;
+  timestamp: number;
+}
+
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  result?: ChatToolResult | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  timestamp: number;
+  content: string;
+  model?: string | null;
+  thinking?: string;
+  toolCalls?: ChatToolCall[];
+  usage?: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite?: number;
+    total: number;
+    cost?: number | { total?: number } | null;
+  } | null;
+  stopReason?: string | null;
+}
+
+export interface ChatSessionDetail {
+  id: string;
+  file: string;
+  title: string | null;
+  model: string | null;
+  thinkingLevel: string | null;
+  messages: ChatMessage[];
+  isGenerating: boolean;
+}
+
+export interface ChatEventMessage {
+  type: "chat_event";
+  event: "start" | "prompt_start" | "text_delta" | "thinking_delta" | "tool_start" | "tool_update" | "tool_end" | "turn_end" | "prompt_end" | "done" | "error" | "aborted" | "session_renamed";
+  project: string;
+  sessionId: string;
+  delta?: string;
+  prompt?: string;
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  partialResult?: unknown;
+  ok?: boolean;
+  content?: string;
+  details?: unknown;
+  usage?: unknown;
+  title?: string;
+  error?: string;
+}
+
+export const chatApi = {
+  listSessions: (project: string) =>
+    jfetch<ChatSessionSummary[]>(`/api/chat/${encodeURIComponent(project)}/sessions?_=${Date.now()}`),
+  createSession: (project: string, body?: { modelSpec?: string; thinkingLevel?: string; title?: string }) =>
+    jfetch<ChatSessionDetail>(`/api/chat/${encodeURIComponent(project)}/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    }),
+  getSession: (project: string, sessionId: string) =>
+    jfetch<ChatSessionDetail>(`/api/chat/${encodeURIComponent(project)}/sessions/${encodeURIComponent(sessionId)}?_=${Date.now()}`),
+  deleteSession: (project: string, sessionId: string) =>
+    jfetch<{ ok: boolean }>(`/api/chat/${encodeURIComponent(project)}/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    }),
+  renameSession: (project: string, sessionId: string, title: string) =>
+    jfetch<{ ok: boolean; title: string }>(`/api/chat/${encodeURIComponent(project)}/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title }),
+    }),
+  sendMessage: (project: string, sessionId: string, body: { prompt: string; modelSpec?: string; thinkingLevel?: string }) =>
+    jfetch<{ ok: boolean }>(`/api/chat/${encodeURIComponent(project)}/sessions/${encodeURIComponent(sessionId)}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  abort: (project: string, sessionId: string) =>
+    jfetch<{ ok: boolean }>(`/api/chat/${encodeURIComponent(project)}/sessions/${encodeURIComponent(sessionId)}/abort`, {
+      method: "POST",
+    }),
+};
+
+export type WsMessage = {
+  type: string;
+  runId?: string;
+  state?: RunState;
+  nodeId?: string;
+  ev?: RunEvent["ev"];
+  project?: string;
+  sessionId?: string;
+  event?: string;
+  [key: string]: unknown;
+};
+
+export function openWs(onMessage: (msg: WsMessage) => void): WebSocket {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onmessage = (m) => {

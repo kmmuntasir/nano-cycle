@@ -1,4 +1,5 @@
 import { Box, HStack, Stack, Text } from "@chakra-ui/react";
+import { Check, ClipboardList, MessageCircle, Star } from "lucide-react";
 import GatePanel from "./GatePanel";
 import type { PlanApproval, RunState } from "../api";
 
@@ -15,9 +16,9 @@ function PlanReviewCard({ plan }: { plan: PlanApproval | undefined }) {
   return (
     <Box border="1px solid" borderColor="line" borderRadius="md" p={4} bg="surface">
       <HStack mb={2}>
-        <Text fontSize="14px" fontWeight={700} color="#7aa2f7" fontFamily="system-ui, sans-serif">
-          📋 Plan
-        </Text>
+        <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="14px" fontWeight={700} color="accent" fontFamily="system-ui, sans-serif">
+          <ClipboardList size={15} /> Plan
+        </Box>
         <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
           exactly as it was presented for approval
         </Text>
@@ -27,7 +28,7 @@ function PlanReviewCard({ plan }: { plan: PlanApproval | undefined }) {
           {plan.task_summary}
         </Text>
         {plan.approach && (
-          <Text fontSize="11px" color="#c9cdd8" mt={2} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+          <Text fontSize="11px" color="ink" mt={2} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
             approach: {plan.approach}
           </Text>
         )}
@@ -52,7 +53,7 @@ function PlanReviewCard({ plan }: { plan: PlanApproval | undefined }) {
           </Text>
           <Stack gap={1} mb={1}>
             {plan.acceptance_criteria.map((c, i) => (
-              <Text key={i} fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
+              <Text key={i} fontSize="11px" color="ink" fontFamily="system-ui, sans-serif">
                 • {c}
               </Text>
             ))}
@@ -72,9 +73,9 @@ function ClarificationTranscript({ state }: { state: RunState }) {
   return (
     <Box border="1px solid" borderColor="line" borderRadius="md" p={4} bg="surface">
       <HStack mb={3}>
-        <Text fontSize="14px" fontWeight={700} color="#7aa2f7" fontFamily="system-ui, sans-serif">
-          💬 Clarification
-        </Text>
+        <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="14px" fontWeight={700} color="accent" fontFamily="system-ui, sans-serif">
+          <MessageCircle size={15} /> Clarification
+        </Box>
         <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
           {qa.length} answered round(s)
           {pending ? ` · ${pending.questions.length} answer pending` : ""}
@@ -104,20 +105,22 @@ function ClarificationTranscript({ state }: { state: RunState }) {
                             fontSize="11px"
                             borderRadius="sm"
                             border="1px solid"
-                            borderColor={chosen ? "#7aa2f7" : "line"}
-                            bg={chosen ? "#1b2130" : "transparent"}
-                            color={chosen ? "#7aa2f7" : "muted"}
+                            borderColor={chosen ? "accent" : "line"}
+                            bg={chosen ? "surface2" : "transparent"}
+                            color={chosen ? "accent" : "muted"}
                             fontFamily="system-ui, sans-serif"
                           >
-                            {chosen ? "✓ " : ""}
-                            {o.label}
-                            {o.recommended ? " ★" : ""}
+                            <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                              {chosen ? <Check size={11} /> : null}
+                              {o.label}
+                              {o.recommended ? <Star size={10} /> : null}
+                            </Box>
                           </Box>
                         );
                       })}
                     </HStack>
                   )}
-                  <Text fontSize="11px" color="#4fd6a8" mt={2} fontFamily="system-ui, sans-serif">
+                  <Text fontSize="11px" color="good" mt={2} fontFamily="system-ui, sans-serif">
                     your answer: {r.answers[q.id] ?? "(no answer)"}
                   </Text>
                 </Box>
@@ -127,12 +130,12 @@ function ClarificationTranscript({ state }: { state: RunState }) {
         ))}
         {pending && (
           <Box border="1px dashed" borderColor="#f0b429" borderRadius="md" p={3}>
-            <Text fontSize="11px" color="#f0b429" fontFamily="system-ui, sans-serif" mb={2}>
+            <Text fontSize="11px" color="warn" fontFamily="system-ui, sans-serif" mb={2}>
               Round {pending.round} — interrupted before these were answered:
             </Text>
             <Stack gap={1}>
               {pending.questions.map((q) => (
-                <Text key={q.id} fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
+                <Text key={q.id} fontSize="11px" color="ink" fontFamily="system-ui, sans-serif">
                   • {q.question}
                 </Text>
               ))}

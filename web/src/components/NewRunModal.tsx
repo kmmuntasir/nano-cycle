@@ -1,4 +1,5 @@
 import { Box, Flex, Text } from "@chakra-ui/react";
+import { X } from "lucide-react";
 import { GhostButton } from "../ui/buttons";
 
 export default function NewRunModal({
@@ -40,7 +41,9 @@ export default function NewRunModal({
           </Text>
           <Box flex="1" />
           <GhostButton onClick={onClose}>
-            ✕ Close (Esc)
+            <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+              <X size={12} /> Close (Esc)
+            </Box>
           </GhostButton>
         </Flex>
         {form}

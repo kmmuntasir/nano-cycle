@@ -7,6 +7,7 @@ import {
   CircleSlash,
   CircleX,
   LoaderCircle,
+  Timer,
 } from "lucide-react";
 import ModelPicker from "../ui/ModelPicker";
 import { fmtDuration } from "../lib/format";
@@ -15,15 +16,15 @@ import type { ModelInfo, NodeState, RunState } from "../api";
 
 // Status → icon + color: spinning loader while running, green check when done.
 const STATUS_ICON: Record<string, { Icon: typeof CircleCheck; color: string; spin?: boolean }> = {
-  queued: { Icon: CircleDashed, color: "#8b91a0" },
-  running: { Icon: LoaderCircle, color: "#7aa2f7", spin: true },
-  done: { Icon: CircleCheck, color: "#4fd6a8" },
-  completed: { Icon: CircleCheck, color: "#4fd6a8" },
-  failed: { Icon: CircleX, color: "#f16a6a" },
-  cancelled: { Icon: CircleSlash, color: "#8b91a0" },
-  "awaiting-gate": { Icon: CirclePause, color: "#f0b429" },
-  "awaiting-answers": { Icon: CirclePause, color: "#f0b429" },
-  interrupted: { Icon: CircleAlert, color: "#f16a6a" },
+  queued: { Icon: CircleDashed, color: "var(--chakra-colors-muted)" },
+  running: { Icon: LoaderCircle, color: "var(--chakra-colors-accent)", spin: true },
+  done: { Icon: CircleCheck, color: "var(--chakra-colors-good)" },
+  completed: { Icon: CircleCheck, color: "var(--chakra-colors-good)" },
+  failed: { Icon: CircleX, color: "var(--chakra-colors-bad)" },
+  cancelled: { Icon: CircleSlash, color: "var(--chakra-colors-muted)" },
+  "awaiting-gate": { Icon: CirclePause, color: "var(--chakra-colors-warn)" },
+  "awaiting-answers": { Icon: CirclePause, color: "var(--chakra-colors-warn)" },
+  interrupted: { Icon: CircleAlert, color: "var(--chakra-colors-bad)" },
 };
 
 const STEP_META: Record<string, { title: string; hint: string; role: string }> = {
@@ -65,7 +66,7 @@ function StepCard({
     <Box
       border="1px solid"
       borderColor={selected ? "accent" : "line"}
-      bg={selected ? "surface2" : "#10131a"}
+      bg={selected ? "surface2" : "chatPanel"}
       borderRadius="md"
       p={3}
       minW="190px"
@@ -84,19 +85,25 @@ function StepCard({
           {STEP_META[n.id]?.title ?? titleCase(n.id)}
         </Text>
       </HStack>
-      <Text fontSize="10px" color="muted" fontFamily="system-ui, sans-serif">
-        {titleCase(n.status)}
-        {" · "}
-        {n.status === "running" && n.startedAt ? `⏱ ${fmtDuration(now - n.startedAt)}` : fmtDuration(n.durationMs)}
-        {n.retries > 0 ? ` · ↻${n.retries}` : ""}
-      </Text>
+      <Flex fontSize="10px" color="muted" fontFamily="system-ui, sans-serif" alignItems="center" gap={1}>
+        <Text as="span">{titleCase(n.status)}</Text>
+        <Text as="span">·</Text>
+        {n.status === "running" && n.startedAt ? (
+          <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+            <Timer size={11} /> {fmtDuration(now - n.startedAt)}
+          </Box>
+        ) : (
+          <Text as="span">{fmtDuration(n.durationMs)}</Text>
+        )}
+        {n.retries > 0 ? <Text as="span">· {n.retries} {n.retries === 1 ? "retry" : "retries"}</Text> : ""}
+      </Flex>
       {(detail || STEP_META[n.id]?.hint) && (
         <Text fontSize="10px" color="muted" mt={1} fontFamily="system-ui, sans-serif">
           {detail ?? STEP_META[n.id]?.hint}
         </Text>
       )}
       {n.error && (
-        <Text fontSize="10px" color="#f16a6a" mt={1} fontFamily="system-ui, sans-serif">
+        <Text fontSize="10px" color="bad" mt={1} fontFamily="system-ui, sans-serif">
           {n.error.slice(0, 140)}
         </Text>
       )}
@@ -179,7 +186,7 @@ export default function StepTimeline({
               {units.find((u) => u.id === selectedNode)?.status} · tokens ▲
               {units.find((u) => u.id === selectedNode)?.usage.input ?? 0} ▼
               {units.find((u) => u.id === selectedNode)?.usage.output ?? 0}
-              {units.find((u) => u.id === selectedNode)?.usage.cacheRead ? ` ♻${units.find((u) => u.id === selectedNode)?.usage.cacheRead}` : ""}
+              {units.find((u) => u.id === selectedNode)?.usage.cacheRead ? ` · cache ${units.find((u) => u.id === selectedNode)?.usage.cacheRead}` : ""}
             </Text>
             <Box flex="1" />
             <Box

@@ -15,6 +15,7 @@ import { createQueueManager } from "./queue.mjs";
 import * as git from "./git.mjs";
 import { detectWebCapabilities, makeWebReaderTool, makeWebSearchTool } from "./webtools.mjs";
 import { newRunId, runsDir, saveState, appendEvent, listRuns, loadRun } from "./state.mjs";
+import { createChatManager } from "./chat.mjs";
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(HOST_DIR, "..");
@@ -116,6 +117,7 @@ const queueManager = createQueueManager({ engine: pipeline, emit, resolveProject
 // v3: reconcile ticket queues with interrupted runs after a restart — runs the
 // sweep below already marked, so reconciliation sees the truth and requeues.
 queueManager.recoverAll();
+const chatManager = createChatManager({ modelRuntime, broadcast: (msg) => broadcast(msg) });
 
 // --- http ---------------------------------------------------------------------
 
@@ -394,6 +396,56 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { project: projectName, total: found.length, latest });
     }
 
+    // --- standalone project coding agent chat ---
+    const chatMatch = url.pathname.match(/^\/api\/chat\/([^/]+)\/sessions(?:\/([^/]+)(?:\/(message|abort))?)?$/);
+    if (chatMatch) {
+      const projectName = decodeURIComponent(chatMatch[1]);
+      const sessionId = chatMatch[2] ? decodeURIComponent(chatMatch[2]) : null;
+      const action = chatMatch[3] || null;
+
+      try {
+        if (!sessionId) {
+          if (req.method === "GET") {
+            const list = await chatManager.listSessions(projectName);
+            return json(res, 200, list);
+          }
+          if (req.method === "POST") {
+            const body = await readBody(req);
+            const sess = await chatManager.createSession(projectName, body);
+            return json(res, 201, sess);
+          }
+        } else if (!action) {
+          if (req.method === "GET") {
+            const sess = await chatManager.getSession(projectName, sessionId);
+            return json(res, 200, sess);
+          }
+          if (req.method === "DELETE") {
+            const out = await chatManager.deleteSession(projectName, sessionId);
+            return json(res, 200, out);
+          }
+          if (req.method === "PATCH") {
+            const body = await readBody(req);
+            if (body.title) {
+              await chatManager.renameSession(projectName, sessionId, body.title);
+            }
+            return json(res, 200, { ok: true });
+          }
+        } else if (action === "message" && req.method === "POST") {
+          const body = await readBody(req);
+          // Kick off agent prompt; events stream via WebSocket.
+          chatManager.sendMessage(projectName, sessionId, body).catch((err) => {
+            console.error(`[chat error ${projectName}/${sessionId}]`, err);
+          });
+          return json(res, 200, { ok: true });
+        } else if (action === "abort" && req.method === "POST") {
+          const out = await chatManager.abortSession(projectName, sessionId);
+          return json(res, 200, out);
+        }
+      } catch (err) {
+        return json(res, 400, { error: String(err?.message ?? err) });
+      }
+    }
+
     const runMatch = url.pathname.match(/^\/api\/runs\/([\w-]+)(\/(gate|cancel|answers|model|resume))?$/);
     if (runMatch) {
       const [, id, , action] = runMatch;
@@ -455,6 +507,16 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ server });
 wss.on("connection", (c) => {
   wsClients.add(c);
+  c.on("message", async (raw) => {
+    try {
+      const msg = JSON.parse(raw);
+      if (msg.type === "chat_abort" && msg.project && msg.sessionId) {
+        await chatManager.abortSession(msg.project, msg.sessionId);
+      }
+    } catch {
+      /* non-json or unhandled */
+    }
+  });
   c.on("close", () => wsClients.delete(c));
 });
 

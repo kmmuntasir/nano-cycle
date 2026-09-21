@@ -6,18 +6,19 @@ import GatePanel, { GateBanner } from "./components/GatePanel";
 import StepTimeline from "./components/StepTimeline";
 import RunHeader from "./components/RunHeader";
 import RunsSidebar from "./components/RunsSidebar";
-import Header from "./components/Header";
+import Header, { type View } from "./components/Header";
 import NewRunModal from "./components/NewRunModal";
 import ConfirmDialog from "./components/ConfirmDialog";
 import StartForm from "./components/StartForm";
 import ReviewPanel from "./components/ReviewPanel";
 import TicketsView from "./components/TicketsView";
 import Workbench from "./components/Workbench";
+import ChatView from "./components/ChatView";
 import { SelectEl, selectStyleMini } from "./ui/controls";
 import { api, openWs } from "./api";
 import type { ModelInfo, Project, RunEvent, RunState, RunSummary, SecurityMode } from "./api";
 import { orderedUnits } from "./lib/pipeline";
-
+import { Plus } from "lucide-react";
 function useNow(active: boolean): number {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -29,7 +30,6 @@ function useNow(active: boolean): number {
 }
 
 type Tab = "pipeline" | "console" | "artifacts" | "qa";
-type View = "runs" | "tickets";
 
 export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -300,34 +300,7 @@ export default function App() {
   ];
 
   return (
-    <Box minH="100dvh" bg="#0f1115">
-      <Flex
-        borderBottom="1px solid"
-        borderColor="line"
-        bg="surface"
-        px={4}
-        py={2}
-        gap={2}
-        alignItems="center"
-      >
-        {(["runs", "tickets"] as View[]).map((v) => (
-          <Box
-            key={v}
-            as="button"
-            px={3}
-            py={1.5}
-            fontSize="12px"
-            fontWeight={view === v ? 700 : 500}
-            fontFamily="system-ui, sans-serif"
-            color={view === v ? "#7aa2f7" : "#8b91a0"}
-            borderBottom="2px solid"
-            borderBottomColor={view === v ? "#7aa2f7" : "transparent"}
-            onClick={() => setView(v)}
-          >
-            {v === "runs" ? "▶ Runs" : "☰ Tickets & Queue"}
-          </Box>
-        ))}
-      </Flex>
+    <Box minH="100dvh" bg="canvas">
       <Header
         projects={projects}
         project={project}
@@ -338,19 +311,26 @@ export default function App() {
         onNewRun={() => setShowNew(true)}
         connected={connected}
         liveCount={liveCount}
+        view={view}
+        setView={setView}
       />
+      {/* Offset for the fixed header (52px + 1px border). */}
+      <Box pt="53px">
       {showAdd && (
         <Box bg="surface" borderBottom="1px solid" borderColor="line" px={4} py={3}>
           <Flex gap={2} flexWrap="wrap" alignItems="center" maxW="720px">
             <input placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} style={miniInput} />
             <input placeholder="/absolute/path" value={newPath} onChange={(e) => setNewPath(e.target.value)} style={{ ...miniInput, minWidth: "280px", flex: 1 }} />
             <PrimaryButton size="xs" onClick={addProject}>Add</PrimaryButton>
-            {addErr && <Text fontSize="10px" color="#f16a6a">{addErr}</Text>}
+            {addErr && <Text fontSize="10px" color="bad">{addErr}</Text>}
           </Flex>
         </Box>
       )}
 
-      <Flex alignItems="stretch">
+      {view === "chat" ? (
+        <ChatView project={project} models={models} />
+      ) : (
+        <Flex alignItems="stretch">
         {/* sidebar — desktop */}
         <Box
           display={{ base: "none", lg: "block" }}
@@ -360,10 +340,10 @@ export default function App() {
           borderColor="line"
           bg="surface"
           p={3}
-          minH="calc(100dvh - 52px)"
+          minH="calc(100dvh - 53px)"
           position="sticky"
-          top="52px"
-          h="calc(100dvh - 52px)"
+          top="53px"
+          h="calc(100dvh - 53px)"
           overflowY="auto"
         >
           <Text fontSize="10px" color="muted" letterSpacing="widest" mb={2} fontFamily="system-ui, sans-serif">
@@ -421,11 +401,15 @@ export default function App() {
               <Text fontSize="18px" fontWeight={800} fontFamily="system-ui, sans-serif" mb={2}>
                 No Run Selected
               </Text>
-              <Text fontSize="13px" color="#c9cdd8" mb={4} fontFamily="system-ui, sans-serif">
+              <Text fontSize="13px" color="ink" mb={4} fontFamily="system-ui, sans-serif">
                 Start a run on any local project, or open recent history.
               </Text>
               <Flex gap={2} justifyContent="center" flexWrap="wrap">
-                <PrimaryButton onClick={() => setShowNew(true)}>＋ New Run</PrimaryButton>
+                <PrimaryButton onClick={() => setShowNew(true)}>
+                  <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
+                    <Plus size={13} /> New Run
+                  </Box>
+                </PrimaryButton>
                 {runs[0] && (
                   <OutlineButton onClick={() => openRun(runs[0].id)}>
                     Open {runs[0].id}
@@ -456,26 +440,38 @@ export default function App() {
                         fontSize="12px"
                         fontWeight={active ? 700 : 500}
                         fontFamily="system-ui, sans-serif"
-                        color={active ? "#7aa2f7" : "#8b91a0"}
+                        color={active ? "accent" : "muted"}
                         borderBottom="2px solid"
-                        borderBottomColor={active ? "#7aa2f7" : "transparent"}
+                        borderBottomColor={active ? "accent" : "transparent"}
                         onClick={() => setTab(t.id)}
                       >
                         <Text
                           as="span"
                           fontSize="9px"
-                          color={active ? "#7aa2f7" : "muted"}
+                          color={active ? "accent" : "muted"}
                           mr={1.5}
                           px={1}
                           borderRadius="3px"
                           border="1px solid"
-                          borderColor={active ? "#2b3a5c" : "line"}
+                          borderColor={active ? "accent" : "line"}
                           fontFamily="ui-monospace, monospace"
                           title={`Press ${t.hint} to switch to ${t.label}`}
                         >
                           {t.hint}
                         </Text>
-                        {gated ? "● " : ""}{t.label}
+                        {gated ? (
+                          <Box
+                            as="span"
+                            display="inline-block"
+                            w="7px"
+                            h="7px"
+                            borderRadius="full"
+                            bg="warn"
+                            mr={1.5}
+                            title="Needs your input"
+                          />
+                        ) : null}
+                        {t.label}
                       </Box>
                     );
                   })}
@@ -534,6 +530,7 @@ export default function App() {
           ) : null}
         </Box>
       </Flex>
+      )}
 
       <NewRunModal open={showNew} onClose={() => setShowNew(false)} form={startFormEl} />
       <ConfirmDialog
@@ -552,15 +549,16 @@ export default function App() {
         onConfirm={doRemoveProject}
         onClose={() => setConfirmRemoveProject(false)}
       />
+      </Box>
     </Box>
   );
 }
 
 const miniInput: React.CSSProperties = {
   fontSize: "12px",
-  background: "#1b1f2b",
-  color: "#e4e4e7",
-  border: "1px solid #2a2f3a",
+  background: "var(--chakra-colors-surface2)",
+  color: "var(--chakra-colors-ink)",
+  border: "1px solid var(--chakra-colors-line)",
   borderRadius: "6px",
   padding: "6px 8px",
 };

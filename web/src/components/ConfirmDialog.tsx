@@ -44,7 +44,7 @@ export default function ConfirmDialog({
         <Text fontSize="14px" fontWeight={800} fontFamily="system-ui, sans-serif" mb={2}>
           {title}
         </Text>
-        <Text fontSize="12px" color="#c9cdd8" fontFamily="system-ui, sans-serif" mb={4}>
+        <Text fontSize="12px" color="ink" fontFamily="system-ui, sans-serif" mb={4}>
           {body}
         </Text>
         <Flex gap={2} justifyContent="flex-end">

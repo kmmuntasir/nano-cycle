@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Input, Text } from "@chakra-ui/react";
+import { Check, ChevronDown } from "lucide-react";
 import type { ModelInfo } from "../api";
 
 const KNOWN_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -24,12 +25,15 @@ export default function ModelPicker({
   onChange,
   compact,
   ariaLabel,
+  hideLevel,
 }: {
   value: string;
   models: ModelInfo[];
   onChange: (v: string) => void;
   compact?: boolean;
   ariaLabel?: string;
+  /** When true, suppress the embedded ":level" dropdown (caller manages thinking level separately, e.g. chat). */
+  hideLevel?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -59,7 +63,7 @@ export default function ModelPicker({
 
   const { base, level } = splitSpec(value);
   const selected = useMemo(() => models.find((m) => m.label === base) ?? null, [models, base]);
-  const levels = selected?.thinkingLevels?.length ? selected.thinkingLevels : null;
+  const levels = !hideLevel && selected?.thinkingLevels?.length ? selected.thinkingLevels : null;
 
   const display = !value || value === "auto" ? "Auto (Provider Default)" : base;
 
@@ -74,9 +78,9 @@ export default function ModelPicker({
 
   const levelStyle: React.CSSProperties = {
     fontSize: compact ? "10px" : "11px",
-    background: "#1b1f2b",
-    color: "#e4e4e7",
-    border: "1px solid #3a4152",
+    background: "var(--chakra-colors-surface2)",
+    color: "var(--chakra-colors-ink)",
+    border: "1px solid var(--chakra-colors-line)",
     borderRadius: "6px",
     padding: compact ? "1px 2px" : "4px 6px",
     fontFamily: "system-ui, sans-serif",
@@ -97,7 +101,7 @@ export default function ModelPicker({
           bg="surface2"
           color="ink"
           border="1px solid"
-          borderColor={open ? "#7aa2f7" : "#3a4152"}
+          borderColor={open ? "accent" : "line"}
           borderRadius="6px"
           px={2}
           py={compact ? "2px" : "6px"}
@@ -111,7 +115,12 @@ export default function ModelPicker({
           aria-label={ariaLabel ?? "model picker"}
           title={value === base ? display : value}
         >
-          {display} <Text as="span" color="muted">▾</Text>
+          <Box as="span" display="inline-flex" alignItems="center" gap={1} w="100%">
+            <Box as="span" flex="1" minW={0} overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap">
+              {display}
+            </Box>
+            <ChevronDown size={12} />
+          </Box>
         </Box>
         {levels && (
           <select
@@ -138,9 +147,9 @@ export default function ModelPicker({
           right={0}
           mt={1}
           zIndex={30}
-          bg="#1b1f2b"
+          bg="surface2"
           border="1px solid"
-          borderColor="#7aa2f7"
+          borderColor="accent"
           borderRadius="md"
           overflow="hidden"
           boxShadow="0 8px 30px rgba(0,0,0,0.5)"
@@ -152,10 +161,10 @@ export default function ModelPicker({
               onChange={(e) => setQ((e.target as HTMLInputElement).value)}
               placeholder="Search Models…"
               size="xs"
-              bg="#10131a"
-              borderColor="#3a4152"
+              bg="chatInput"
+              borderColor="line"
               color="ink"
-              _placeholder={{ color: "#8b91a0" }}
+              _placeholder={{ color: "muted" }}
               autoFocus
             />
           </Box>
@@ -190,16 +199,19 @@ function PickerRow({ label, active, onClick }: { label: string; active: boolean;
       py={2}
       fontSize="12px"
       fontFamily="system-ui, sans-serif"
-      bg={active ? "#232c44" : "transparent"}
-      color={active ? "#7aa2f7" : "#e4e4e7"}
+      bg={active ? "surface2" : "transparent"}
+      color={active ? "accent" : "ink"}
       onClick={onClick}
-      _hover={{ bg: "#232c44" }}
+      _hover={{ bg: "surface2" }}
       overflow="hidden"
       textOverflow="ellipsis"
       whiteSpace="nowrap"
       title={label}
     >
-      {active ? "● " : ""}{label}
+      <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
+        {active ? <Check size={11} /> : null}
+        {label}
+      </Box>
     </Box>
   );
 }

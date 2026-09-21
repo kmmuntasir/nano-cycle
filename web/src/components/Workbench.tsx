@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Box, Flex, Text } from "@chakra-ui/react";
+import { FileText, Keyboard } from "lucide-react";
 import { GhostButton } from "../ui/buttons";
 import { fmtTimestamp, pretty } from "../lib/format";
 import ArtifactDocument, { DOCUMENTED } from "./ArtifactDocument";
@@ -81,7 +82,7 @@ export default function Workbench({ state }: { state: RunState }) {
     return (
       <Box border="1px dashed" borderColor="line" borderRadius="md" p={6} textAlign="center">
         <Text fontSize="13px" fontFamily="system-ui, sans-serif">No Artifacts Yet</Text>
-        <Text fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">They appear here as nodes complete — prompts under Inputs.</Text>
+        <Text fontSize="11px" color="ink" fontFamily="system-ui, sans-serif">They appear here as nodes complete — prompts under Inputs.</Text>
       </Box>
     );
   }
@@ -91,7 +92,7 @@ export default function Workbench({ state }: { state: RunState }) {
   return (
     <Box border="1px solid" borderColor="line" borderRadius="md" overflow="hidden">
       <Flex bg="surface2" px={3} py={2} alignItems="center" gap={2}>
-        <Text fontSize="10px" color="#c9cdd8" letterSpacing="widest" fontFamily="system-ui, sans-serif">
+        <Text fontSize="10px" color="ink" letterSpacing="widest" fontFamily="system-ui, sans-serif">
           Artifacts · {files.filter((f) => f.kind === "artifact").length} + {files.filter((f) => f.kind === "input").length} Inputs
         </Text>
         <Box flex="1" />
@@ -100,7 +101,7 @@ export default function Workbench({ state }: { state: RunState }) {
         </GhostButton>
       </Flex>
       <Flex>
-        <Box w="200px" flexShrink={0} borderRight="1px solid" borderColor="line" bg="#10131a" minH="280px" maxH="52vh" overflowY="auto">
+        <Box w="200px" flexShrink={0} borderRight="1px solid" borderColor="line" bg="chatPanel" minH="280px" maxH="52vh" overflowY="auto">
           {groups.map((g) => (
             <Box key={g}>
               <Text fontSize="10px" color="muted" px={3} pt={2} fontFamily="system-ui, sans-serif">{g}</Text>
@@ -113,18 +114,20 @@ export default function Workbench({ state }: { state: RunState }) {
                     py={2}
                     fontSize="11px"
                     cursor="pointer"
-                    bg={selected ? "#1b2130" : "transparent"}
-                    color={selected ? "#7aa2f7" : "#8b91a0"}
+                    bg={selected ? "surface2" : "transparent"}
+                    color={selected ? "accent" : "muted"}
                     borderLeft="2px solid"
-                    borderLeftColor={selected ? "#7aa2f7" : "transparent"}
+                    borderLeftColor={selected ? "accent" : "transparent"}
                     onClick={() => setActiveName(f.name)}
-                    _hover={{ color: "#e4e4e7" }}
+                    _hover={{ color: "ink" }}
                     overflow="hidden" textOverflow="ellipsis" whiteSpace="nowrap"
                     fontFamily="ui-monospace, monospace"
                     title={f.name}
                   >
-                    {f.kind === "input" ? "⌨ " : "📄 "}
-                    {f.name.replace(/^input:/, "")}
+                    <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+                      {f.kind === "input" ? <Keyboard size={12} /> : <FileText size={12} />}
+                      {f.name.replace(/^input:/, "")}
+                    </Box>
                   </Box>
                 );
               })}

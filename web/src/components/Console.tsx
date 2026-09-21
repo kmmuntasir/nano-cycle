@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Flex, Input, Text } from "@chakra-ui/react";
+import { ArrowDown, ChevronRight, Pause, Play } from "lucide-react";
 import { SelectEl } from "../ui/controls";
 import { GhostButton, OutlineButton } from "../ui/buttons";
 import { fmtTimestamp, fmtTokens } from "../lib/format";
@@ -12,11 +13,11 @@ const titleCase = (s: string) =>
     .join(" ");
 
 const DOT: Record<string, string> = {
-  queued: "#8b91a0",
-  running: "#7aa2f7",
-  done: "#4fd6a8",
-  failed: "#f16a6a",
-  cancelled: "#8b91a0",
+  queued: "muted",
+  running: "accent",
+  done: "good",
+  failed: "bad",
+  cancelled: "muted",
 };
 
 // ---------------------------------------------------------------------------
@@ -50,12 +51,12 @@ const TYPE_LABEL: Record<string, string> = {
 };
 
 const TYPE_COLOR: Record<string, string> = {
-  text: "#4fd6a8",
-  think: "#8b91a0",
-  tool: "#7aa2f7",
-  tool_end: "#4fd6a8",
-  usage: "#8b91a0",
-  notice: "#f0b429",
+  text: "good",
+  think: "muted",
+  tool: "accent",
+  tool_end: "good",
+  usage: "muted",
+  notice: "warn",
 };
 
 const cap = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
@@ -80,7 +81,7 @@ const prettyArgs = (args: string): string => {
 
 const previewOf = (b: Block): string => {
   if (b.t === "tool") return cap(`${b.name ?? "tool"} ${b.args ?? ""}`.trim(), 160);
-  if (b.t === "tool_end") return `${b.ok ? "✔" : "✘"} ${b.name ?? "tool"}${b.ok ? "" : " (error)"}`;
+  if (b.t === "tool_end") return `${b.ok ? "ok" : "ERR"} ${b.name ?? "tool"}${b.ok ? "" : " (error)"}`;
   if (b.t === "usage")
     return `▲ ${fmtTokens(b.usage?.input ?? 0)}  ▼ ${fmtTokens(b.usage?.output ?? 0)}  cache ${fmtTokens(b.usage?.cacheRead ?? 0)}`;
   return cap(b.text.replace(/\s+/g, " ").trim() || "(empty)", 240);
@@ -286,23 +287,23 @@ export default function Console({
         px={3}
         py={2}
         cursor="pointer"
-        bg={active ? "#1b2130" : "transparent"}
+        bg={active ? "surface2" : "transparent"}
         borderLeft="2px solid"
-        borderLeftColor={active ? "#7aa2f7" : "transparent"}
+        borderLeftColor={active ? "accent" : "transparent"}
         onClick={() => setNodeId(id)}
-        _hover={{ bg: "#1b2130" }}
+        _hover={{ bg: "surface2" }}
       >
         <Flex gap={2} alignItems="center">
           {status ? (
-            <Box w="8px" h="8px" borderRadius="full" flexShrink={0} bg={DOT[status] ?? "#8b91a0"} />
+            <Box w="8px" h="8px" borderRadius="full" flexShrink={0} bg={DOT[status] ?? "muted"} />
           ) : (
-            <Box w="8px" h="8px" borderRadius="full" flexShrink={0} bg="#7aa2f7" />
+            <Box w="8px" h="8px" borderRadius="full" flexShrink={0} bg="accent" />
           )}
           <Text
             fontSize="11px"
             fontWeight={active ? 700 : 500}
             fontFamily="ui-monospace, monospace"
-            color={active ? "#7aa2f7" : "#e4e4e7"}
+            color={active ? "accent" : "ink"}
             overflow="hidden"
             textOverflow="ellipsis"
             whiteSpace="nowrap"
@@ -332,7 +333,7 @@ export default function Console({
         flexShrink={0}
         borderRight="1px solid"
         borderColor="line"
-        bg="#10131a"
+        bg="chatPanel"
         maxH={height}
         minH="200px"
         overflowY="auto"
@@ -358,7 +359,7 @@ export default function Console({
             <option value="think">Thinking</option>
             <option value="tool">Tool Calls</option>
             <option value="tool_end">Tool Results</option>
-            <option value="errors">Errors ⚠</option>
+            <option value="errors">Errors only</option>
             <option value="usage">Usage</option>
             <option value="notice">Notices</option>
           </SelectEl>
@@ -371,10 +372,13 @@ export default function Console({
             bg="surface2"
             borderColor="line"
             color="ink"
-            _placeholder={{ color: "#8b91a0" }}
+            _placeholder={{ color: "muted" }}
           />
           <OutlineButton size="xs" active={paused || !stick} onClick={() => { if (paused || !stick) jumpToBottom(); else setPaused(true); }}>
-            {paused || !stick ? "▶ Follow" : "⏸ Pause"}
+            <Box as="span" display="inline-flex" alignItems="center" gap={1}>
+              {paused || !stick ? <Play size={12} /> : <Pause size={12} />}
+              {paused || !stick ? "Follow" : "Pause"}
+            </Box>
           </OutlineButton>
           <GhostButton onClick={copyAll}>
             Copy
@@ -394,7 +398,7 @@ export default function Console({
           h={`calc(${height} - 52px)`}
           minH="160px"
           overflowY="auto"
-          bg="#0b0d12"
+          bg="chatCode"
           border="1px solid"
           borderColor="line"
           borderRadius="md"
@@ -403,14 +407,14 @@ export default function Console({
           fontFamily="ui-monospace, monospace"
         >
           {blocks.length === 0 && (
-            <Text color="#c9cdd8" px={2} py={1}>
+            <Text color="ink" px={2} py={1}>
               No events yet — try All Nodes / clear filters.
             </Text>
           )}
           {blocks.map((b) => {
             const open = expanded.has(b.key);
             const err = b.t === "tool_end" && !b.ok;
-            const accent = err ? "#f16a6a" : (TYPE_COLOR[b.t] ?? "#8b91a0");
+            const accent = err ? "bad" : (TYPE_COLOR[b.t] ?? "muted");
             const body = open ? bodyOf(b) : null;
             return (
               <Box key={b.key} borderBottom="1px solid rgba(255,255,255,0.045)">
@@ -431,21 +435,22 @@ export default function Console({
                   px={2}
                   py="3px"
                   cursor="pointer"
-                  bg={open ? "#12151d" : "transparent"}
-                  _hover={{ bg: "#12151d" }}
-                  _focusVisible={{ outline: "1px solid #7aa2f7", outlineOffset: "-1px" }}
+                  bg={open ? "surface2" : "transparent"}
+                  _hover={{ bg: "surface2" }}
+                  _focusVisible={{ outline: "1px solid var(--chakra-colors-accent)", outlineOffset: "-1px" }}
                 >
-                  <Text
+                  <Box
                     as="span"
                     fontSize="10px"
-                    color="#6b7280"
+                    color="muted"
                     flexShrink={0}
                     transform={open ? "rotate(90deg)" : "none"}
                     transition="transform 120ms"
                     lineHeight="1"
+                    display="inline-flex"
                   >
-                    ▸
-                  </Text>
+                    <ChevronRight size={12} />
+                  </Box>
                   <Text
                     as="span"
                     fontSize="9px"
@@ -463,7 +468,7 @@ export default function Console({
                     <Text
                       as="span"
                       fontSize="9px"
-                      color="#5b6272"
+                      color="muted"
                       fontFamily="ui-monospace, monospace"
                       flexShrink={0}
                     >
@@ -474,7 +479,7 @@ export default function Console({
                     as="span"
                     fontSize="12px"
                     fontFamily="ui-monospace, monospace"
-                    color={b.t === "think" ? "#8b91a0" : err ? "#f16a6a" : "#d7dae2"}
+                    color={b.t === "think" ? "muted" : err ? "bad" : "ink"}
                     fontStyle={b.t === "think" ? "italic" : "normal"}
                     flex="1"
                     minW={0}
@@ -487,7 +492,7 @@ export default function Console({
                   <Text
                     as="span"
                     fontSize="10px"
-                    color="#5b6272"
+                    color="muted"
                     fontFamily="ui-monospace, monospace"
                     flexShrink={0}
                   >
@@ -506,25 +511,25 @@ export default function Console({
                     wordBreak="break-word"
                     color={
                       b.t === "think"
-                        ? "#8b91a0"
+                        ? "muted"
                         : b.t === "tool"
-                          ? "#9ca3af"
+                          ? "muted"
                           : b.t === "notice"
-                            ? "#f0b429"
+                            ? "warn"
                             : err
-                              ? "#f16a6a"
-                              : "#c9cdd8"
+                              ? "bad"
+                              : "ink"
                     }
                     fontStyle={b.t === "think" ? "italic" : "normal"}
                   >
                     {body.text}
                     {body.truncated && (
-                      <Text as="span" display="block" mt={1} fontSize="9px" color="#f0b429">
+                      <Text as="span" display="block" mt={1} fontSize="9px" color="warn">
                         output truncated at {BODY_CAP.toLocaleString()} chars
                       </Text>
                     )}
                     {b.count > 1 && (
-                      <Text as="span" display="block" mt={1} fontSize="9px" color="#5b6272" fontStyle="normal">
+                      <Text as="span" display="block" mt={1} fontSize="9px" color="muted" fontStyle="normal">
                         {b.count} streamed fragments merged
                       </Text>
                     )}
@@ -541,8 +546,8 @@ export default function Console({
             bottom={2}
             left="50%"
             transform="translateX(-50%)"
-            bg="#2f6fed"
-            color="white"
+            bg="accent"
+            color="onAccent"
             fontSize="11px"
             fontFamily="system-ui, sans-serif"
             px={3}
@@ -550,8 +555,11 @@ export default function Console({
             borderRadius="full"
             onClick={jumpToBottom}
             boxShadow="0 4px 16px rgba(0,0,0,0.5)"
+            display="inline-flex"
+            alignItems="center"
+            gap={1}
           >
-            ↓ Latest
+            <ArrowDown size={12} /> Latest
           </Box>
         )}
         </Box>
