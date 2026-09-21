@@ -521,7 +521,8 @@ wss.on("connection", (c) => {
   c.on("close", () => wsClients.delete(c));
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`[nano-cycle] http://127.0.0.1:${PORT}`);
+const HOST = process.env.NANO_HOST ?? "127.0.0.1"; // loopback by default — set NANO_HOST=0.0.0.0 behind a reverse proxy
+server.listen(PORT, HOST, () => {
+  console.log(`[nano-cycle] http://${HOST === "0.0.0.0" ? "127.0.0.1" : HOST}:${PORT}${HOST === "0.0.0.0" ? " (bound to all interfaces — use a reverse proxy + TLS)" : ""}`);
   console.log(`[nano-cycle] projects: ${loadProjects().map((p) => p.name).join(", ")}`);
 });

@@ -5,3 +5,4 @@ runs/
 tickets/
 projects.json
 draft.md
+.env

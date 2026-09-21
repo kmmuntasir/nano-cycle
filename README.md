@@ -147,6 +147,17 @@ primary surface; the MCP makes the same API scriptable.
 ## Run
 
 ```bash
+cp .env.example .env   # fill in PI_AUTH_JSON (cat ~/.pi/agent/auth.json from a
+                       # logged-in machine, single-quoted) + NANO_PORT/NANO_HOST
+scripts/deploy.sh      # credentials → ~/.pi/agent, prereq checks, optional-tool
+                       # report (rtk/obscura/gh/scanners), npm install + build
+                       # (--systemd also writes a service unit)
+npm start
+```
+
+Manual alternative:
+
+```bash
 npm install
 npm run build      # web GUI → web-dist/
 npm start          # http://127.0.0.1:4177
