@@ -149,11 +149,16 @@ primary surface; the MCP makes the same API scriptable.
 ```bash
 cp .env.example .env   # fill in PI_AUTH_JSON (cat ~/.pi/agent/auth.json from a
                        # logged-in machine, single-quoted) + NANO_PORT/NANO_HOST
-scripts/deploy.sh      # credentials → ~/.pi/agent, prereq checks, optional-tool
-                       # report (rtk/obscura/gh/scanners), npm install + build
-                       # (--systemd also writes a service unit)
+scripts/deploy.sh      # credentials → ~/.pi/agent, prereq checks, installs
+                       # searxng (local docker, web_search) + obscura (release
+                       # tarball, web_reader) by default, reports rtk/gh/
+                       # scanners, npm install + build (--systemd writes a
+                       # service unit)
 npm start
 ```
+
+The server probes searxng and obscura at boot — installed by the script, they
+just work; absent, the web tools turn themselves off.
 
 Manual alternative:
 

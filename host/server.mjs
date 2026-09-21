@@ -52,8 +52,10 @@ try {
   supportedThinkingLevels = null;
 }
 
-// Optional research capabilities for clarify/plan nodes.
-const searxngUrl = process.env.NANO_SEARXNG_URL;
+// Optional research capabilities for clarify/plan nodes. SearXNG defaults to
+// the endpoint scripts/deploy.sh installs (local docker); the boot probe
+// disables web_search when nothing answers there.
+const searxngUrl = process.env.NANO_SEARXNG_URL ?? "http://127.0.0.1:8888";
 const webCaps = detectWebCapabilities(searxngUrl);
 const webTools = {
   search: webCaps.search ? makeWebSearchTool(searxngUrl) : null,

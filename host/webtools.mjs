@@ -12,7 +12,24 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 const CAP = 16_000;
 
 export function detectWebCapabilities(searxngUrl) {
-  const search = !!searxngUrl;
+  // search: PROBE the JSON API — a defaulted URL (deploy.sh installs SearXNG
+  // at a known endpoint) must silently disable the tool when nothing answers.
+  let search = false;
+  if (searxngUrl) {
+    try {
+      const base = searxngUrl.replace(/\/$/, "");
+      const out = execFileSync(
+        "curl",
+        // plain common query — hyphenated rare strings make some upstream
+        // engines hang past searxng's own timeout and return an empty body
+        ["-s", "-m", "6", `${base}/search?q=test&format=json`],
+        { encoding: "utf8", timeout: 8_000, maxBuffer: 1_000_000 },
+      );
+      search = Array.isArray(JSON.parse(out).results);
+    } catch {
+      search = false;
+    }
+  }
   let reader = false;
   try {
     execFileSync("obscura", ["--version"], { stdio: "ignore", timeout: 10_000 });

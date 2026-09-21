@@ -80,6 +80,57 @@ else
   fi
 fi
 
+# --- searxng (installed by default — local docker container) ----------------------
+# The server probes http://127.0.0.1:8888 at boot: web_search turns on when
+# this container answers, so no .env entry is needed.
+SEARXNG_URL="${NANO_SEARXNG_URL:-http://127.0.0.1:8888}"
+if curl -s -m 6 "${SEARXNG_URL}/search?q=test&format=json" 2>/dev/null | grep -q '"results"'; then
+  ok "searxng already answering at $SEARXNG_URL"
+elif command -v docker >/dev/null; then
+  say "installing searxng (docker container on 127.0.0.1:8888)…"
+  SEARXNG_CFG="${HOME}/.nano-cycle/searxng"
+  mkdir -p "$SEARXNG_CFG"
+  if [[ ! -f "$SEARXNG_CFG/settings.yml" ]]; then
+    # json format ON (the API web_search uses), limiter OFF (loopback only),
+    # random secret (searxng refuses to boot without one).
+    SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')"
+    cat > "$SEARXNG_CFG/settings.yml" << EOF
+use_default_settings: true
+server:
+  secret_key: "$SECRET"
+  limiter: false
+search:
+  formats:
+    - html
+    - json
+EOF
+    chmod 600 "$SEARXNG_CFG/settings.yml"
+  fi
+  if docker inspect nano-cycle-searxng >/dev/null 2>&1; then
+    # re-run: start the existing container (settings/state preserved) — never recreate
+    docker start nano-cycle-searxng >/dev/null 2>&1 || true
+    ok "searxng container already exists — started"
+  elif docker run -d --name nano-cycle-searxng --restart unless-stopped \
+    -p 127.0.0.1:8888:8080 -v "$SEARXNG_CFG:/etc/searxng" searxng/searxng:latest >/dev/null 2>&1; then
+    ok "searxng container created (restart: unless-stopped)"
+  else
+    warn "searxng container failed to start — web_search stays off (registry unreachable?)"
+  fi
+  # first boot initializes the DB — wait briefly for the API
+  SEARXNG_UP=0
+  for _ in $(seq 1 15); do
+    if curl -s -m 2 "${SEARXNG_URL}/search?q=test&format=json" 2>/dev/null | grep -q '"results"'; then
+      SEARXNG_UP=1
+      break
+    fi
+    sleep 2
+  done
+  [[ "$SEARXNG_UP" -eq 1 ]] && ok "searxng healthy — web_search enabled" \
+    || warn "searxng not answering yet — web_search enables once it is (check: docker logs nano-cycle-searxng)"
+else
+  warn "searxng not reachable and docker missing — web_search stays off (install docker and re-run, or set NANO_SEARXNG_URL)"
+fi
+
 # --- optional tools (recommended; each degrades gracefully) ----------------------
 hint_line() { # name status hint
   if [[ "$2" == "ok" ]]; then ok "$1 — $3"; else warn "$1 missing — $3"; fi
@@ -89,12 +140,21 @@ command -v rtk >/dev/null && hint_line "rtk" ok "token-optimized command proxy �
 
 if command -v obscura >/dev/null; then
   hint_line "obscura" ok "headless browser — web_reader tool available"
-elif command -v cargo >/dev/null && [[ -n "${NANO_OBSCURA_DIR:-}" && -f "${NANO_OBSCURA_DIR}/obscura/Cargo.toml" ]]; then
-  say "building obscura from $NANO_OBSCURA_DIR (a few minutes)…"
-  cargo install --path "${NANO_OBSCURA_DIR}/obscura" --locked && ok "obscura installed" \
-    || warn "obscura build failed — web_reader stays disabled (non-fatal)"
 else
-  hint_line "obscura" missing "set NANO_OBSCURA_DIR to a checkout containing obscura/Cargo.toml (needs cargo) — web_reader stays disabled without it"
+  # Standalone install from the obscura release tarball (github.com/h4ckf0r0day/obscura)
+  OBSCURA_ASSET="obscura-$(uname -m)-linux.tar.gz"
+  say "installing obscura ($OBSCURA_ASSET) → ~/.local/bin…"
+  mkdir -p "$HOME/.local/bin"
+  TMPD="$(mktemp -d)"
+  if curl -sL --max-time 120 "https://github.com/h4ckf0r0day/obscura/releases/latest/download/$OBSCURA_ASSET" -o "$TMPD/obscura.tar.gz" \
+    && tar -xzf "$TMPD/obscura.tar.gz" -C "$TMPD" \
+    && find "$TMPD" -type f -name obscura -exec install -m 755 {} "$HOME/.local/bin/obscura" \; ; then
+    command -v obscura >/dev/null && ok "obscura installed — web_reader tool available" \
+      || warn "obscura binary installed to ~/.local/bin — ensure ~/.local/bin is on PATH"
+  else
+    warn "obscura download failed — web_reader stays off (manual: https://docs.obscura.sh/quickstart/installation)"
+  fi
+  rm -rf "$TMPD"
 fi
 
 command -v gh >/dev/null && hint_line "gh" ok "remote-CI verification available (owner opt-in)" \
