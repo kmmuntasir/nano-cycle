@@ -11,9 +11,9 @@
 // a queue-owned run whose state shows an owner-gate (divergence /
 // security-override / answers during a non-inbox phase) parks the ticket and
 // cancels the run (branch + session kept for retry/resume).
-import { loadTickets, saveTickets, setTicketStatus, setQueueState, setQueueConfig } from "./tickets.mjs";
+import { loadTickets, saveTickets, setTicketStatus, setQueueState, setQueueConfig, ticketsDir } from "./tickets.mjs";
 import { flipStatus } from "./backlog.mjs";
-import { newRunId } from "./state.mjs";
+import { newRunId, runsDir } from "./state.mjs";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -27,9 +27,8 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
   let watcherInstalled = false;
 
   function projectIds() {
-    const dir = path.join(path.resolve(import.meta.dirname, ".."), "tickets");
-    if (!fs.existsSync(dir)) return [];
-    return fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, ""));
+    if (!fs.existsSync(ticketsDir())) return [];
+    return fs.readdirSync(ticketsDir()).filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, ""));
   }
 
   function snapshot(project) {
@@ -281,7 +280,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     /abort|stall|provider|rate.?limit|credit|quota|timeout|insufficient|overloaded|network|econn|fetch failed|socket|dns|429|503/i;
   function classifyFailure(runId) {
     try {
-      const runFile = path.join(path.resolve(import.meta.dirname, ".."), "runs", runId, "state.json");
+      const runFile = path.join(runsDir(), runId, "state.json");
       const st = JSON.parse(fs.readFileSync(runFile, "utf8"));
       if (PROVIDER_FAILURE_RE.test(String(st.error ?? ""))) return "provider-failures";
     } catch {
@@ -377,7 +376,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (t.blockedReason) parts.push(`This ticket was previously parked with reason: "${t.blockedReason}".`);
     if (t.runId) {
       try {
-        const runFile = path.join(path.resolve(import.meta.dirname, ".."), "runs", t.runId, "state.json");
+        const runFile = path.join(runsDir(), t.runId, "state.json");
         const st = JSON.parse(fs.readFileSync(runFile, "utf8"));
         const spec = st.artifacts?.spec;
         if (spec) {
@@ -440,7 +439,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     try { projectPath = resolveProject(project).path; } catch { /* project unregistered */ }
     for (const t of store.tickets) {
       if (!t.runId) continue;
-      const runFile = path.join(path.resolve(import.meta.dirname, ".."), "runs", t.runId, "state.json");
+      const runFile = path.join(runsDir(), t.runId, "state.json");
       if (!fs.existsSync(runFile)) continue;
       let rs = null;
       try { rs = JSON.parse(fs.readFileSync(runFile, "utf8")); } catch { continue; }

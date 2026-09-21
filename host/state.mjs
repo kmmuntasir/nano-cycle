@@ -6,7 +6,8 @@ import path from "node:path";
 const ROOT = path.resolve(import.meta.dirname, "..");
 
 export function runsDir() {
-  const dir = path.join(ROOT, "runs");
+  // Tests point NANO_RUNS_DIR at a throwaway dir (see tickets.mjs).
+  const dir = process.env.NANO_RUNS_DIR ? path.resolve(process.env.NANO_RUNS_DIR) : path.join(ROOT, "runs");
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

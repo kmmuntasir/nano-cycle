@@ -231,7 +231,7 @@ const server = http.createServer(async (req, res) => {
           if (st.project !== projectName || st.status !== "awaiting-answers" || st.gate?.type !== "answers") continue;
           items.push({
             runId: st.id,
-            ticketId: st.ticketId ?? null,
+            ticketId: st.ticketId ?? st.options?.ticketId ?? null,
             round: st.gate.round ?? 1,
             questions: st.gate.questions ?? [],
           });

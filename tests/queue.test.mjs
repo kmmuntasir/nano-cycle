@@ -1,10 +1,9 @@
 // Queue manager unit tests — TODOs 8–10. Run: node tests/queue.test.mjs
+import { tickets as TICKETS_DIR, runs as RUNS_DIR } from "./_test-dirs.mjs"; // FIRST: isolate stores
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert";
 import { createQueueManager } from "../host/queue.mjs";
-
-const ROOT = path.resolve(import.meta.dirname, "..");
 const results = [];
 const test = async (name, fn) => {
   try { await fn(); results.push([name, true]); console.log(`PASS  ${name}`); }
@@ -123,14 +122,14 @@ function makeManager(engine, projectDir) {
 }
 
 async function seedProject(project, tickets, queueState = "idle") {
-  fs.mkdirSync(path.join(ROOT, "tickets"), { recursive: true });
+  fs.mkdirSync(path.join(TICKETS_DIR), { recursive: true });
   const full = tickets.map((t, i) => ({
     sourceDoc: null, runId: null, blockedReason: null, status: "draft",
     dependsOn: [], order: i, history: [],
     createdAt: `2026-01-01T00:00:0${i}Z`, updatedAt: null,
     ...t,
   }));
-  fs.writeFileSync(path.join(ROOT, "tickets", `${project}.json`), JSON.stringify({
+  fs.writeFileSync(path.join(TICKETS_DIR, `${project}.json`), JSON.stringify({
     project, config: { models: {}, options: {} }, tickets: full, queue: { state: queueState },
   }, null, 2));
 }
@@ -219,8 +218,8 @@ await test("Q4: recovery — interrupted runs requeue on boot", async () => {
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
   const rid = `recover-${Date.now()}`;
-  fs.mkdirSync(path.join(ROOT, "runs", rid), { recursive: true });
-  fs.writeFileSync(path.join(ROOT, "runs", rid, "state.json"), JSON.stringify({ id: rid, status: "interrupted" }));
+  fs.mkdirSync(path.join(RUNS_DIR, rid), { recursive: true });
+  fs.writeFileSync(path.join(RUNS_DIR, rid, "state.json"), JSON.stringify({ id: rid, status: "interrupted" }));
   await seedProject("q4", [
     { id: "F1", title: "t", description: "d", runId: rid, status: "running" },
   ], "running");
@@ -228,7 +227,7 @@ await test("Q4: recovery — interrupted runs requeue on boot", async () => {
   const st = await store("q4");
   assert.strictEqual(st.tickets[0].status, "queued", "interrupted run requeued");
   assert.strictEqual(st.queue.state, "running");
-  fs.rmSync(path.join(ROOT, "runs", rid), { recursive: true, force: true });
+  fs.rmSync(path.join(RUNS_DIR, rid), { recursive: true, force: true });
 });
 
 // --- Q5: backlog flip -------------------------------------------------------------
@@ -353,8 +352,8 @@ await test("Q10: re-clarify seeds the old spec + park reason into the fresh run'
   const engine = fakeEngine();
   const { mgr } = makeManager(engine, null);
   const rid = `recl-${Date.now()}`;
-  fs.mkdirSync(path.join(ROOT, "runs", rid), { recursive: true });
-  fs.writeFileSync(path.join(ROOT, "runs", rid, "state.json"), JSON.stringify({
+  fs.mkdirSync(path.join(RUNS_DIR, rid), { recursive: true });
+  fs.writeFileSync(path.join(RUNS_DIR, rid, "state.json"), JSON.stringify({
     artifacts: { spec: { summary: "old summary", decisions: [{ topic: "style", decision: "CommonJS" }], acceptance_criteria: ["lib/greet.js exists"] } },
   }));
   await seedProject("q10", [
@@ -368,7 +367,7 @@ await test("Q10: re-clarify seeds the old spec + park reason into the fresh run'
   assert.match(started.opts.task, /stale-spec/);
   assert.match(started.opts.task, /old summary/);
   assert.match(started.opts.task, /lib\/greet\.js exists/);
-  fs.rmSync(path.join(ROOT, "runs", rid), { recursive: true, force: true });
+  fs.rmSync(path.join(RUNS_DIR, rid), { recursive: true, force: true });
 });
 
 await test("Q11: a wave whose starts all fail can't stick the queue at 'clarifying'", async () => {
@@ -386,8 +385,8 @@ await test("Q11: a wave whose starts all fail can't stick the queue at 'clarifyi
 // --- Q12: failed-build classification from the run's error record ------------------
 
 async function seedFailedRunWithError(rid, error) {
-  fs.mkdirSync(path.join(ROOT, "runs", rid), { recursive: true });
-  fs.writeFileSync(path.join(ROOT, "runs", rid, "state.json"), JSON.stringify({ id: rid, status: "failed", error }));
+  fs.mkdirSync(path.join(RUNS_DIR, rid), { recursive: true });
+  fs.writeFileSync(path.join(RUNS_DIR, rid, "state.json"), JSON.stringify({ id: rid, status: "failed", error }));
 }
 
 await test("Q12: gates failures vs provider failures classify differently (§2.4)", async () => {
@@ -410,7 +409,7 @@ await test("Q12: gates failures vs provider failures classify differently (§2.4
   const byId = Object.fromEntries(st.tickets.map((t) => [t.id, t]));
   assert.strictEqual(byId.F1.blockedReason, "gates-exhausted", "a gate verdict parks as gates-exhausted");
   assert.strictEqual(byId.F2.blockedReason, "provider-failures", "a provider-type error parks as provider-failures");
-  for (const rid of ["run-q12-a", "run-q12-b"]) fs.rmSync(path.join(ROOT, "runs", rid), { recursive: true, force: true });
+  for (const rid of ["run-q12-a", "run-q12-b"]) fs.rmSync(path.join(RUNS_DIR, rid), { recursive: true, force: true });
 });
 
 // --- Q13: queue state derives from tickets (re-clarify during a build) ---------
@@ -465,7 +464,6 @@ await test("Q14: direct run settles → the queue pump that deferred on its tree
   assert.strictEqual((await store("q14")).queue.state, "idle");
 });
 
-process.on("exit", () => { try { fs.rmSync(path.join(ROOT, "tickets"), { recursive: true, force: true }); } catch {} });
 
 const failed = results.filter(([, ok]) => !ok).length;
 console.log(`\n${results.length - failed}/${results.length} queue tests passed`);

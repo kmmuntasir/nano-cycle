@@ -5,7 +5,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const TICKETS_DIR = path.join(ROOT, "tickets");
+// Tests point NANO_TICKETS_DIR at a throwaway dir — the default is the LIVE
+// store, which `npm test` must never touch (it wiped real ticket data once).
+const TICKETS_DIR = process.env.NANO_TICKETS_DIR
+  ? path.resolve(process.env.NANO_TICKETS_DIR)
+  : path.join(ROOT, "tickets");
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 
 export const TICKET_STATUSES = [
@@ -26,6 +30,11 @@ function defaultStore(project) {
     tickets: [],
     queue: { state: "idle", pausedAt: null },
   };
+}
+
+/** The store directory (env-overridable for tests). */
+export function ticketsDir() {
+  return TICKETS_DIR;
 }
 
 export function loadTickets(project) {

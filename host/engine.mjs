@@ -1694,6 +1694,9 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         id,
         task,
         project: project.name,
+        // Top-level: the queue watcher (awaiting-gate parking) and the Inbox
+        // join on this. options.ticketId stays for run-config provenance.
+        ticketId: ticketId ?? null,
         status: "running",
         createdAt: new Date().toISOString(),
         finishedAt: null,

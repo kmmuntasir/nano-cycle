@@ -1,5 +1,6 @@
 // Engine unit harness — drives createEngine with fake step sessions (the plan's
 // Phase 6 "done when"). Run: node tests/engine-harness.mjs
+import "./_test-dirs.mjs"; // FIRST: isolate tickets/runs stores (never the live data)
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert";
@@ -779,11 +780,16 @@ await test("v3: promote-from-disk — a clarified run continues across a restart
   const st = await engine1.start({
     id, task: "t", project: { name: "sandbox", path: FIXTURE }, models,
     clarify: true, maxFixRounds: 2, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off",
-    stopAfterClarify: true,
+    stopAfterClarify: true, ticketId: "F07",
   });
   const deadline = Date.now() + 15_000;
   while (st.status !== "clarified" && Date.now() < deadline) await sleep(10);
   assert.strictEqual(st.status, "clarified");
+  // The gate-park watcher and the Inbox join on TOP-LEVEL state.ticketId — it
+  // previously lived only in options, silently disabling gate parking (Q3's
+  // fake hid the drift until a real-shape test existed).
+  assert.strictEqual(st.ticketId, "F07", "top-level state.ticketId (watcher/Inbox join key)");
+  assert.strictEqual(st.options.ticketId, "F07", "options.ticketId provenance kept");
   // persist exactly as the real server would (emit.state → saveState)
   fs.writeFileSync(path.join(runDir(id), "state.json"), JSON.stringify(st));
   // fresh server session: the run exists only on disk

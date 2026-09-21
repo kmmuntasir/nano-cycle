@@ -1,5 +1,5 @@
 // Ticket store unit tests — TODO 5. Run: node tests/tickets.test.mjs
-import fs from "node:fs";
+import "./_test-dirs.mjs"; // FIRST: isolate tickets/runs stores (never the live data)
 import assert from "node:assert";
 import { createTicket, updateTicket, deleteTicket, setTicketStatus, loadTickets, importTickets } from "../host/tickets.mjs";
 
@@ -10,8 +10,6 @@ const test = (name, fn) => {
 };
 
 const PROJ = "tick-fixture";
-process.on("exit", () => { try { fs.rmSync("tickets", { recursive: true, force: true }); } catch {} });
-fs.rmSync("tickets", { recursive: true, force: true });
 
 test("create: auto id, defaults, persistence round-trip", () => {
   const t = createTicket(PROJ, { title: "First", description: "do it" });
