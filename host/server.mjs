@@ -465,6 +465,20 @@ const server = http.createServer(async (req, res) => {
           return json(res, 404, { error: "not found" });
         }
       }
+      if (req.method === "DELETE" && !action) {
+        // Delete a finished run and its whole directory (state, events,
+        // sessions). Live runs are refused — cancel them first.
+        try {
+          const st = loadRun(id);
+          if (["running", "awaiting-gate", "awaiting-answers"].includes(st.status)) {
+            return json(res, 409, { error: "run is still active — cancel it before deleting" });
+          }
+        } catch {
+          return json(res, 404, { error: "not found" });
+        }
+        fs.rmSync(path.join(runsDir(), id), { recursive: true, force: true });
+        return json(res, 200, { ok: true });
+      }
       if (req.method === "POST" && action === "gate") {
         const body = await readBody(req);
         const ok = pipeline.gate(id, body.action === "cancel" ? "cancel" : body.action === "reject" ? "reject" : "approve", body.comments);

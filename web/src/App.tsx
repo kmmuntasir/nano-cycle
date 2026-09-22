@@ -37,6 +37,12 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   // Last selected project persists across sessions (until removed or switched).
   const [project, setProject] = useState(() => localStorage.getItem("nano-cycle-project") ?? "sandbox");
+  // The active view (Runs | Tickets | Chat) persists too — a refresh keeps
+  // you exactly where you were.
+  const [view, setView] = useState<View>(() => {
+    const v = localStorage.getItem("nano-cycle-view");
+    return v === "tickets" || v === "chat" ? v : "runs";
+  });
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPath, setNewPath] = useState("");
@@ -51,7 +57,6 @@ export default function App() {
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("pipeline");
-  const [view, setView] = useState<View>("runs");
   const [showNew, setShowNew] = useState(false);
   const [connected, setConnected] = useState(false);
   const [task, setTask] = useState("");
@@ -82,6 +87,23 @@ export default function App() {
     api.listRuns().then(setRuns).catch(() => {});
   }, []);
 
+  const handleDeleteRun = useCallback(
+    async (id: string) => {
+      try {
+        await api.deleteRun(id);
+        if (runId === id) {
+          setRunId(null);
+          setState(null);
+          history.replaceState(null, "", location.pathname);
+        }
+        refreshRuns();
+      } catch (e) {
+        alert(String(e));
+      }
+    },
+    [runId, refreshRuns],
+  );
+
   useEffect(() => {
     localStorage.setItem("nano-cycle-models", JSON.stringify(modelPick));
   }, [modelPick]);
@@ -89,6 +111,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("nano-cycle-project", project);
   }, [project]);
+
+  useEffect(() => {
+    localStorage.setItem("nano-cycle-view", view);
+  }, [view]);
 
   useEffect(() => {
     localStorage.setItem("nano-cycle-security", security);
@@ -355,7 +381,7 @@ export default function App() {
           <Text fontSize="10px" color="muted" letterSpacing="widest" mb={2} fontFamily="system-ui, sans-serif">
             Runs · {runs.length}
           </Text>
-          <RunsSidebar runs={projectRuns} runId={runId} onSelect={openRun} />
+          <RunsSidebar runs={projectRuns} runId={runId} onSelect={openRun} onDelete={handleDeleteRun} />
         </Box>
 
         {/* main */}
@@ -423,7 +449,7 @@ export default function App() {
                 )}
               </Flex>
               <Box mt={6} display={{ base: "block", lg: "none" }}>
-                <RunsSidebar runs={projectRuns} runId={runId} onSelect={openRun} />
+                <RunsSidebar runs={projectRuns} runId={runId} onSelect={openRun} onDelete={handleDeleteRun} />
               </Box>
             </Box>
           ) : view === "runs" ? (

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Box, Flex, Input, Stack, Text } from "@chakra-ui/react";
+import { Trash2 } from "lucide-react";
 import type { RunSummary } from "../api";
 
 const dot = (status: string): string =>
@@ -17,11 +18,14 @@ function Row({
   r,
   active,
   onSelect,
+  onDelete,
 }: {
   r: RunSummary;
   active: boolean;
   onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
 }) {
+  const deletable = !["running", "awaiting-gate", "awaiting-answers"].includes(r.status);
   return (
     <Flex
       align="center"
@@ -55,6 +59,25 @@ function Row({
           {r.project} · {r.tier} · {r.status}
         </Text>
       </Box>
+      {deletable && (
+        <Box
+          as="button"
+          flexShrink={0}
+          p={1}
+          borderRadius="sm"
+          color="muted"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (window.confirm(`Delete run ${r.id}? Its directory (state, events, sessions) is removed permanently.`)) {
+              onDelete(r.id);
+            }
+          }}
+          title="Delete this run"
+          _hover={{ color: "bad", bg: "surface2" }}
+        >
+          <Trash2 size={12} />
+        </Box>
+      )}
     </Flex>
   );
 }
@@ -63,10 +86,12 @@ export default function RunsSidebar({
   runs,
   runId,
   onSelect,
+  onDelete,
 }: {
   runs: RunSummary[];
   runId: string | null;
   onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
 }) {
   const [q, setQ] = useState("");
   const filtered = useMemo(() => {
@@ -91,7 +116,7 @@ export default function RunsSidebar({
         </Text>
         <Stack gap={1}>
           {list.map((r) => (
-            <Row key={r.id} r={r} active={runId === r.id} onSelect={onSelect} />
+            <Row key={r.id} r={r} active={runId === r.id} onSelect={onSelect} onDelete={onDelete} />
           ))}
         </Stack>
       </Box>

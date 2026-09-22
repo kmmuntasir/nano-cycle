@@ -182,6 +182,7 @@ export const api = {
   listRuns: () => jfetch<RunSummary[]>(`/api/runs?_=${Date.now()}`),
   getRun: (id: string) =>
     jfetch<{ state: RunState; events: RunEvent[]; totalEvents?: number }>(`/api/runs/${id}`),
+  deleteRun: (id: string) => jfetch<{ ok: boolean }>(`/api/runs/${id}`, { method: "DELETE" }),
   start: (
     task: string,
     project: string,
