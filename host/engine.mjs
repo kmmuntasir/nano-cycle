@@ -324,6 +324,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       await git.ffMerge(run.projectPath, g.runBranch);
       await git.deleteBranch(run.projectPath, g.runBranch);
       run.state.git.merged = true;
+      run.state.git.mergeError = null; // a fix-resumed run carries the earlier failure's error — success clears it
       emit.event(run.id, "_run", {
         t: "notice",
         s: `git: ff-merged ${g.runBranch} into ${g.baseBranch} and deleted the branch — ready to push`,
@@ -1582,62 +1583,87 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
 
       // Fix-resume (owner-triggered): ONE build feedback turn driven by the
-      // LAST verify report — the stale verify/audit artifacts are consumed as
-      // feedback and cleared; the loop below then re-verifies fresh.
-      if (run.state.fixResume && run.state.artifacts.verify) {
-        const rec = reconcileVerify(run, run.state.artifacts.verify);
-        const ab = auditBlocking(run);
-        const gaps = assembleGaps(rec, ab);
-        run.state.fixResume = false;
-        emit.event(run.id, "build", {
-          t: "notice",
-          s: `fix-resume: building against the LAST verify report (${gaps.length} gap(s)) — no re-verify until the fix lands`,
-        });
-        emit.state(run);
-        await buildTurn(run, { feedback: { round: (run.state.round ?? 0) + 1, source: "verification (fix-resume)", gaps } });
-        if (run.cancelRequested) throw new Error("cancelled");
-        if (!run.state.artifacts.implDelta) throw new Error("fix-resume turn ended without a new impl-delta");
-        run.state.artifacts.verify = null;
-        run.state.artifacts.audit = null;
-        emit.state(run);
-      }
-
-      // STEP 3 — verify loop (bounded fix rounds; feedback resumes the build session).
-      let accepted = false;
-      for (let round = run.state.round ?? 0; round <= run.options.maxFixRounds; round++) {
-        run.state.round = round;
-        emit.state(run);
-        await verifyRound(run, round);
-        if (run.cancelRequested) break;
-        const rec = reconcileVerify(run, run.state.artifacts.verify);
-        const ab = auditBlocking(run);
-        if (rec.verdict === "accepted" && ab.length === 0) {
-          accepted = true;
-          endStep(run, "verify");
-          break;
-        }
-        const gaps = assembleGaps(rec, ab);
-        if (round < run.options.maxFixRounds) {
-          emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1} (resuming the build session)` });
-          await buildTurn(run, { feedback: { round: round + 1, source: "verification", gaps } });
-          if (run.cancelRequested) break;
-          if (!run.state.artifacts.implDelta) throw new Error(`fix round ${round + 1} ended without a new impl-delta`);
+      // LAST verify report OR the security findings — stale artifacts are
+      // consumed as feedback and cleared; the matching gate then re-runs once.
+      if (run.state.fixResume) {
+        // WHICH gate failed? Step status is the truth — a security-exhausted
+        // run still carries its ACCEPTED verify artifact, so artifact
+        // presence alone would pick the wrong branch.
+        const verifyStepFailed = stepState(run, "verify")?.status === "failed";
+        const secStepFailed = stepState(run, "security")?.status === "failed";
+        let gaps = [];
+        let securityOnly = false;
+        if (secStepFailed && run.state.artifacts.security) {
+          const { fixable, unfixable } = securityBlocking(run);
+          gaps = fixable.map((f) => `[security/${f.severity}]${f.file ? ` ${f.file}:` : ""} ${f.title} — ${f.evidence}${f.fix ? ` (fix: ${f.fix})` : ""}`);
+          if (unfixable.length > 0) {
+            gaps.push(`[security] ${unfixable.length} unfixable finding(s) remain (${unfixable.map((f) => f.title).join("; ")}) — the owner override gate will decide after re-scan`);
+          }
+          run.state.artifacts.security = null;
+          securityOnly = true; // verify accepted already — do not re-run it
+        } else if (run.state.artifacts.verify) {
+          gaps = assembleGaps(reconcileVerify(run, run.state.artifacts.verify), auditBlocking(run));
           run.state.artifacts.verify = null;
           run.state.artifacts.audit = null;
         }
-        // else: rounds exhausted — loop ends, failure reasons assembled below.
+        run.state.fixResume = false;
+        run.state.fixResumeSecurityOnly = securityOnly;
+        emit.event(run.id, "build", {
+          t: "notice",
+          s: `fix-resume: building against the LAST ${securityOnly ? "security findings" : "verify report"} (${gaps.length} gap(s)) — ${securityOnly ? "verify already accepted, jumping to security re-scan" : "no re-verify until the fix lands"}`,
+        });
+        emit.state(run);
+        await buildTurn(run, { feedback: { round: (run.state.round ?? 0) + 1, source: securityOnly ? "security (fix-resume)" : "verification (fix-resume)", gaps } });
+        if (run.cancelRequested) throw new Error("cancelled");
+        if (!run.state.artifacts.implDelta) throw new Error("fix-resume turn ended without a new impl-delta");
+        emit.state(run);
       }
-      if (run.cancelRequested) throw new Error("cancelled");
-      if (!accepted) {
-        endStep(run, "verify", { status: "failed", error: "gates not accepted" });
-        if (run.options.security !== "off") endStep(run, "security", { status: "cancelled", error: "skipped — verify failed" });
-        run.state.status = "failed";
-        run.state.error =
-          `gates still failing after ${run.options.maxFixRounds} fix round(s): ${assembleFailureReasons(run) ?? "verification did not accept"}`;
-        emit.event(run.id, "_run", { t: "notice", s: `run failed: ${run.state.error}` });
-        await integrate(run, false);
-        settle(run); // the V12 lesson, second verse — every exit path MUST settle
-        return;
+
+      // STEP 3 — verify loop (bounded fix rounds; feedback resumes the build
+      // session). Skipped entirely on a security-only fix-resume: verify
+      // already accepted that tree stage; the security re-scan judges the fix.
+      if (run.state.fixResumeSecurityOnly) {
+        run.state.fixResumeSecurityOnly = false;
+        endStep(run, "verify");
+        emit.event(run.id, "verify", { t: "notice", s: "verify already accepted — jumping straight to the security re-scan" });
+        emit.state(run);
+      } else {
+        let accepted = false;
+        for (let round = run.state.round ?? 0; round <= run.options.maxFixRounds; round++) {
+          run.state.round = round;
+          emit.state(run);
+          await verifyRound(run, round);
+          if (run.cancelRequested) break;
+          const rec = reconcileVerify(run, run.state.artifacts.verify);
+          const ab = auditBlocking(run);
+          if (rec.verdict === "accepted" && ab.length === 0) {
+            accepted = true;
+            endStep(run, "verify");
+            break;
+          }
+          const gaps = assembleGaps(rec, ab);
+          if (round < run.options.maxFixRounds) {
+            emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1} (resuming the build session)` });
+            await buildTurn(run, { feedback: { round: round + 1, source: "verification", gaps } });
+            if (run.cancelRequested) break;
+            if (!run.state.artifacts.implDelta) throw new Error(`fix round ${round + 1} ended without a new impl-delta`);
+            run.state.artifacts.verify = null;
+            run.state.artifacts.audit = null;
+          }
+          // else: rounds exhausted — loop ends, failure reasons assembled below.
+        }
+        if (run.cancelRequested) throw new Error("cancelled");
+        if (!accepted) {
+          endStep(run, "verify", { status: "failed", error: "gates not accepted" });
+          if (run.options.security !== "off") endStep(run, "security", { status: "cancelled", error: "skipped — verify failed" });
+          run.state.status = "failed";
+          run.state.error =
+            `gates still failing after ${run.options.maxFixRounds} fix round(s): ${assembleFailureReasons(run) ?? "verification did not accept"}`;
+          emit.event(run.id, "_run", { t: "notice", s: `run failed: ${run.state.error}` });
+          await integrate(run, false);
+          settle(run); // the V12 lesson, second verse — every exit path MUST settle
+          return;
+        }
       }
 
       // STEP 4 — security (optional; own bounded fix round + owner override).
@@ -2001,11 +2027,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       if (!run.done.promiseSettled) {
         return { ok: false, error: "run is still winding down — try again in a moment" };
       }
-      // fix mode: skip re-verify — ONE build turn against the LAST verify report
-      let notice;
+      // fix mode: skip the failed gate's re-run — ONE build turn against the
+      // LAST verify report OR security findings
       if (opts.fix) {
-        if (!run.state.artifacts.verify) {
-          return { ok: false, error: "no verify report on this run — plain resume instead" };
+        if (!run.state.artifacts.verify && !run.state.artifacts.security) {
+          return { ok: false, error: "no verify/security report on this run — plain resume instead" };
         }
         run.state.fixResume = true;
         for (const s of run.state.steps) {
@@ -2016,7 +2042,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             s.endedAt = null;
           }
         }
-        return restartExecute(run, "fix-resume: building against the last verify report (verify re-runs after the fix)");
+        return restartExecute(run, "fix-resume: building against the last gate report (the gate re-runs after the fix)");
       }
       let requeued = 0;
       for (const s of run.state.steps) {
@@ -2028,8 +2054,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           requeued += 1;
         }
       }
-      notice = `resumed by owner — ${requeued} step(s) requeued, milestones/artifacts kept (build session resumes from disk)`;
-      return restartExecute(run, notice);
+      return restartExecute(run, `resumed by owner — ${requeued} step(s) requeued, milestones/artifacts kept (build session resumes from disk)`);
     },
 
     // v3: continue a "clarified" run (queue mode) into build/verify/security.
@@ -2107,9 +2132,10 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         }
       }
       if (opts.fix) {
-        // fix-resume from disk: ONE build turn against the LAST verify report;
-        // the verify loop then re-verifies fresh with the round budget it had
-        if (!state.artifacts?.verify) return { ok: false, error: "no verify report on this run — plain resume instead" };
+        // fix-resume from disk: ONE build turn against the LAST gate report
+        if (!state.artifacts?.verify && !state.artifacts?.security) {
+          return { ok: false, error: "no verify/security report on this run — plain resume instead" };
+        }
         state.fixResume = true;
       }
       if (opts.promote) state.options.stopAfterClarify = false; // persists via state.options

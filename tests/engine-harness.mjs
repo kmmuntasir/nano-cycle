@@ -171,7 +171,7 @@ const test = async (name, fn) => {
     console.log(`PASS  ${name}`);
   } catch (e) {
     results.push([name, false]);
-    console.log(`FAIL  ${name}\n      ${String(e?.message ?? e).split("\n")[0]}`);
+    console.log(`FAIL  ${name}\n      ${String(e?.message ?? e).split("\n").slice(0, 6).join("\n      ")}`);
   }
 };
 
@@ -1023,6 +1023,68 @@ await test("v3.1: fix-resume — resume({fix}) builds from the LAST verify repor
   // ONE build session resumed; the fix turn ran; verify ran exactly once more
   assert.strictEqual(openCalls.filter((c) => c.stepId === "build" && c.resumed).length, 1, "the fix turn reopens the SAME persisted build session");
   assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, 2, "verify round 0 + the post-fix re-verify — no extra re-verify");
+});
+
+await test("security exhausted → settles 'failed'; fix-resume skips verify and re-scans with the findings as feedback", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  let secCalls = 0;
+  const secFindings = (present) => ({
+    verdict: "accepted",
+    findings: present
+      ? [{ severity: "high", title: "hardcoded secret in config", evidence: "sk=... in source", fix: "use env", fixable_in_scope: true }]
+      : [],
+  });
+  let securityRounds = 0;
+  const feedbackTurn = async ({ tools, text }) => {
+    // runs for normal security fix rounds AND the fix-resume turn — behave by prompt
+    if (/fix-resume/.test(text)) {
+      assert.match(text, /hardcoded secret/, "the finding rides as fix-resume feedback");
+    }
+    await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+  };
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+      feedbackTurn, feedbackTurn, feedbackTurn, feedbackTurn,
+    ],
+    verify: [async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(true)); await callTool(tools, "submit_audit", auditArtifact(false)); }],
+    security: [
+      async ({ tools }) => { securityRounds += 1; secCalls += 1; await callTool(tools, "submit_security", secFindings(secCalls < 3)); },
+      async ({ tools }) => { securityRounds += 1; secCalls += 1; await callTool(tools, "submit_security", secFindings(secCalls < 3)); },
+      async ({ tools }) => { securityRounds += 1; secCalls += 1; await callTool(tools, "submit_security", secFindings(secCalls < 3)); },
+    ],
+  };
+  const emit = { state: () => {}, event: () => {} };
+  const engine = createEngine({
+    modelRuntime: {}, emit, webTools: {},
+    adapters: { openStepSession: makeFakeOpen(scripts), runNode: async () => {}, runMechanicalChecks: async () => [] },
+  });
+  const id = `sx-${Date.now()}`;
+  const settled = [];
+  const st = await engine.start({
+    id, task: "t", project: { name: "sandbox", path: FIXTURE },
+    models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
+    clarify: false, maxFixRounds: 1, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "scan",
+    onSettled: (s) => settled.push(s),
+  });
+  const deadline = Date.now() + 20_000;
+  while (!["failed", "completed", "cancelled"].includes(st.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "failed", st.error);
+  assert.match(st.error ?? "", /security findings not fixed/);
+  assert.deepStrictEqual(settled, ["failed"], "security exhaustion settles");
+  // fix-resume: verify must NOT re-run; security re-scans exactly once
+  const out = engine.resume(id, { fix: true });
+  assert.ok(out.ok, out.error);
+  const verifyOpensBefore = openCalls.filter((c) => c.stepId === "verify").length;
+  while (!["completed", "failed", "cancelled"].includes(st.status) && Date.now() < deadline) await sleep(10);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, verifyOpensBefore, "verify skipped on security-only fix-resume");
+  assert.strictEqual(securityRounds, 3, "security re-scanned exactly once after the fix (2 exhaustion scans + 1)");
+  assert.deepStrictEqual(settled, ["failed", "completed"]);
 });
 
 // --- summary ---------------------------------------------------------------------------
