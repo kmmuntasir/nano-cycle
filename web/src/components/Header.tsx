@@ -152,11 +152,10 @@ export default function Header({
         </Box>
       </GhostButton>
       <GhostButton
-        disabled={project === "sandbox"}
         onClick={onRemoveProject}
         title={
           project === "sandbox"
-            ? "The built-in sandbox cannot be removed."
+            ? "Remove the sandbox — its scratch folder is deleted. Re-add it anytime with the repo's /sandbox path."
             : `Remove "${project}" from nano-cycle — registry-only: nothing on disk is deleted, and run history is kept.`
         }
       >

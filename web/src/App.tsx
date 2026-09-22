@@ -35,7 +35,8 @@ export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [roles, setRoles] = useState<Record<string, string>>({});
   const [projects, setProjects] = useState<Project[]>([]);
-  const [project, setProject] = useState("sandbox");
+  // Last selected project persists across sessions (until removed or switched).
+  const [project, setProject] = useState(() => localStorage.getItem("nano-cycle-project") ?? "sandbox");
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPath, setNewPath] = useState("");
@@ -86,6 +87,10 @@ export default function App() {
   }, [modelPick]);
 
   useEffect(() => {
+    localStorage.setItem("nano-cycle-project", project);
+  }, [project]);
+
+  useEffect(() => {
     localStorage.setItem("nano-cycle-security", security);
   }, [security]);
 
@@ -120,7 +125,8 @@ export default function App() {
     api.roles().then(setRoles).catch(() => {});
     api.projects().then((p) => {
       setProjects(p);
-      if (!p.some((x) => x.name === "sandbox")) setProject(p[0]?.name ?? "sandbox");
+      // keep the stored selection when it still exists; otherwise fall back
+      setProject((cur) => (p.some((x) => x.name === cur) ? cur : p[0]?.name ?? "sandbox"));
     }).catch(() => {});
     refreshRuns();
     const deepLink = new URLSearchParams(location.search).get("run");
@@ -204,7 +210,7 @@ export default function App() {
     try {
       const updated = await api.removeProject(project);
       setProjects(updated);
-      if (!updated.some((p) => p.name === project)) setProject("sandbox");
+      setProject((cur) => (updated.some((p) => p.name === cur) ? cur : updated[0]?.name ?? "sandbox"));
     } catch (e) {
       alert(String(e));
     }

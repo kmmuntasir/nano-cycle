@@ -64,7 +64,11 @@ const webTools = {
   reader: webCaps.reader ? makeWebReaderTool() : null,
 };
 
-fs.mkdirSync(SANDBOX_DIR, { recursive: true });
+// The sandbox folder only matters while the sandbox project is registered —
+// a removed sandbox stays removed (re-add it from the GUI to bring it back).
+if (loadProjects().some((p) => p.name === "sandbox")) {
+  fs.mkdirSync(SANDBOX_DIR, { recursive: true });
+}
 fs.mkdirSync(runsDir(), { recursive: true });
 
 // Orphan sweep: runs that a restart killed mid-flight must never linger as
