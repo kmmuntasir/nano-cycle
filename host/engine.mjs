@@ -297,6 +297,42 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     })();
   }
 
+  // Post-run leftover hook: the agent sometimes edits files it never declares
+  // for a milestone commit (e.g. its own backlog entry). That dirt would ride
+  // checkout+merge onto the base branch and block the NEXT run's assertClean —
+  // stalling a ticket queue with nothing running. Sweep it into a labelled
+  // leftover commit on the run branch FIRST, loudly (file list in the notice).
+  // Runs before every base checkout, accepted or not (a kept branch's dirt
+  // would leak onto base just the same).
+  async function commitLeftovers(run) {
+    const g = run.git;
+    if (!g?.enabled) return;
+    let porcelain = "";
+    try {
+      porcelain = await git.statusPorcelain(run.projectPath);
+    } catch {
+      return;
+    }
+    if (!porcelain) return;
+    try {
+      await git.stageAll(run.projectPath);
+      if (!(await git.hasStaged(run.projectPath))) return;
+      const hash = await git.commit(run.projectPath, `chore: leftover working-tree changes (${run.id})`);
+      run.state.git.commits.push({ subject: "leftover working-tree changes", hash, files: [] });
+      const preview = porcelain.split("\n").slice(0, 8).join("\n");
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `git: committed leftover working-tree changes (${hash.slice(0, 7)}) on ${g.runBranch} — the agent left these uncommitted:\n${preview}`,
+      });
+      emit.state(run);
+    } catch (e) {
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `git: leftover commit failed (${String(e?.message ?? e).slice(0, 160)}) — the next run may block on a dirty tree`,
+      });
+    }
+  }
+
   async function integrate(run, accepted) {
     const g = run.git;
     if (!g?.enabled) return;
@@ -306,6 +342,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     } catch {
       /* ignore */
     }
+    await commitLeftovers(run);
     try {
       await git.checkout(run.projectPath, g.baseBranch);
     } catch (e) {

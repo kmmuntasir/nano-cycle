@@ -3,7 +3,9 @@ import { tickets as TICKETS_DIR, runs as RUNS_DIR } from "./_test-dirs.mjs"; // 
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert";
+import { execFileSync } from "node:child_process";
 import { createQueueManager } from "../host/queue.mjs";
+import * as realGit from "../host/git.mjs";
 
 const results = [];
 const test = async (name, fn) => {
@@ -97,7 +99,7 @@ function fakeEngine() {
   };
 }
 
-function makeManager(engine, projectDir) {
+function makeManager(engine, projectDir, extra = {}) {
   const snapshots = [];
   const emitter = {
     state: (run) => {}, // replaced by the manager's watcher wrapper
@@ -107,8 +109,9 @@ function makeManager(engine, projectDir) {
     engine,
     emit: emitter,
     resolveProject: (name) => ({ name, path: projectDir ?? "/tmp/does-not-exist" }),
-    git: {},
+    git: extra.git ?? {},
     broadcast: (msg) => { if (msg.type === "queue") snapshots.push(msg.state); },
+    ...(extra.pumpRetryMs !== undefined ? { pumpRetryMs: extra.pumpRetryMs } : {}),
   });
   return { mgr, snapshots, emitter };
 }
@@ -494,6 +497,73 @@ await test("Q14: direct run settles → the queue pump that deferred on its tree
   assert.strictEqual(st.tickets[0].status, "running", "queue seeded a build once the tree freed");
   await engine.finishBuild(engine.starts[0].id, "completed");
   assert.strictEqual((await store("q14")).queue.state, "idle");
+});
+
+// --- Q15: a deferred promotion retries on its own (the F08–F13 stall) ---------
+// Regression: F09's settle deferred F10's promote ("working tree not clean")
+// and nothing ever re-pumped — the queue sat "running" with zero builds.
+
+await test("Q15: a deferred promotion retries automatically instead of stalling the queue", async () => {
+  const engine = fakeEngine();
+  let calls = 0;
+  const origStart = engine.start.bind(engine);
+  engine.start = async (opts) => {
+    calls += 1;
+    if (calls === 1) throw new Error("working tree not clean — commit or stash first:\nM docs/features.md");
+    return origStart(opts);
+  };
+  const { mgr } = makeManager(engine, null, { pumpRetryMs: 1000 });
+  const waveRunId = "run-q15-wave";
+  await seedProject("q15", [
+    { id: "F1", title: "one", description: "d", status: "queued", runId: waveRunId },
+  ], "running");
+  seedWaveRun(waveRunId, { F1: "s1" });
+  mgr.pump("q15");
+  await sleep(30);
+  assert.strictEqual(calls, 1, "first promote attempted");
+  assert.strictEqual((await store("q15")).tickets[0].status, "queued", "still queued after the deferral");
+  await sleep(1400); // the backstop retry fires — no settle, no owner action
+  assert.strictEqual(calls, 2, "pump retried on its own");
+  assert.strictEqual((await store("q15")).tickets[0].status, "running", "retry promoted the ticket");
+  await engine.finishBuild(engine.starts[0].id, "completed");
+  assert.strictEqual((await store("q15")).queue.state, "idle");
+});
+
+// --- Q16: the flip lands the builder's uncommitted backlog edit ----------------
+// Regression: F09's builder flipped its own features.md entry (+ Done note)
+// but never committed it. flipStatus saw already-flipped markers, returned
+// silently, and the leftover dirt blocked every later promote's assertClean.
+
+await test("Q16: flip commits an already-flipped-but-dirty sourceDoc so the next ticket can promote", async () => {
+  const projDir = fs.mkdtempSync("/tmp/nano-queue-flip3-");
+  const g = (args) => execFileSync("git", args, { cwd: projDir, stdio: "pipe" }).toString();
+  g(["init"]);
+  g(["config", "user.email", "test@example.com"]);
+  g(["config", "user.name", "test"]);
+  fs.mkdirSync(path.join(projDir, "docs"), { recursive: true });
+  const docPath = path.join(projDir, "docs", "features.md");
+  fs.writeFileSync(docPath, "- [ ] **F1 — thing**\n\n  Builds on: nothing.\n");
+  g(["add", "."]);
+  g(["commit", "-m", "init"]);
+  // the builder's leftover: its own flip + Done note, never committed
+  fs.writeFileSync(docPath, "- [x] **F1 — thing**\n\n  **Done.** did the thing.\n\n  Builds on: nothing.\n");
+  const engine = fakeEngine();
+  const { mgr } = makeManager(engine, projDir, { git: realGit });
+  const waveRunId = "flip16-wave";
+  await seedProject("q16", [
+    { id: "F1", title: "thing", description: "d", sourceDoc: "docs/features.md", status: "queued", runId: waveRunId },
+  ], "running");
+  seedWaveRun(waveRunId, { F1: "s1" });
+  mgr.pump("q16"); // seeds the build run
+  await sleep(20);
+  const buildRunId = engine.starts[0].id;
+  await engine.finishBuild(buildRunId, "completed");
+  await sleep(30); // the flip's async commit lands before the assertion
+  assert.strictEqual(g(["status", "--porcelain"]).trim(), "", "tree clean — the leftover edit was committed, not left as dirt");
+  assert.match(g(["log", "--oneline", "-1"]), /mark F1 done/, "flip commit on the base branch");
+  const doc = fs.readFileSync(docPath, "utf8");
+  assert.ok(doc.includes("[x]") && doc.includes("**Done.**"), "the builder's own flip + note preserved");
+  fs.rmSync(projDir, { recursive: true, force: true });
 });
 
 process.on("exit", () => { try { fs.rmSync(TICKETS_DIR, { recursive: true, force: true }); fs.rmSync(RUNS_DIR, { recursive: true, force: true }); } catch {} });

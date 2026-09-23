@@ -33,12 +33,22 @@ export async function currentBranch(cwd) {
   return (await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
 }
 
+/** Porcelain status (empty string when the tree is clean). */
+export async function statusPorcelain(cwd) {
+  return (await git(cwd, ["status", "--porcelain"])).trim();
+}
+
 export async function assertClean(cwd) {
-  const out = (await git(cwd, ["status", "--porcelain"])).trim();
+  const out = await statusPorcelain(cwd);
   if (out) {
     const preview = out.split("\n").slice(0, 8).join("\n");
     throw new Error(`working tree not clean — commit or stash first:\n${preview}`);
   }
+}
+
+/** Stage everything, tracked + untracked (the leftover hook's sweep). */
+export async function stageAll(cwd) {
+  await git(cwd, ["add", "-A"]);
 }
 
 export async function createBranch(cwd, branch, base) {

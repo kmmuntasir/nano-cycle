@@ -93,7 +93,7 @@ const failingOnce = (n) => ({
 
 // --- harness ------------------------------------------------------------------------
 
-async function runEngine({ scripts, autoGate = ["approve"], mechanical, security = "off", approvePlan = true, maxFixRounds = 2, project = "sandbox", adaptersOverride, extraStart = {} }) {
+async function runEngine({ scripts, autoGate = ["approve"], mechanical, security = "off", approvePlan = true, maxFixRounds = 2, project = "sandbox", projectPath, adaptersOverride, extraStart = {} }) {
   const events = [];
   const state = { latest: null };
   const emit = {
@@ -144,7 +144,7 @@ async function runEngine({ scripts, autoGate = ["approve"], mechanical, security
   const st = await engine.start({
     id,
     task: "Implement F99 (OMNI-99) health endpoint",
-    project: { name: project, path: FIXTURE },
+    project: { name: project, path: projectPath ?? FIXTURE },
     models: { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" },
     clarify: false,
     maxFixRounds,
@@ -1085,6 +1085,50 @@ await test("security exhausted → settles 'failed'; fix-resume skips verify and
   assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, verifyOpensBefore, "verify skipped on security-only fix-resume");
   assert.strictEqual(securityRounds, 3, "security re-scanned exactly once after the fix (2 exhaustion scans + 1)");
   assert.deepStrictEqual(settled, ["failed", "completed"]);
+});
+
+await test("leftover hook: undeclared agent edits are swept into a labelled commit at integrate", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { execFileSync } = await import("node:child_process");
+  const repo = fs.mkdtempSync("/tmp/nano-engine-leftover-");
+  const g = (args) => execFileSync("git", args, { cwd: repo, stdio: "pipe" }).toString();
+  g(["init"]);
+  g(["config", "user.email", "test@example.com"]);
+  g(["config", "user.name", "test"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "base\n");
+  g(["add", "."]);
+  g(["commit", "-m", "init"]);
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        assert.match(await callTool(tools, "submit_plan", PLAN), /APPROVED/);
+        assert.match(await callTool(tools, "submit_tasks", TASKS), /Tasks accepted/);
+        // the agent edits a file it never declares (the F09 shape: its own
+        // backlog entry) and never commits it
+        fs.writeFileSync(path.join(repo, "LEFTOVER.md"), "uncommitted agent edit\n");
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [
+      async ({ tools }) => {
+        const t = await callTool(tools, "submit_verify", verifyArtifact(true));
+        assert.match(t, /VERIFY ACCEPTED/);
+        await callTool(tools, "submit_audit", auditArtifact(false));
+      },
+    ],
+  };
+  const { state, events } = await runEngine({ scripts, projectPath: repo, extraStart: { git: true } });
+  assert.strictEqual(state.status, "completed", `status=${state.status} err=${state.error}`);
+  // status flips to completed just BEFORE integrate() resolves — wait for its
+  // notices instead of racing the leftover commit + ff-merge.
+  const t0 = Date.now();
+  while (!events.some((e) => e.nodeId === "_run" && /ff-merged |leftover working-tree changes|leftover commit failed/.test(String(e.s ?? ""))) && Date.now() - t0 < 15000) await sleep(50);
+  assert.strictEqual(g(["status", "--porcelain"]).trim(), "", "tree clean after integrate — no dirt rides onto base");
+  assert.match(g(["log", "--oneline", "-3"]), /leftover working-tree changes/, "leftover sweep committed");
+  assert.ok(g(["show", "--name-only", "--pretty=format:", "HEAD"]).includes("LEFTOVER.md") ||
+    g(["log", "--name-only", "--pretty=format:", "-3"]).includes("LEFTOVER.md"), "the undeclared edit landed in history");
+  assert.ok(events.some((e) => /leftover working-tree changes/.test(e.s ?? "")), "the sweep is announced loudly");
+  fs.rmSync(repo, { recursive: true, force: true });
 });
 
 // --- summary ---------------------------------------------------------------------------

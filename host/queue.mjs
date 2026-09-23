@@ -22,9 +22,30 @@ const GATE_PARK_REASONS = {
   "security-override": "security-override",
 };
 
-export function createQueueManager({ engine, emit, resolveProject, git, broadcast }) {
+export function createQueueManager({ engine, emit, resolveProject, git, broadcast, pumpRetryMs = 60_000 }) {
   const watching = new Set(); // runIds this manager has parked (avoids double-cancel)
   let watcherInstalled = false;
+  // Deferred promotions (tree held / dirty at promote time) MUST NOT stall the
+  // queue: nothing is running, so no future settle would ever re-pump. Retry
+  // on a timer instead — one pending retry per project, cleared on pause.
+  const pumpRetryTimers = new Map();
+  function schedulePumpRetry(project) {
+    if (pumpRetryTimers.has(project)) return;
+    const delay = Math.max(1000, Number(pumpRetryMs) || 60_000);
+    const timer = setTimeout(() => {
+      pumpRetryTimers.delete(project);
+      pump(project);
+    }, delay);
+    timer.unref?.();
+    pumpRetryTimers.set(project, timer);
+  }
+  function clearPumpRetry(project) {
+    const timer = pumpRetryTimers.get(project);
+    if (timer) {
+      clearTimeout(timer);
+      pumpRetryTimers.delete(project);
+    }
+  }
 
   function projectIds() {
     if (!fs.existsSync(ticketsDir())) return [];
@@ -241,7 +262,12 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
   async function pumpOnce(project) {
     const store = loadTickets(project);
     if (store.queue.state === "paused") return;
-    if (engine.treeLockHolder(resolveProject(project).path)) return; // a build is in flight; onSettled re-pumps
+    if (engine.treeLockHolder(resolveProject(project).path)) {
+      // A build is in flight; its settle re-pumps — but if that settle never
+      // comes (stuck run, lost callback), the retry is the backstop.
+      schedulePumpRetry(project);
+      return;
+    }
     const ready = nextReady(store);
     if (ready.length === 0) {
       syncQueueState(project);
@@ -262,9 +288,15 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
         broadcastQueue(project);
         return pump(project);
       }
-      // Holder appeared between checks (a direct run, another queue) — the
-      // next settle re-pumps. Leave the ticket queued.
-      emit.event?.(t.runId, "_run", { t: "notice", s: `queue: promotion deferred (${out.error})` });
+      // Holder appeared between checks (a direct run, another queue) or the
+      // tree is dirty — the next settle re-pumps AND a timed retry backstops
+      // it. Leave the ticket queued.
+      emit.event?.(t.runId, "_run", {
+        t: "notice",
+        s: `queue: promotion of ${t.id} deferred (${out.error}) — the queue retries automatically; fix the tree (commit/stash) or resume the queue to hurry it`,
+      });
+      broadcastQueue(project);
+      schedulePumpRetry(project);
       return;
     }
     setTicketStatus(project, t.id, "running", { runId: out.runId });
@@ -419,6 +451,12 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
   // NEVER while another run holds the tree (its branch is checked out — the
   // flip would land there instead of base). Returns a promise so the caller can
   // sequence the pump after the commit; never rejects.
+  //
+  // The commit is attempted even when the markers are already flipped: the
+  // builder often edits its own sourceDoc entry (flip + Done note) and leaves
+  // it uncommitted, and that leftover dirt rides checkout+merge onto the base
+  // branch — where the next promote's assertClean would choke and stall the
+  // queue. Landing it here keeps the tree clean for the pump.
   function flipBacklog(project, ticket) {
     const note = (s) => {
       if (ticket.runId) emit.event?.(ticket.runId, "_run", { t: "notice", s });
@@ -432,16 +470,25 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       note(`backlog: flip skipped for ${ticket.id} — the working tree is held by another run; flip ${ticket.sourceDoc} manually`);
       return Promise.resolve();
     }
+    let wroteFlip = false;
     try {
       const text = fs.readFileSync(abs, "utf8");
       const flipped = flipStatus(text, ticket.id, true);
-      if (!flipped || flipped === text) return Promise.resolve();
-      fs.writeFileSync(abs, flipped);
+      if (flipped && flipped !== text) {
+        fs.writeFileSync(abs, flipped);
+        wroteFlip = true;
+      }
       return (async () => {
         try {
           if (!(await git.isRepo(projectPath))) return;
-          await git.commitFile(projectPath, path.relative(projectPath, abs), `chore: mark ${ticket.id} done (${ticket.id})`);
-          note(`backlog: ${ticket.id} marked done in ${ticket.sourceDoc}`);
+          const sha = await git.commitFile(projectPath, path.relative(projectPath, abs), `chore: mark ${ticket.id} done (${ticket.id})`);
+          if (sha) {
+            note(
+              wroteFlip
+                ? `backlog: ${ticket.id} marked done in ${ticket.sourceDoc}`
+                : `backlog: landed uncommitted ${ticket.sourceDoc} edit for ${ticket.id} (${String(sha).slice(0, 7)}) — the tree stays clean for the next ticket`,
+            );
+          }
         } catch (e) {
           note(`backlog: flip commit failed for ${ticket.id} (${String(e?.message ?? e).slice(0, 160)}) — doc flipped, commit not landed`);
         }
@@ -515,6 +562,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
   }
 
   function pause(project) {
+    clearPumpRetry(project);
     setQueueState(project, { state: "paused", pausedAt: new Date().toISOString() });
     broadcastQueue(project);
     return { ok: true };
