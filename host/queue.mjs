@@ -387,7 +387,8 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       // promotes the next ticket — its branch checkout would race the commit.
       flip = flipBacklog(project, t);
     } else if (status === "failed") {
-      setTicketStatus(project, ticketId, "blocked", { reason: classifyFailure(runId), runId });
+      const failure = failureInfo(runId);
+      setTicketStatus(project, ticketId, "blocked", { reason: failure.reason, note: failure.note, runId });
     } else if (status === "cancelled") {
       // Cancelled by the park watcher (gate) or by the owner — either way the
       // ticket is blocked/parked for review; retry resumes the run from disk.
@@ -421,15 +422,23 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
   // are provider-failures — a different owner decision than a gate verdict.
   const PROVIDER_FAILURE_RE =
     /abort|stall|provider|rate.?limit|credit|quota|timeout|insufficient|overloaded|network|econn|fetch failed|socket|dns|429|503/i;
-  function classifyFailure(runId) {
+  function failureInfo(runId) {
     try {
       const runFile = path.join(runsDir(), runId, "state.json");
       const st = JSON.parse(fs.readFileSync(runFile, "utf8"));
-      if (PROVIDER_FAILURE_RE.test(String(st.error ?? ""))) return "provider-failures";
+      const error = String(st.error ?? "");
+      if (PROVIDER_FAILURE_RE.test(error)) {
+        return {
+          reason: "provider-failures",
+          // Keep the actionable provider message in the ticket row. It is
+          // already persisted on the run; this is a short UI/history copy.
+          note: `Provider error: ${error.slice(0, 500)}`,
+        };
+      }
     } catch {
       /* no state on disk — default bucket */
     }
-    return "gates-exhausted";
+    return { reason: "gates-exhausted", note: "Run failed a gate; open the run for details." };
   }
 
   // A completed ticket releases its dependents: dependency-blocked tickets

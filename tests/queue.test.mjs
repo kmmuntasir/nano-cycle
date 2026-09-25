@@ -429,7 +429,7 @@ await test("Q12: gates failures vs provider failures classify differently (§2.4
   const aRun = `run-q12-a-${Date.now()}`;
   const bRun = `run-q12-b-${Date.now()}`;
   seedRunState(aRun, { status: "failed", error: "gates still failing after 2 fix round(s): verify: 1 failing check(s)" });
-  seedRunState(bRun, { status: "failed", error: "provider stall detected — aborting the session" });
+  seedRunState(bRun, { status: "failed", error: '429: {"code":"1308","message":"five-hour usage limit reached"}' });
   mgr.pump("q12"); // seeds F1's build
   await sleep(20);
   const a = engine.starts.find((s) => s.ticketId === "F1");
@@ -437,12 +437,16 @@ await test("Q12: gates failures vs provider failures classify differently (§2.4
   // F2's build: rewrite ITS run-state error before failing it
   const f2Dir = path.join(RUNS_DIR, engine.starts.find((s) => s.ticketId === "F2").id);
   fs.mkdirSync(f2Dir, { recursive: true });
-  fs.writeFileSync(path.join(f2Dir, "state.json"), JSON.stringify({ status: "failed", error: "provider stall detected — aborting the session" }));
+  fs.writeFileSync(
+    path.join(f2Dir, "state.json"),
+    JSON.stringify({ status: "failed", error: '429: {"code":"1308","message":"five-hour usage limit reached"}' }),
+  );
   await engine.finishBuild(engine.starts.find((s) => s.ticketId === "F2").id, "failed");
   const st = await store("q12");
   const byId = Object.fromEntries(st.tickets.map((t) => [t.id, t]));
   assert.strictEqual(byId.F1.blockedReason, "gates-exhausted", "a gate verdict parks as gates-exhausted");
   assert.strictEqual(byId.F2.blockedReason, "provider-failures", "a provider-type error parks as provider-failures");
+  assert.match(byId.F2.blockedNote ?? "", /429.*five-hour usage limit/, "the actionable provider error is shown on the blocked ticket");
 });
 
 // --- Q13: queue state derives from tickets (re-clarify during a build) ---------

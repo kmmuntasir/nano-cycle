@@ -76,6 +76,7 @@ export function createTicket(project, { id, title, description, dependsOn = [], 
     order: Number.isFinite(order) ? order : store.tickets.length,
     status: "draft",
     blockedReason: null,
+    blockedNote: null,
     runId: null,
     history: [{ at: new Date().toISOString(), from: null, to: "draft" }],
     createdAt: new Date().toISOString(),
@@ -155,6 +156,7 @@ export function setTicketStatus(project, id, status, extra = {}) {
   const from = t.status;
   t.status = status;
   t.blockedReason = status === "blocked" ? (extra.reason ?? t.blockedReason ?? "unspecified") : null;
+  t.blockedNote = status === "blocked" ? (extra.note ?? t.blockedNote ?? null) : null;
   if (extra.runId) t.runId = extra.runId;
   t.updatedAt = new Date().toISOString();
   t.history.push({ at: t.updatedAt, from, to: status, ...(extra.runId ? { runId: extra.runId } : {}), ...(extra.note ? { note: String(extra.note).slice(0, 300) } : {}) });

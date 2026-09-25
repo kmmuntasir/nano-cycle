@@ -234,6 +234,8 @@ export interface Ticket {
   order: number;
   status: TicketStatus;
   blockedReason: string | null;
+  /** Short actionable failure detail persisted when a ticket is parked. */
+  blockedNote?: string | null;
   runId: string | null;
   history: { at: string; from: string | null; to: string; runId?: string; note?: string }[];
   createdAt: string;

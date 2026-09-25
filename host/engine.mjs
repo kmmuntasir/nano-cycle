@@ -695,15 +695,18 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
   }
 
   // A milestone tool's hard stop aborts the in-flight prompt() — the SDK
-  // rejects the pending promise with an AbortError. That is SUCCESS when the
-  // milestone the tool represents was recorded (v1 clarify's swallow-guard,
-  // ported). Anything else rethrows.
-  async function safePrompt(handle, text, milestoneRecorded) {
+  // rejects the pending promise with an AbortError. That is SUCCESS only when
+  // the milestone tool explicitly marked the stop. Never suppress a provider
+  // error merely because an older artifact exists: during the initial build
+  // turn the plan may already be recorded while the provider fails later in
+  // task breakdown or implementation.
+  async function safePrompt(handle, text, milestoneRecorded, ctrl) {
+    if (ctrl) ctrl.milestoneStop = false;
     try {
       await handle.prompt(text);
     } catch (err) {
-      if (milestoneRecorded()) return;
-      if (/abort/i.test(String(err?.message ?? err)) && milestoneRecorded(true)) return; // last-chance re-check
+      const deliberateMilestoneStop = ctrl?.milestoneStop === true && /abort/i.test(String(err?.message ?? err));
+      if (deliberateMilestoneStop && milestoneRecorded()) return;
       throw err;
     }
   }
@@ -718,8 +721,9 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
   function buildMilestoneTools(run, ctrl) {
     const stop = () => {
       // Hard turn stop (mirrors v1 ask_questions): the milestone is recorded;
-      // further work this turn is waste. The session survives and stays
-      // resumable for fix-round feedback turns (probe-verified).
+      // further work this turn is waste. The explicit marker lets safePrompt
+      // distinguish this deliberate abort from a provider/stall failure.
+      ctrl.milestoneStop = true;
       ctrl.abort();
       run.buildHandle?.abort();
     };
@@ -1045,7 +1049,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       });
       emit.state(run);
     }
-    await safePrompt(handle, text, expected);
+    await safePrompt(handle, text, expected, run.current.get("build"));
     if (run.cancelRequested) throw new Error("cancelled");
     // Milestone nudge (v1 pattern): the turn ended without the expected call.
     if (!expected()) {
@@ -1228,6 +1232,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           emit.state(run);
           const rec = reconcileVerify(run, p);
           if (rec.verdict !== "accepted") {
+            ctrl.milestoneStop = true;
             ctrl.abort();
             run.verifyHandle?.abort();
             return {
@@ -1236,6 +1241,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             };
           }
           if (!run.options.audit) {
+            ctrl.milestoneStop = true;
             ctrl.abort();
             run.verifyHandle?.abort();
             return {
@@ -1262,6 +1268,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             s: `audit submitted: ${p.verdict}${blocking.length ? ` — ${blocking.length} blocking finding(s)` : " — no blocking findings"}`,
           });
           emit.state(run);
+          ctrl.milestoneStop = true;
           ctrl.abort();
           run.verifyHandle?.abort();
           return { content: [{ type: "text", text: "Recorded. End your turn now." }], details: {} };
@@ -1307,6 +1314,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           fixRound: round,
         }),
         () => run.cancelRequested || run.state.artifacts.verify,
+        ctrl,
       );
       if (!run.cancelRequested && !run.state.artifacts.verify) {
         emit.event(run.id, "verify", { t: "notice", s: "turn ended without submit_verify — nudging once" });
@@ -1381,6 +1389,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
               s: `security submitted: ${p.verdict} — ${(p.findings ?? []).length} finding(s)`,
             });
             emit.state(run);
+            ctrl.milestoneStop = true;
             ctrl.abort();
             run.securityHandle?.abort();
             return { content: [{ type: "text", text: "Recorded. End your turn now." }], details: {} };
@@ -1413,6 +1422,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           priorReports: { verify: run.state.artifacts.verify, implDelta: run.state.artifacts.implDelta },
         }),
         () => run.cancelRequested || run.state.artifacts.security,
+        ctrl,
       );
       if (!run.cancelRequested && !run.state.artifacts.security) {
         emit.event(run.id, "security", { t: "notice", s: "turn ended without submit_security — nudging once" });

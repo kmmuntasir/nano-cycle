@@ -203,6 +203,29 @@ await test("happy path: plan→tasks→impl→verify+audit accepted", async () =
   assert.strictEqual(openCalls.filter((c) => c.stepId === "build").length, 1, "one build session");
 });
 
+await test("provider failure after plan/tasks is preserved, not mistaken for a missing milestone", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const providerError = '429: {"code":"1308","message":"five-hour usage limit reached"}';
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        // The plan and tasks already exist, but the provider fails during
+        // implementation. safePrompt must NOT swallow this as milestone success.
+        throw new Error(providerError);
+      },
+    ],
+  };
+  const { state, events } = await runEngine({ scripts, approvePlan: false });
+  assert.strictEqual(state.status, "failed", state.error);
+  assert.match(state.error ?? "", /429/);
+  assert.match(state.error ?? "", /five-hour usage limit/);
+  assert.ok(state.artifacts.plan && state.artifacts.tasks, "completed milestones remain available for resume");
+  assert.ok(!state.artifacts.implDelta, "no impl-delta is invented after provider failure");
+  assert.ok(events.some((e) => e.t === "notice" && /429/.test(e.s ?? "")), "normalized failure notice retains provider error");
+});
+
 await test("plan gate: owner reject-with-comments → in-session revision → approve", async () => {
   stepStores.clear(); openCalls.length = 0;
   let revised = false;

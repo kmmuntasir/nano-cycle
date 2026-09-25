@@ -559,6 +559,7 @@ function TicketRow({
   const [dependsOn, setDependsOn] = useState(t.dependsOn.join(", "));
   const [order, setOrder] = useState(String(t.order ?? 0));
   const meta = STATUS_ICON[t.status] ?? STATUS_ICON.draft;
+  const providerBlocked = t.status === "blocked" && t.blockedReason === "provider-failures";
   const editable = !["running", "clarifying"].includes(t.status);
   const StatusIcon = meta.Icon;
   return (
@@ -583,6 +584,11 @@ function TicketRow({
         {t.blockedReason && (
           <Text fontSize="10.5px" color="bad" fontFamily="system-ui, sans-serif">
             blocked: {t.blockedReason}
+          </Text>
+        )}
+        {t.blockedNote && (
+          <Text fontSize="10.5px" color="bad" fontFamily="system-ui, sans-serif" title={t.blockedNote}>
+            {t.blockedNote}
           </Text>
         )}
         <Text fontSize="10px" color="muted" fontFamily="system-ui, sans-serif">
@@ -639,10 +645,20 @@ function TicketRow({
         )}
         {t.status === "blocked" && (
           <>
-            <OutlineButton size="xs" onClick={onRetry} title="Resume the parked run from disk (gates and session kept).">
-              Retry
+            <OutlineButton
+              size="xs"
+              onClick={onRetry}
+              title={providerBlocked
+                ? "Retry the same build from disk after the provider limit clears; the plan, tasks, edits, and session are kept."
+                : "Resume the parked run from disk (gates and session kept)."}
+            >
+              {providerBlocked ? "Retry build" : "Retry run"}
             </OutlineButton>
-            <OutlineButton size="xs" onClick={onReclarify} title="Start a fresh PM clarification run seeded with the old spec and the blocker.">
+            <OutlineButton
+              size="xs"
+              onClick={onReclarify}
+              title="Start a fresh PM clarification run seeded with the old spec and blocker. This is not the normal provider-limit recovery; use Retry build to preserve the existing implementation session."
+            >
               Re-clarify
             </OutlineButton>
           </>

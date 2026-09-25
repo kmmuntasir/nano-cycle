@@ -157,7 +157,16 @@ function attachEventBridge(session, nodeId, onEvent) {
         break;
       }
       case "auto_retry_start":
-        onEvent(nodeId, { t: "notice", s: "provider auto-retry" });
+        onEvent(nodeId, {
+          t: "notice",
+          s: `provider auto-retry${evt.attempt ? ` ${evt.attempt}/${evt.maxAttempts ?? "?"}` : ""}${evt.delayMs ? ` in ${Math.round(evt.delayMs / 1000)}s` : ""}`,
+        });
+        break;
+      case "auto_retry_end":
+        onEvent(nodeId, {
+          t: "notice",
+          s: evt.success ? "provider auto-retry succeeded" : `provider auto-retry exhausted${evt.finalError ? `: ${String(evt.finalError).slice(0, 240)}` : ""}`,
+        });
         break;
       default:
         break;
