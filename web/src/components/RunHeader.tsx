@@ -1,6 +1,6 @@
 import { Badge, Box, Flex, HStack, Text } from "@chakra-ui/react";
 import { GitBranch, Timer } from "lucide-react";
-import { DangerOutlineButton, PrimaryButton } from "../ui/buttons";
+import { DangerOutlineButton, OutlineButton, PrimaryButton } from "../ui/buttons";
 import { fmtDuration, fmtTokens } from "../lib/format";
 import type { RunState } from "../api";
 
