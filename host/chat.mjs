@@ -10,8 +10,13 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { resolveProject } from "./projects.mjs";
+import { loadProjects } from "./projects.mjs";
 import { tokenHygiene } from "./token-hygiene.mjs";
+
+/** Error carrying the HTTP status the server should answer with. */
+function httpError(status, message) {
+  return Object.assign(new Error(message), { status });
+}
 
 /** Normalize usage fields from pi SDK. */
 function normUsage(u) {
@@ -132,8 +137,18 @@ export function createChatManager({ modelRuntime, broadcast }) {
   // In-memory active sessions: sessionId -> { session, project, unsubscribe, isGenerating, abortController }
   const activeSessions = new Map();
 
+  /** Registry-only lookup — a chat session is a bash-capable agent, so the
+   *  cwd must be a registered project, never a path taken from a request. */
   function getProject(projectName) {
-    return resolveProject(projectName);
+    const project = loadProjects().find((p) => p.name === projectName);
+    if (!project) throw httpError(404, `unknown project: ${projectName}`);
+    return project;
+  }
+
+  /** The in-memory session, but only when it belongs to this project. */
+  function activeFor(projectName, sessionId) {
+    const active = activeSessions.get(sessionId);
+    return active && active.project === projectName ? active : null;
   }
 
   /** List all sessions for a project. */
@@ -164,7 +179,7 @@ export function createChatManager({ modelRuntime, broadcast }) {
     const project = getProject(projectName);
 
     // If already active in memory
-    const active = activeSessions.get(sessionId);
+    const active = activeFor(projectName, sessionId);
     if (active) {
       const sm = active.session.sessionManager;
       const entries = sm.getEntries();
@@ -183,7 +198,7 @@ export function createChatManager({ modelRuntime, broadcast }) {
     // Otherwise load from file
     const sessionFile = await findSessionFile(project.path, sessionId);
     if (!sessionFile || !fs.existsSync(sessionFile)) {
-      throw new Error(`Session "${sessionId}" not found in project "${projectName}"`);
+      throw httpError(404, `Session "${sessionId}" not found in project "${projectName}"`);
     }
 
     const sm = SessionManager.open(sessionFile);
@@ -226,7 +241,7 @@ export function createChatManager({ modelRuntime, broadcast }) {
   /** Delete a session. */
   async function deleteSession(projectName, sessionId) {
     const project = getProject(projectName);
-    const active = activeSessions.get(sessionId);
+    const active = activeFor(projectName, sessionId);
     if (active) {
       try {
         active.session.abort().catch(() => {});
@@ -251,7 +266,7 @@ export function createChatManager({ modelRuntime, broadcast }) {
     const title = String(newTitle ?? "").trim();
     if (!title) throw new Error("title cannot be empty");
 
-    const active = activeSessions.get(sessionId);
+    const active = activeFor(projectName, sessionId);
     if (active) {
       active.session.sessionManager.appendSessionInfo(title);
       return { ok: true, title };
@@ -259,7 +274,7 @@ export function createChatManager({ modelRuntime, broadcast }) {
 
     const sessionFile = await findSessionFile(project.path, sessionId);
     if (!sessionFile || !fs.existsSync(sessionFile)) {
-      throw new Error(`Session "${sessionId}" not found`);
+      throw httpError(404, `Session "${sessionId}" not found`);
     }
 
     const sm = SessionManager.open(sessionFile);
@@ -269,7 +284,7 @@ export function createChatManager({ modelRuntime, broadcast }) {
 
   /** Get or initialize an active AgentSession instance. */
   async function getOrCreateSession(projectName, sessionId, { modelSpec, thinkingLevel, sessionManager } = {}) {
-    let active = activeSessions.get(sessionId);
+    let active = activeFor(projectName, sessionId);
     if (active) {
       // If modelSpec is requested and different, update it
       if (modelSpec && modelSpec !== "auto") {
@@ -292,11 +307,13 @@ export function createChatManager({ modelRuntime, broadcast }) {
     let sm = sessionManager;
     if (!sm) {
       const sessionFile = await findSessionFile(project.path, sessionId);
-      if (sessionFile && fs.existsSync(sessionFile)) {
-        sm = SessionManager.open(sessionFile);
-      } else {
-        sm = SessionManager.create(project.path);
+      // Never auto-create from a request: an unknown id (or one that lives in
+      // another project) is a 404, not a fresh bash-capable agent. New
+      // sessions come from createSession(), which passes its own manager.
+      if (!sessionFile || !fs.existsSync(sessionFile)) {
+        throw httpError(404, `Session "${sessionId}" not found in project "${projectName}"`);
       }
+      sm = SessionManager.open(sessionFile);
     }
 
     // Resolve model if requested
@@ -432,14 +449,18 @@ export function createChatManager({ modelRuntime, broadcast }) {
     return active;
   }
 
-  /** Send a message turn to the coding agent session. */
-  async function sendMessage(projectName, sessionId, { prompt, modelSpec, thinkingLevel }) {
+  /** Start a message turn. Everything a client can get wrong (empty prompt,
+   *  unknown session, busy session) rejects HERE, before the caller answers
+   *  200 — so the HTTP layer can report it. The turn itself then runs in the
+   *  background: `done` settles when it ends, and failures are also streamed
+   *  as a chat_event "error" for the live UI. */
+  async function sendMessage(projectName, sessionId, { prompt, modelSpec, thinkingLevel } = {}) {
     const text = String(prompt ?? "").trim();
-    if (!text) throw new Error("prompt cannot be empty");
+    if (!text) throw httpError(400, "prompt cannot be empty");
 
     const active = await getOrCreateSession(projectName, sessionId, { modelSpec, thinkingLevel });
     if (active.isGenerating) {
-      throw new Error("Agent is already working on a message in this session");
+      throw httpError(409, "Agent is already working on a message in this session");
     }
 
     active.isGenerating = true;
@@ -467,38 +488,41 @@ export function createChatManager({ modelRuntime, broadcast }) {
       timestamp: Date.now(),
     });
 
-    try {
-      await active.session.prompt(text);
+    const done = (async () => {
+      try {
+        await active.session.prompt(text);
 
-      const last = active.session.messages.filter((m) => m.role === "assistant").pop();
-      if (last?.stopReason === "error") {
-        throw new Error(last.errorMessage ?? "Provider call failed");
+        const last = active.session.messages.filter((m) => m.role === "assistant").pop();
+        if (last?.stopReason === "error") {
+          throw new Error(last.errorMessage ?? "Provider call failed");
+        }
+
+        broadcast({
+          type: "chat_event",
+          event: "prompt_end",
+          project: projectName,
+          sessionId,
+        });
+        return { ok: true };
+      } catch (err) {
+        broadcast({
+          type: "chat_event",
+          event: "error",
+          project: projectName,
+          sessionId,
+          error: String(err?.message ?? err),
+        });
+        throw err;
+      } finally {
+        active.isGenerating = false;
       }
-
-      broadcast({
-        type: "chat_event",
-        event: "prompt_end",
-        project: projectName,
-        sessionId,
-      });
-      return { ok: true };
-    } catch (err) {
-      broadcast({
-        type: "chat_event",
-        event: "error",
-        project: projectName,
-        sessionId,
-        error: String(err?.message ?? err),
-      });
-      throw err;
-    } finally {
-      active.isGenerating = false;
-    }
+    })();
+    return { ok: true, done };
   }
 
   /** Abort currently running generation or tool execution. */
   async function abortSession(projectName, sessionId) {
-    const active = activeSessions.get(sessionId);
+    const active = activeFor(projectName, sessionId);
     if (!active) return { ok: false, error: "session is not active" };
 
     try {

@@ -6,3 +6,5 @@ tickets/
 projects.json
 draft.md
 .env
+.nano-token
+nano-cycle.service

@@ -163,6 +163,25 @@ await test("chatManager: abortSession handles active or idle session", async () 
   await chatManager.deleteSession("sandbox", session.id);
 });
 
+await test("chatManager: unknown session ids are never auto-created; errors carry a status", async () => {
+  await assert.rejects(
+    () => chatManager.sendMessage("sandbox", "00000000-no-such-session", { prompt: "hello" }),
+    (e) => e.status === 404 && /not found/.test(e.message),
+  );
+  await assert.rejects(
+    () => chatManager.sendMessage("sandbox", "whatever", { prompt: "   " }),
+    (e) => e.status === 400,
+  );
+  assert.strictEqual((await chatManager.abortSession("sandbox", "00000000-no-such-session")).ok, false);
+});
+
+await test("chatManager: projects resolve from the registry only (no absolute paths)", async () => {
+  for (const bad of ["/tmp", "/", "../x", "not-registered"]) {
+    await assert.rejects(() => chatManager.listSessions(bad), /unknown project/, bad);
+    await assert.rejects(() => chatManager.createSession(bad, {}), /unknown project/, bad);
+  }
+});
+
 const passed = results.filter(([, ok]) => ok).length;
 console.log(`\n${passed}/${results.length} chat tests passed\n`);
 if (passed !== results.length) process.exit(1);
