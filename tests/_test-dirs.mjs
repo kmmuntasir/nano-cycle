@@ -11,11 +11,13 @@ import os from "node:os";
 const mk = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `nano-test-${name}-`));
 const tickets = mk("tickets");
 const runs = mk("runs");
+const projectsFile = path.join(mk("projects"), "projects.json");
 process.env.NANO_TICKETS_DIR = tickets;
 process.env.NANO_RUNS_DIR = runs;
+process.env.NANO_PROJECTS_FILE = projectsFile; // never the live projects.json
 
 process.on("exit", () => {
-  for (const d of [tickets, runs]) {
+  for (const d of [tickets, runs, path.dirname(projectsFile)]) {
     try {
       fs.rmSync(d, { recursive: true, force: true });
     } catch {
@@ -24,4 +26,4 @@ process.on("exit", () => {
   }
 });
 
-export { tickets, runs };
+export { tickets, runs, projectsFile };

@@ -11,6 +11,28 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 
 const CAP = 16_000;
 
+/** Async twin of detectWebCapabilities — same probes, but never blocks the event
+ *  loop (the sync one can stall boot for up to ~18 s). */
+export async function detectWebCapabilitiesAsync(searxngUrl, signal) {
+  const probe = async () => {
+    if (!searxngUrl) return false;
+    try {
+      const base = searxngUrl.replace(/\/$/, "");
+      const res = await fetch(`${base}/search?q=test&format=json`, {
+        signal: AbortSignal.any([AbortSignal.timeout(6_000), ...(signal ? [signal] : [])]),
+      });
+      return Array.isArray((await res.json()).results);
+    } catch {
+      return false;
+    }
+  };
+  const readerProbe = new Promise((resolve) => {
+    execFile("obscura", ["--version"], { timeout: 10_000, signal }, (err) => resolve(!err));
+  });
+  const [search, reader] = await Promise.all([probe(), readerProbe]);
+  return { search, reader };
+}
+
 export function detectWebCapabilities(searxngUrl) {
   // search: PROBE the JSON API — a defaulted URL (deploy.sh installs SearXNG
   // at a known endpoint) must silently disable the tool when nothing answers.
@@ -50,13 +72,13 @@ export function makeWebSearchTool(searxngUrl, log) {
     parameters: Type.Object({
       query: Type.String({ description: "The search query" }),
     }),
-    execute: async (_id, params) => {
+    execute: async (_id, params, signal) => {
       const base = searxngUrl.replace(/\/$/, "");
       const raw = await new Promise((resolve, reject) => {
         const req = execFile(
           "curl",
           ["-s", "-m", "15", `${base}/search?q=${encodeURIComponent(params.query)}&format=json`],
-          { maxBuffer: 4 * 1024 * 1024 },
+          { maxBuffer: 4 * 1024 * 1024, signal },
           (err, stdout) => (err ? reject(new Error(`web_search failed: ${err.message}`)) : resolve(stdout)),
         );
         return req;
@@ -90,13 +112,13 @@ export function makeWebReaderTool(log) {
     parameters: Type.Object({
       url: Type.String({ description: "The http(s) URL to read" }),
     }),
-    execute: async (_id, params) => {
+    execute: async (_id, params, signal) => {
       if (!/^https?:\/\//.test(params.url)) throw new Error("url must be http(s)");
       const md = await new Promise((resolve, reject) => {
         execFile(
           "obscura",
           ["fetch", params.url, "--allow-private-network", "--dump", "markdown"],
-          { timeout: 45_000, maxBuffer: 8 * 1024 * 1024 },
+          { timeout: 45_000, maxBuffer: 8 * 1024 * 1024, signal },
           (err, stdout) => {
             if (err && !stdout) return reject(new Error(`web_reader failed: ${err.message}`));
             const content = String(stdout ?? "").trim();

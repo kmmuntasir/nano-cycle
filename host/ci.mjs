@@ -20,13 +20,27 @@ const cap = (s, n = EVIDENCE_CAP) => {
   return str.length > n ? str.slice(0, n) + " …(truncated)" : str;
 };
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Abortable sleep: resolves early (never rejects) when `signal` fires.
+const sleep = (ms, signal) =>
+  new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
 
-async function gh(args, timeoutMs = 30_000, cwd) {
+// Every gh call is async, abortable and runs in an explicit cwd (defaults to
+// the process cwd only when the caller gave none — never implicitly a repo).
+async function gh(args, timeoutMs, cwd, signal) {
   const { stdout } = await execFileAsync("gh", args, {
     timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,
-    ...(cwd ? { cwd } : {}),
+    cwd: cwd || process.cwd(),
+    ...(signal ? { signal } : {}),
   });
   return stdout;
 }
@@ -35,21 +49,22 @@ async function gh(args, timeoutMs = 30_000, cwd) {
  * One-time capability probe: gh binary present + authenticated + a repository
  * gh can see FROM THIS DIRECTORY. Returns { ok, reason } — reason set when not ok.
  */
-export async function detectCiCapability(cwd) {
+export async function detectCiCapability(cwd, signal) {
   try {
-    await gh(["--version"], 10_000);
+    await gh(["--version"], 10_000, cwd, signal);
   } catch {
-    return { ok: false, reason: "gh CLI not found" };
+    return signal?.aborted ? { ok: false, reason: "aborted" } : { ok: false, reason: "gh CLI not found" };
   }
   try {
-    await gh(["auth", "status"], 15_000);
+    await gh(["auth", "status"], 15_000, cwd, signal);
   } catch {
-    return { ok: false, reason: "gh not authenticated (gh auth login)" };
+    return signal?.aborted ? { ok: false, reason: "aborted" } : { ok: false, reason: "gh not authenticated (gh auth login)" };
   }
   try {
-    const url = (await gh(["repo", "view", "--json", "name"], 15_000, cwd)).trim();
+    const url = (await gh(["repo", "view", "--json", "name"], 15_000, cwd, signal)).trim();
     if (!url) return { ok: false, reason: "gh cannot access this repository" };
   } catch {
+    if (signal?.aborted) return { ok: false, reason: "aborted" };
     return { ok: false, reason: "gh cannot access this repository (no origin remote, or wrong account?)" };
   }
   return { ok: true, reason: null };
@@ -60,18 +75,22 @@ export async function detectCiCapability(cwd) {
  * Returns { status: "pass"|"fail"|"skipped", evidence, runs: [...] }.
  * `runs` entries: { id, name, conclusion, url, log (failed-log excerpt) }.
  */
-export async function watchRunsForSha({ cwd, sha, emit, watchCapMs = DEFAULT_WATCH_CAP_MS }) {
+export async function watchRunsForSha({ cwd, sha, emit, watchCapMs = DEFAULT_WATCH_CAP_MS, signal }) {
+  const aborted = (runs = []) => ({ status: "skipped", evidence: "remote CI watch aborted (run cancelled)", runs });
   // ~10s settle after push, like the reference's CI monitor.
-  await sleep(10_000);
+  await sleep(10_000, signal);
+  if (signal?.aborted) return aborted();
   let listed = [];
   try {
     const out = await gh(
       ["run", "list", "--commit", sha, "--json", "databaseId,name,status,conclusion,url", "--limit", "10"],
       30_000,
       cwd,
+      signal,
     );
     listed = JSON.parse(out);
   } catch (e) {
+    if (signal?.aborted) return aborted();
     return {
       status: "skipped",
       evidence: cap(`could not list CI runs for ${sha.slice(0, 8)}: ${e?.message ?? e}`),
@@ -94,10 +113,11 @@ export async function watchRunsForSha({ cwd, sha, emit, watchCapMs = DEFAULT_WAT
     let conclusion = r.conclusion;
     let status = r.status;
     while ((status === "queued" || status === "in_progress") && Date.now() < deadline) {
-      await sleep(POLL_INTERVAL_MS);
+      await sleep(POLL_INTERVAL_MS, signal);
+      if (signal?.aborted) return aborted(runs);
       try {
         const v = JSON.parse(
-          await gh(["run", "view", String(r.databaseId), "--json", "status,conclusion"], 15_000, cwd),
+          await gh(["run", "view", String(r.databaseId), "--json", "status,conclusion"], 15_000, cwd, signal),
         );
         status = v.status;
         conclusion = v.conclusion;
@@ -108,7 +128,7 @@ export async function watchRunsForSha({ cwd, sha, emit, watchCapMs = DEFAULT_WAT
     let log = null;
     if (status === "completed" && conclusion !== "success" && conclusion !== "skipped") {
       try {
-        log = cap((await gh(["run", "view", String(r.databaseId), "--log-failed"], 30_000, cwd)).trim(), 1600);
+        log = cap((await gh(["run", "view", String(r.databaseId), "--log-failed"], 30_000, cwd, signal)).trim(), 1600);
       } catch {
         log = null;
       }

@@ -14,8 +14,8 @@
 // every engine session) and chat.mjs (appendSystemPrompt — keeps pi's default
 // prompt). Milestones/artifacts are structured tool calls: style never
 // touches machine-parsed output.
-import { spawnSync } from "node:child_process";
-import { detectWebCapabilities } from "./webtools.mjs";
+import { execFile, spawnSync } from "node:child_process";
+import { detectWebCapabilities, detectWebCapabilitiesAsync } from "./webtools.mjs";
 
 // The deploy-standard SearXNG endpoint (scripts/deploy.sh installs it here);
 // overridden by NANO_SEARXNG_URL — must match server.mjs.
@@ -36,6 +36,29 @@ export function rtkAvailable() {
 }
 
 let capsChecked = undefined;
+
+/** Probe rtk + web capabilities WITHOUT blocking the event loop and prime the
+ *  caches that rtkAvailable()/webCapabilities() read. Call (and await) once at
+ *  boot, before the first tokenHygiene(); the sync probes remain as a fallback. */
+export async function warmCapabilities(signal) {
+  const rtk =
+    rtkChecked !== undefined
+      ? Promise.resolve(rtkChecked)
+      : new Promise((resolve) => execFile("rtk", ["--version"], { timeout: 5_000, signal }, (err) => resolve(!err)));
+  const webs =
+    capsChecked !== undefined
+      ? Promise.resolve(capsChecked)
+      : detectWebCapabilitiesAsync(process.env.NANO_SEARXNG_URL ?? SEARXNG_URL, signal);
+  const [r, w0] = await Promise.all([rtk, webs]);
+  let w = w0;
+  if (capsChecked === undefined && !w.search) {
+    const retry = await detectWebCapabilitiesAsync(process.env.NANO_SEARXNG_URL ?? SEARXNG_URL, signal);
+    if (retry.search) w = { ...w, search: true };
+  }
+  if (rtkChecked === undefined) rtkChecked = r;
+  if (capsChecked === undefined) capsChecked = w;
+  return { rtk: rtkChecked, ...capsChecked };
+}
 
 /** Web research capabilities, probed once per process (shared with server.mjs).
  *  One retry on a failed search probe — an idle searxng occasionally answers

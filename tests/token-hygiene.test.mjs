@@ -1,7 +1,7 @@
 // Token-hygiene injection tests — caveman-lite + rtk in every agent run.
 // Run: node tests/token-hygiene.test.mjs
 import assert from "node:assert";
-import { tokenHygiene, rtkAvailable, webCapabilities } from "../host/token-hygiene.mjs";
+import { tokenHygiene, rtkAvailable, webCapabilities, warmCapabilities } from "../host/token-hygiene.mjs";
 import { clarifySystem, builderSystem, verifierSystem, securitySystem } from "../host/prompts.mjs";
 
 const results = [];
@@ -68,6 +68,21 @@ test("every step system prompt carries the block via the loader contract", () =>
   assert.ok(!block.includes("${"), "no uninterpolated template leakage");
   assert.ok(block.length < 2500, `block stays compact (got ${block.length} chars) — it rides in every session`);
 });
+
+// Non-blocking boot probe: same answers as the sync probes, caches primed.
+try {
+  const warmed = await warmCapabilities();
+  assert.strictEqual(typeof warmed.rtk, "boolean");
+  assert.strictEqual(typeof warmed.search, "boolean");
+  assert.strictEqual(typeof warmed.reader, "boolean");
+  assert.strictEqual(rtkAvailable(), warmed.rtk, "rtkAvailable() reads the primed cache");
+  assert.deepStrictEqual(webCapabilities(), { search: warmed.search, reader: warmed.reader });
+  results.push(["warmCapabilities: async probe primes the sync caches", true]);
+  console.log("PASS  warmCapabilities: async probe primes the sync caches");
+} catch (e) {
+  results.push(["warmCapabilities", false]);
+  console.log(`FAIL  warmCapabilities\n      ${String(e?.message ?? e).split("\n")[0]}`);
+}
 
 const failed = results.filter(([, ok]) => !ok).length;
 console.log(`\n${results.length - failed}/${results.length} token-hygiene tests passed`);
