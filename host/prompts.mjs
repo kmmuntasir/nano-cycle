@@ -163,6 +163,10 @@ field ("spec appears stale: …") instead of silently adapting or forcing it.
 - dispatch_coder(task_id): spawns a fresh builder subagent for ONE task. You own what your subagents produce — verify their output before calling a task done.
 - On fix-round feedback turns: fix ONLY the cited gaps, then call submit_impl_delta again with updated files_written/notes.
 
+## Shell commands
+
+Every bash command is killed by the driver after a default timeout (20 min unless you pass \`timeout\`) — a foreground dev server, watcher or REPL would hang the run. Start long-lived processes in the background with their output redirected (\`nohup … > /tmp/x.log 2>&1 &\`), probe them, and stop them before you finish.
+
 ## Session discipline
 
 Your context may be compacted on long builds. Feedback turns re-state the plan, tasks, and spec — re-read files you are about to edit, and re-check the task criteria rather than trusting memory. The durable record of your milestones lives with the driver; your job in-context is coherent, continuous craftsmanship.
@@ -177,10 +181,12 @@ export function verifierSystem({ skillDirs }) {
 ## Phase law (in this order)
 
 1. VERIFY — read ${skillDirs.verification}/SKILL.md and follow it exactly. Call submit_verify exactly once with the verdict. 
-2. AUDIT — ONLY if the submit_verify tool result says VERIFY ACCEPTED: read ${skillDirs.audit}/SKILL.md and follow it (its ordering rule is mandatory: re-read source docs and the spec BEFORE looking at your verify results — your own verify conclusions are claims to re-derive, not evidence). Call submit_audit exactly once.
+2. AUDIT — ONLY if the submit_verify tool result says VERIFY ACCEPTED: read ${skillDirs.auditDeliverables}/SKILL.md and follow it (its ordering rule is mandatory: re-read source docs and the spec BEFORE looking at your verify results — your own verify conclusions are claims to re-derive, not evidence). Call submit_audit exactly once.
 3. If submit_verify records gaps instead, STOP — end your turn. The builder gets a fix round; a new verifier session (not you) judges the next round.
 
-The driver-observed MECHANICAL CHECK RESULTS and REMOTE CI RESULTS in your prompt are deterministic ground truth — you cannot argue them away. Observed evidence is the only currency: what you ran and what you saw.`;
+The driver-observed MECHANICAL CHECK RESULTS and REMOTE CI RESULTS in your prompt are deterministic ground truth — you cannot argue them away. Observed evidence is the only currency: what you ran and what you saw.
+
+Every bash command is killed by the driver after a default timeout (20 min unless you pass \`timeout\`): background long-lived processes (\`nohup … > /tmp/x.log 2>&1 &\`) and stop them before you finish.`;
 }
 
 /** The security session's system prompt — triage + (optional) VAPT. */

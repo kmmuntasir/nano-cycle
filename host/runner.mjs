@@ -9,8 +9,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tokenHygiene } from "./token-hygiene.mjs";
+import { RUN_TAG_ENV } from "./prockill.mjs";
 import {
   createAgentSession,
+  createBashToolDefinition,
+  createLocalBashOperations,
   DefaultResourceLoader,
   defineTool,
   getAgentDir,
@@ -58,6 +61,40 @@ export function bundledSkillsForStep(stepId) {
 /** Absolute SKILL.md dir for a skill name (for system-prompt path injection). */
 export function skillDirFor(name) {
   return path.join(BUNDLED_SKILLS_DIR, name);
+}
+
+// --- guarded bash tool (E-10 + E-9 tagging) ---------------------------------------
+//
+// pi's built-in bash has NO default timeout, and the stall watchdog deliberately
+// pauses while a tool is in flight — so one foreground `npm run dev` hung a run
+// forever. We replace the built-in with an equivalent tool whose exec() applies
+// a default timeout (pi kills the process tree and returns "Command timed out
+// after N seconds" to the model, which then knows to background the process).
+// The same tool stamps every spawned command with NANO_RUN_ID so prockill can
+// terminate exactly THIS run's processes on cancel.
+const BASH_TIMEOUT_S = Number(process.env.NANO_BASH_TIMEOUT_S ?? 1200);
+
+/** Wrap BashOperations so commands without an explicit timeout get the default. */
+export function withDefaultTimeout(ops, defaultSeconds = BASH_TIMEOUT_S) {
+  if (!(defaultSeconds > 0)) return ops;
+  return {
+    exec: (command, cwd, options) =>
+      ops.exec(command, cwd, { ...options, timeout: options?.timeout ?? defaultSeconds }),
+  };
+}
+
+function guardedBashTool(cwd, runId) {
+  return createBashToolDefinition(cwd, {
+    operations: withDefaultTimeout(createLocalBashOperations()),
+    spawnHook: (ctx) => (runId ? { ...ctx, env: { ...ctx.env, [RUN_TAG_ENV]: String(runId) } } : ctx),
+  });
+}
+
+/** customTools with the guarded bash prepended when the step allows bash. */
+function withGuardedBash(tools, customTools, cwd, runId) {
+  if (!tools?.includes("bash")) return customTools;
+  if (customTools.some((t) => t.name === "bash")) return customTools;
+  return [guardedBashTool(cwd, runId), ...customTools];
 }
 
 function resolveModel(spec, modelRuntime) {
@@ -217,7 +254,7 @@ function buildLoader({ cwd, systemPrompt, stepId }) {
  * Run one node to completion (v1 pipeline + v2 ephemeral children). Returns the
  * reported artifact. onEvent(nodeId, ev) receives normalized UI events.
  */
-export async function runNode({ nodeId, tools, customTools = [], artifactStore, requireArtifact = true, systemPrompt, prompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking, stepId }) {
+export async function runNode({ nodeId, tools, customTools = [], artifactStore, requireArtifact = true, systemPrompt, prompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking, stepId, runId }) {
   const store = artifactStore ?? { artifacts: [] };
   const { model, thinking: lvl } = resolveModel(modelSpec, modelRuntime);
   if (modelSpec && modelSpec !== "auto" && !model) {
@@ -232,7 +269,7 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
     ...(model ? { model } : {}),
     ...(lvl ?? thinking ? { thinkingLevel: lvl ?? thinking } : {}),
     tools, // allowlist is the enforcement
-    customTools,
+    customTools: withGuardedBash(tools, customTools, cwd, runId),
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
     settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 } }),
@@ -242,16 +279,16 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
   const watchdog = startStallWatchdog(bridge, () => session.abort().catch(() => {}));
 
   if (signal) {
-    signal.addEventListener(
-      "abort",
-      () => {
-        session.abort().catch(() => {});
-      },
-      { once: true },
-    );
+    const onSignalAbort = () => {
+      session.abort().catch(() => {});
+    };
+    // A cancel that landed while the session was still loading must not be lost.
+    if (signal.aborted) onSignalAbort();
+    else signal.addEventListener("abort", onSignalAbort, { once: true });
   }
 
   try {
+    if (signal?.aborted) throw new Error("cancelled");
     await session.prompt(prompt);
     // Surface provider-level failures verbatim — a stopReason "error" with no
     // tool call would otherwise masquerade as "model didn't follow the contract".
@@ -260,6 +297,7 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
       throw new Error(last.errorMessage ?? "provider call failed");
     }
     if (requireArtifact && store.artifacts.length === 0) {
+      if (signal?.aborted) throw new Error("cancelled"); // abort resolves prompt(); never start a retry turn after a cancel
       onEvent(nodeId, { t: "notice", s: "no report_artifact call — retrying once" });
       await session.prompt(
         "You finished without calling the report_artifact tool. Call it now, EXACTLY ONCE, with the structured result of your work.",
@@ -272,6 +310,11 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
   } finally {
     watchdog.clear();
     bridge.unsubscribe();
+    try {
+      session.dispose(); // frees agent state + any bash children (was leaked)
+    } catch {
+      /* dispose must never mask the real outcome */
+    }
   }
   if (watchdog.didStall() && store.artifacts.length === 0) {
     throw new Error(`stalled: no activity for ${Math.round(STALL_MS / 1000)}s`);
@@ -281,6 +324,37 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
     throw new Error(`${nodeId}: completed without report_artifact`);
   }
   return store.artifacts[store.artifacts.length - 1];
+}
+
+/**
+ * One model turn with a per-prompt stall watchdog. pi RESOLVES prompt() on abort
+ * (it does not reject), so every caller must look at what the turn produced; only
+ * a provider error or a stall throws. The stall flag is per PROMPT: it used to be
+ * a sticky handle-level value, so one stall made every later turn "stalled".
+ */
+function makeStepPrompt(session, bridge, onAbort) {
+  return async (text) => {
+    let stalledMs = 0;
+    const watchdog = startStallWatchdog(bridge, () => {
+      stalledMs = STALL_MS;
+      onAbort();
+    });
+    try {
+      await session.prompt(text);
+      const last = session.messages.filter((m) => m.role === "assistant").pop();
+      if (last?.stopReason === "error") {
+        throw new Error(last.errorMessage ?? "provider call failed");
+      }
+    } finally {
+      watchdog.clear();
+    }
+    // pi's stop reasons are stop|length|toolUse|error|aborted (never "end"): the
+    // watchdog abort is the only abort source that sets stalledMs, so it is
+    // authoritative — the turn was cut short by silence.
+    if (stalledMs) {
+      throw new Error(`stalled: no activity for ${Math.round(stalledMs / 1000)}s`);
+    }
+  };
 }
 
 /**
@@ -294,7 +368,7 @@ export async function runNode({ nodeId, tools, customTools = [], artifactStore, 
  *   per-turn. The system prompt comes from the loader on every (re)open, so a
  *   resumed session gets the same (or evolved) step law — see SPIKE-NOTES (e).
  */
-export async function openStepSession({ stepId, sessionFile, sessionsDir, tools, customTools = [], systemPrompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking }) {
+export async function openStepSession({ stepId, sessionFile, sessionsDir, tools, customTools = [], systemPrompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking, runId }) {
   const { model, thinking: lvl } = resolveModel(modelSpec, modelRuntime);
   if (modelSpec && modelSpec !== "auto" && !model) {
     throw new Error(`model "${modelSpec}" did not resolve`);
@@ -310,7 +384,7 @@ export async function openStepSession({ stepId, sessionFile, sessionsDir, tools,
     ...(model ? { model } : {}),
     ...(lvl ?? thinking ? { thinkingLevel: lvl ?? thinking } : {}),
     tools,
-    customTools,
+    customTools: withGuardedBash(tools, customTools, cwd, runId),
     resourceLoader: loader,
     sessionManager: mgr,
     settingsManager: SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 2 } }),
@@ -320,28 +394,15 @@ export async function openStepSession({ stepId, sessionFile, sessionsDir, tools,
 
   const bridge = attachEventBridge(session, stepId, onEvent);
   const onAbort = () => session.abort().catch(() => {});
-  signal?.addEventListener("abort", onAbort, { once: true });
+  // A cancel that landed while the session was loading (the signal already
+  // fired before this listener existed) must still abort it — otherwise a
+  // full model turn runs after the owner cancelled.
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
 
-  let lastStall = null;
-  const prompt = async (text) => {
-    const watchdog = startStallWatchdog(bridge, () => {
-      lastStall = STALL_MS;
-      onAbort();
-    });
-    try {
-      await session.prompt(text);
-      const last = session.messages.filter((m) => m.role === "assistant").pop();
-      if (last?.stopReason === "error") {
-        throw new Error(last.errorMessage ?? "provider call failed");
-      }
-    } finally {
-      watchdog.clear();
-    }
-    if (lastStall && !session.messages.some((m) => m.role === "assistant" && m.stopReason === "end")) {
-      throw new Error(`stalled: no activity for ${Math.round(lastStall / 1000)}s`);
-    }
-  };
+  const prompt = makeStepPrompt(session, bridge, onAbort);
 
+  let closed = false;
   return {
     session,
     sessionFile: file,
@@ -349,8 +410,15 @@ export async function openStepSession({ stepId, sessionFile, sessionsDir, tools,
     prompt,
     abort: onAbort,
     close: () => {
+      if (closed) return;
+      closed = true;
       bridge.unsubscribe();
       signal?.removeEventListener("abort", onAbort);
+      try {
+        session.dispose(); // was never called: agent state + bash children leaked per round
+      } catch {
+        /* dispose must never throw into the engine */
+      }
     },
   };
 }
@@ -358,4 +426,4 @@ export async function openStepSession({ stepId, sessionFile, sessionsDir, tools,
 export { addUsage };
 
 // Test seam — watchdog/bridge regression coverage (tests/watchdog.test.mjs).
-export const __testInternals = { attachEventBridge, startStallWatchdog };
+export const __testInternals = { attachEventBridge, startStallWatchdog, withDefaultTimeout, guardedBashTool, makeStepPrompt };

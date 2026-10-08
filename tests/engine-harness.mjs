@@ -4,7 +4,8 @@ import "./_test-dirs.mjs"; // FIRST: isolate tickets/runs stores (never the live
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert";
-import { createEngine } from "../host/engine.mjs";
+import { execFileSync } from "node:child_process";
+import { createEngine, runScannerSuite, looksLikeSecretFile } from "../host/engine.mjs";
 import { runDir } from "../host/state.mjs";
 
 const FIXTURE = fs.mkdtempSync("/tmp/nano-engine-");
@@ -13,31 +14,58 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // --- fake session layer -----------------------------------------------------------
 
 const stepStores = new Map(); // stepId -> { turns: 0, files: [], prompts: [] }
-const openCalls = []; // { stepId, resumed }
+const openCalls = []; // { stepId, resumed, handle, systemPrompt, runId }
 
-function makeFakeOpen(scripts) {
+// The fake mirrors REAL pi where it matters (a lie here hides the bugs this
+// harness exists to catch): abort() makes the in-flight prompt() RESOLVE — it
+// never rejects — and the turn's remaining script keeps running detached, like a
+// provider stream that has been cut. close() == dispose().
+// opts.openDelayMs simulates a slow session load (cancel-during-load tests).
+function makeFakeOpen(scripts, { openDelayMs = 0, abortReleasesPrompt = true } = {}) {
   return async function fakeOpenStepSession(opts) {
     const store = stepStores.get(opts.stepId) ?? { turns: 0, files: [], prompts: [] };
     stepStores.set(opts.stepId, store);
     const resumed = !!opts.sessionFile;
     const file = opts.sessionFile ?? path.join(FIXTURE, `${opts.stepId}-${store.files.length}.jsonl`);
     store.files.push(file);
-    openCalls.push({ stepId: opts.stepId, resumed });
+    const delay = typeof openDelayMs === "object" ? openDelayMs[opts.stepId] ?? 0 : openDelayMs;
+    if (delay) await sleep(delay);
     const tools = Object.fromEntries((opts.customTools ?? []).map((t) => [t.name ?? t.name, t]));
+    let release = null;
     const handle = {
       sessionFile: file,
       resumed,
       session: { messages: [] },
-      abort() {},
-      close() {},
+      aborts: 0,
+      closed: false,
+      abort() {
+        handle.aborts += 1;
+        if (abortReleasesPrompt) release?.();
+      },
+      close() {
+        handle.closed = true;
+      },
       async prompt(text) {
         store.prompts.push(text);
         const script = scripts[opts.stepId];
         const turn = script?.[store.turns];
         store.turns += 1;
-        if (turn) await turn({ tools, text, store });
+        if (!turn) return;
+        const aborted = new Promise((r) => {
+          release = r;
+        });
+        const running = Promise.resolve().then(() => turn({ tools, text, store, cwd: opts.cwd }));
+        running.catch(() => {}); // a turn that fails AFTER an abort is nobody's problem
+        try {
+          await Promise.race([running, aborted]);
+        } finally {
+          release = null;
+        }
       },
     };
+    openCalls.push({ stepId: opts.stepId, resumed, handle, systemPrompt: opts.systemPrompt, runId: opts.runId, signal: opts.signal, cwd: opts.cwd });
+    // a cancel that fired while the session was loading: real openStepSession aborts at once
+    if (opts.signal?.aborted) handle.abort();
     return handle;
   };
 }
@@ -421,12 +449,10 @@ await test("security: fixable critical → build fix round → re-scan pass", as
         await callTool(tools, "submit_impl_delta", { ...IMPL_DELTA, notes: "removed secret" });
       },
     ],
-    verify: [
-      async ({ tools }) => {
-        await callTool(tools, "submit_verify", verifyArtifact(true));
-        await callTool(tools, "submit_audit", auditArtifact(false));
-      },
-    ],
+    verify: [0, 1].map(() => async ({ tools }) => {
+      await callTool(tools, "submit_verify", verifyArtifact(true));
+      await callTool(tools, "submit_audit", auditArtifact(false));
+    }),
     security: [
       async ({ tools }) => {
         await callTool(tools, "submit_security", secFindings(true));
@@ -436,9 +462,12 @@ await test("security: fixable critical → build fix round → re-scan pass", as
       },
     ],
   };
+  stepStores.clear(); openCalls.length = 0;
   const { state } = await runEngine({ scripts, security: "scan" });
   assert.strictEqual(state.status, "completed", state.error);
   assert.strictEqual(state.artifacts.security.verdict, "pass");
+  // #16: the security fix changed the tree after verify accepted it — it is re-verified
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, 2, "verify re-ran after the security fix round");
 });
 
 await test("security: unfixable high → owner override gate → completed with risk recorded", async () => {
@@ -819,6 +848,7 @@ await test("v3: promote-from-disk — a clarified run continues across a restart
   assert.strictEqual(st.ticketId, "F07", "top-level state.ticketId (watcher/Inbox join key)");
   assert.strictEqual(st.options.ticketId, "F07", "options.ticketId provenance kept");
   // persist exactly as the real server would (emit.state → saveState)
+  fs.mkdirSync(runDir(id), { recursive: true }); // runDir() is read-only now
   fs.writeFileSync(path.join(runDir(id), "state.json"), JSON.stringify(st));
   // fresh server session: the run exists only on disk
   const latest = { s: null };
@@ -865,9 +895,9 @@ await test("v3: hard cancel (out-of-band, owner) fires onSettled — queue ticke
   await sleep(100);
   assert.strictEqual(engine.cancel(st.id), true);
   const deadline = Date.now() + 5_000;
-  while (st.status !== "cancelled" && Date.now() < deadline) await sleep(10);
+  while ((st.status !== "cancelled" || settled.length === 0) && Date.now() < deadline) await sleep(10);
   assert.strictEqual(st.status, "cancelled");
-  assert.deepStrictEqual(settled, ["cancelled"], "out-of-band cancel fires onSettled exactly once");
+  assert.deepStrictEqual(settled, ["cancelled"], "out-of-band cancel fires onSettled exactly once (after the git cleanup)");
   release(); // unhang the fake prompt; execute()'s catch must not fire a second settle
   await sleep(50);
   assert.deepStrictEqual(settled, ["cancelled"], "no duplicate settle after the cancelled turn unwinds");
@@ -982,6 +1012,8 @@ await test("gates exhausted → run settles 'failed' exactly once (V12 second ve
         await callTool(tools, "submit_tasks", TASKS);
         await callTool(tools, "submit_impl_delta", IMPL_DELTA);
       },
+      async ({ tools }) => { await callTool(tools, "submit_impl_delta", IMPL_DELTA); },
+      async ({ tools }) => { await callTool(tools, "submit_impl_delta", IMPL_DELTA); },
     ],
     verify: [
       async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(true)); await callTool(tools, "submit_audit", auditArtifact(true)); },
@@ -1048,7 +1080,7 @@ await test("v3.1: fix-resume — resume({fix}) builds from the LAST verify repor
   assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, 2, "verify round 0 + the post-fix re-verify — no extra re-verify");
 });
 
-await test("security exhausted → settles 'failed'; fix-resume skips verify and re-scans with the findings as feedback", async () => {
+await test("security exhausted → settles 'failed'; fix-resume re-verifies the changed tree, then re-scans with the findings as feedback", async () => {
   stepStores.clear(); openCalls.length = 0;
   let secCalls = 0;
   const secFindings = (present) => ({
@@ -1074,7 +1106,7 @@ await test("security exhausted → settles 'failed'; fix-resume skips verify and
       },
       feedbackTurn, feedbackTurn, feedbackTurn, feedbackTurn,
     ],
-    verify: [async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(true)); await callTool(tools, "submit_audit", auditArtifact(false)); }],
+    verify: [0, 1, 2].map(() => async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(true)); await callTool(tools, "submit_audit", auditArtifact(false)); }),
     security: [
       async ({ tools }) => { securityRounds += 1; secCalls += 1; await callTool(tools, "submit_security", secFindings(secCalls < 3)); },
       async ({ tools }) => { securityRounds += 1; secCalls += 1; await callTool(tools, "submit_security", secFindings(secCalls < 3)); },
@@ -1099,20 +1131,19 @@ await test("security exhausted → settles 'failed'; fix-resume skips verify and
   assert.strictEqual(st.status, "failed", st.error);
   assert.match(st.error ?? "", /security findings not fixed/);
   assert.deepStrictEqual(settled, ["failed"], "security exhaustion settles");
-  // fix-resume: verify must NOT re-run; security re-scans exactly once
+  // fix-resume: the fix changed the tree, so verify re-runs ONCE (#16); security re-scans once
   const out = engine.resume(id, { fix: true });
   assert.ok(out.ok, out.error);
   const verifyOpensBefore = openCalls.filter((c) => c.stepId === "verify").length;
   while (!["completed", "failed", "cancelled"].includes(st.status) && Date.now() < deadline) await sleep(10);
   assert.strictEqual(st.status, "completed", st.error);
-  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, verifyOpensBefore, "verify skipped on security-only fix-resume");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, verifyOpensBefore + 1, "verify re-ran exactly once on the changed tree");
   assert.strictEqual(securityRounds, 3, "security re-scanned exactly once after the fix (2 exhaustion scans + 1)");
   assert.deepStrictEqual(settled, ["failed", "completed"]);
 });
 
 await test("leftover hook: undeclared agent edits are swept into a labelled commit at integrate", async () => {
   stepStores.clear(); openCalls.length = 0;
-  const { execFileSync } = await import("node:child_process");
   const repo = fs.mkdtempSync("/tmp/nano-engine-leftover-");
   const g = (args) => execFileSync("git", args, { cwd: repo, stdio: "pipe" }).toString();
   g(["init"]);
@@ -1123,12 +1154,12 @@ await test("leftover hook: undeclared agent edits are swept into a labelled comm
   g(["commit", "-m", "init"]);
   const scripts = {
     build: [
-      async ({ tools }) => {
+      async ({ tools, cwd }) => {
         assert.match(await callTool(tools, "submit_plan", PLAN), /APPROVED/);
         assert.match(await callTool(tools, "submit_tasks", TASKS), /Tasks accepted/);
         // the agent edits a file it never declares (the F09 shape: its own
         // backlog entry) and never commits it
-        fs.writeFileSync(path.join(repo, "LEFTOVER.md"), "uncommitted agent edit\n");
+        fs.writeFileSync(path.join(cwd, "LEFTOVER.md"), "uncommitted agent edit\n");
         await callTool(tools, "submit_impl_delta", IMPL_DELTA);
       },
     ],
@@ -1152,6 +1183,727 @@ await test("leftover hook: undeclared agent edits are swept into a labelled comm
     g(["log", "--name-only", "--pretty=format:", "-3"]).includes("LEFTOVER.md"), "the undeclared edit landed in history");
   assert.ok(events.some((e) => /leftover working-tree changes/.test(e.s ?? "")), "the sweep is announced loudly");
   fs.rmSync(repo, { recursive: true, force: true });
+});
+
+
+// ============================================================================
+// Engine-correctness scenarios (REWRITE-ANALYSIS §3: E-1…E-10, Q-C2/C3/H6, #11-#21)
+// ============================================================================
+
+const MODELS = { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" };
+const BASE_OPTS = { clarify: false, maxFixRounds: 2, git: false, audit: true, approvePlan: false, remoteChecks: false, security: "off" };
+const TERMINAL = ["completed", "failed", "cancelled"];
+const waitFor = async (fn, ms = 15_000) => {
+  const d = Date.now() + ms;
+  let v = fn();
+  while (!v && Date.now() < d) {
+    await sleep(10);
+    v = fn();
+  }
+  return v; // evaluated once per poll — fn may have side effects (e.g. resume())
+};
+const noopEmit = () => ({ state: () => {}, event: () => {} });
+function mkEngine(scripts, { emit, adapters = {}, open, openOpts } = {}) {
+  return createEngine({
+    modelRuntime: {},
+    emit: emit ?? noopEmit(),
+    webTools: {},
+    adapters: {
+      openStepSession: open ?? makeFakeOpen(scripts, openOpts),
+      runNode: async () => {},
+      runMechanicalChecks: async () => [],
+      ...adapters,
+    },
+  });
+}
+const startRun = (engine, id, extra = {}) =>
+  engine.start({ id, task: "t", project: { name: "sandbox", path: extra.path ?? FIXTURE }, models: MODELS, ...BASE_OPTS, ...extra });
+const happyBuild = async ({ tools }) => {
+  await callTool(tools, "submit_plan", PLAN);
+  await callTool(tools, "submit_tasks", TASKS);
+  await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+};
+const happyVerify = async ({ tools }) => {
+  await callTool(tools, "submit_verify", verifyArtifact(true));
+  await callTool(tools, "submit_audit", auditArtifact(false));
+};
+function mkRepo(extraFiles = {}) {
+  const repo = fs.mkdtempSync("/tmp/nano-engine-repo-");
+  const g = (args) => execFileSync("git", args, { cwd: repo, stdio: "pipe" }).toString();
+  g(["init", "-q"]);
+  g(["config", "user.email", "test@example.com"]);
+  g(["config", "user.name", "test"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "base\n");
+  for (const [f, c] of Object.entries(extraFiles)) fs.writeFileSync(path.join(repo, f), c);
+  g(["add", "."]);
+  g(["commit", "-q", "-m", "init"]);
+  return { repo, g, base: g(["rev-parse", "--abbrev-ref", "HEAD"]).trim() };
+}
+function writeDeclared(repo) {
+  fs.mkdirSync(path.join(repo, "src/health"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "src/health/controller.ts"), "export const c = 1;\n");
+  fs.writeFileSync(path.join(repo, "src/health/service.ts"), "export const s = 1;\n");
+  fs.writeFileSync(path.join(repo, "README.md"), "base\n\n/health documented\n");
+}
+const cleanup = (...dirs) => dirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true }));
+
+await test("E-1: cancel→resume with a WEDGED old loop never runs two loops (old epoch is inert)", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  let wedge;
+  const wedged = new Promise((r) => (wedge = r));
+  const scripts = {
+    build: [
+      async ({ tools }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await wedged; // the provider stream is hung: abort() will NOT release this prompt
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", { ...IMPL_DELTA, notes: "ZOMBIE" });
+      },
+      async ({ tools }) => {
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", { ...IMPL_DELTA, notes: "epoch-2" });
+      },
+    ],
+    verify: [happyVerify],
+  };
+  const engine = mkEngine(scripts, { openOpts: { abortReleasesPrompt: false }, adapters: { cancelGraceMs: 50 } });
+  const settled = [];
+  const st = await startRun(engine, `e1-${Date.now()}`, { onSettled: (x) => settled.push(x) });
+  await waitFor(() => st.artifacts.plan);
+  assert.strictEqual(engine.cancel(st.id), true);
+  assert.ok(await waitFor(() => settled.length === 1), "cancel observer fired");
+  // resume only once the cancel cleanup released the tree
+  let out;
+  assert.ok(await waitFor(() => (out = engine.resume(st.id)).ok), `resume accepted: ${out?.error}`);
+  assert.ok(await waitFor(() => TERMINAL.includes(st.status) && settled.length === 2), `status=${st.status} settled=${settled}`);
+  assert.strictEqual(st.status, "completed", st.error);
+  wedge(); // the OLD loop's wedged prompt finally comes back, and its script keeps calling tools
+  await sleep(150);
+  assert.strictEqual(st.status, "completed", "the zombie epoch did not touch the terminal status");
+  assert.deepStrictEqual(settled, ["cancelled", "completed"], "exactly one settle per epoch — the old loop never settles under the new one");
+  assert.strictEqual(st.artifacts.implDelta.notes, "epoch-2", "zombie tool calls are ignored (inert epoch)");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, 1, "one verifier — one loop");
+});
+
+await test("E-2/E-9: cancel keeps the tree lock until cleanup finished; observer fires after; kill is scoped by runId", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const killed = [];
+  const scripts = { build: [async () => { await new Promise(() => {}); }] };
+  const engine = mkEngine(scripts, {
+    adapters: { killRunProcesses: async (o) => { killed.push(o); await sleep(150); return { terminated: [], killed: [], skipped: [] }; } },
+  });
+  const settled = [];
+  const id = `e2-${Date.now()}`;
+  const st = await startRun(engine, id, { onSettled: (x) => settled.push(x) });
+  await waitFor(() => openCalls.some((c) => c.stepId === "build"));
+  assert.strictEqual(engine.cancel(id), true);
+  assert.strictEqual(st.status, "cancelled");
+  assert.strictEqual(engine.treeLockHolder(FIXTURE), id, "lock still held while the cancel cleanup is in flight");
+  await assert.rejects(() => startRun(engine, `e2-b-${Date.now()}`), /holds the working tree/);
+  assert.deepStrictEqual(settled, [], "observer waits for the cleanup");
+  assert.ok(await waitFor(() => settled.length === 1));
+  assert.strictEqual(engine.treeLockHolder(FIXTURE), null, "lock released after cleanup");
+  assert.strictEqual(killed[0]?.runId, id, "process kill is scoped to THIS run (E-9)");
+  assert.ok(openCalls.find((c) => c.stepId === "build").handle.closed, "build session disposed on cancel");
+});
+
+await test("E-2: a cancel during session load is not lost — no verifier turn runs, the session is closed", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const scripts = { build: [happyBuild], verify: [async () => { throw new Error("verifier turn must not run after a cancel"); }] };
+  const engine = mkEngine(scripts, { openOpts: { openDelayMs: { verify: 250 } } });
+  const settled = [];
+  const id = `e2b-${Date.now()}`;
+  const st = await startRun(engine, id, { onSettled: (x) => settled.push(x) });
+  await waitFor(() => st.steps.find((x) => x.id === "verify")?.status === "running");
+  engine.cancel(id); // the verifier session is still loading
+  assert.ok(await waitFor(() => settled.length === 1 && openCalls.some((c) => c.stepId === "verify")));
+  await sleep(100);
+  assert.strictEqual(stepStores.get("verify")?.prompts.length ?? 0, 0, "no verifier turn ran");
+  assert.ok(openCalls.find((c) => c.stepId === "verify").handle.closed, "late-loading session was closed");
+  assert.strictEqual(st.status, "cancelled");
+});
+
+await test("E-3/Q-C3: every gate has its resolver BEFORE emit.state(awaiting-gate); a synchronous park-cancel releases the run", async () => {
+  for (const kind of ["plan-approval", "divergence", "security-override"]) {
+    stepStores.clear(); openCalls.length = 0;
+    const seen = []; // resolver presence at each awaiting-gate emit
+    let engine;
+    let park = true;
+    const emit = {
+      state: (run) => {
+        if (run.state.status === "awaiting-gate") {
+          seen.push({ type: run.state.gate?.type, resolver: !!run.gateResolver });
+          // exactly what queue.mjs's watcher does: cancel the gate synchronously, inside the emit
+          if (park) engine.gate(run.id, "cancel");
+        }
+      },
+      event: () => {},
+    };
+    const scripts = {
+      build: [
+        async ({ tools }) => {
+          await callTool(tools, "submit_plan", kind === "divergence" ? { ...PLAN, divergence: "stale spec" } : PLAN);
+          if (kind === "security-override") {
+            await callTool(tools, "submit_tasks", TASKS);
+            await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+          }
+        },
+      ],
+      verify: [happyVerify],
+      security: [async ({ tools }) => {
+        await callTool(tools, "submit_security", { verdict: "findings", findings: [{ id: "d1", source: "scanner", severity: "high", title: "no fix", evidence: "x", fixable_in_scope: false }] });
+      }],
+    };
+    engine = mkEngine(scripts, { emit });
+    const settled = [];
+    const id = `e3-${kind}-${Date.now()}`;
+    const st = await startRun(engine, id, {
+      approvePlan: kind !== "security-override",
+      security: kind === "security-override" ? "scan" : "off",
+      onSettled: (x) => settled.push(x),
+    });
+    assert.ok(await waitFor(() => TERMINAL.includes(st.status) && settled.length >= 1), `${kind}: status=${st.status}`);
+    assert.strictEqual(st.status, "cancelled", `${kind}: the park-cancel released the run (was a no-op before the fix)`);
+    assert.ok(seen.length >= 1, `${kind}: an awaiting-gate state was emitted`);
+    assert.ok(seen.every((x) => x.resolver), `${kind}: resolver assigned before emit.state: ${JSON.stringify(seen)}`);
+    if (kind === "plan-approval") {
+      // resumed gate behaves identically to the live one
+      park = true;
+      seen.length = 0;
+      settled.length = 0;
+      assert.ok(await waitFor(() => engine.resume(id).ok), "resume accepted");
+      assert.ok(await waitFor(() => settled.length === 1), "resumed run settled");
+      assert.strictEqual(st.status, "cancelled", "resumed plan gate parked identically");
+      assert.deepStrictEqual(seen.map((x) => [x.type, x.resolver]), [["plan-approval", true]], "resumed gate: awaiting-gate status + resolver before emit");
+    }
+  }
+});
+
+await test("Q-C2/Q-H6: a clarify-only wave never switches branches under a build; concurrent starts cannot both take the tree; resume honours the lock", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g, base } = mkRepo();
+  let release;
+  const hold = new Promise((r) => (release = r));
+  const scripts = { build: [async ({ tools }) => { await callTool(tools, "submit_plan", PLAN); await hold; }] };
+  const engine = mkEngine(scripts, {
+    adapters: {
+      runNode: async (opts) => {
+        if (opts.nodeId === "clarify") await (opts.customTools ?? []).find((t) => t.name === "finalize_spec")?.execute("x", { summary: "s", decisions: [], acceptance_criteria: ["AC"] });
+      },
+    },
+  });
+  // Q-H6: two concurrent starts → exactly one wins
+  const [a, b] = await Promise.allSettled([
+    startRun(engine, `qh6-a-${Date.now()}`, { path: repo, git: true }),
+    startRun(engine, `qh6-b-${Date.now()}`, { path: repo, git: true }),
+  ]);
+  const winners = [a, b].filter((r) => r.status === "fulfilled");
+  assert.strictEqual(winners.length, 1, "exactly one concurrent start acquired the tree");
+  assert.match([a, b].find((r) => r.status === "rejected").reason.message, /holds the working tree/);
+  const build = winners[0].value;
+  await waitFor(() => build.artifacts.plan);
+  assert.strictEqual(g(["rev-parse", "--abbrev-ref", "HEAD"]).trim(), base, "build run works in its worktree — the owner's checkout stays on base");
+  assert.strictEqual(execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: build.git.worktree }).toString().trim(), build.git.runBranch, "the worktree is on the run branch");
+  // Q-C2: a clarify-only wave starts while the build holds the tree
+  const wave = await startRun(engine, `qc2-${Date.now()}`, {
+    path: repo, git: true, clarify: true, stopAfterClarify: true, waveTickets: [{ id: "F1" }],
+    adapters: undefined,
+  });
+  await waitFor(() => wave.status === "clarified" || TERMINAL.includes(wave.status), 5000);
+  assert.strictEqual(g(["rev-parse", "--abbrev-ref", "HEAD"]).trim(), base, "checkout was NOT switched by the clarify run");
+  assert.ok(!g(["branch", "--list", `nano-cycle/${wave.id}`]).trim(), "no wave branch was created in the shared checkout");
+  assert.strictEqual(wave.git, null, "clarify-only run carries no git state");
+  // Q-H6: in-session resume honours the lock
+  engine.cancel(build.id);
+  assert.ok(await waitFor(() => engine.treeLockHolder(repo) === null));
+  assert.strictEqual(g(["rev-parse", "--abbrev-ref", "HEAD"]).trim(), base, "cancel never moved the owner's checkout");
+  assert.ok(fs.existsSync(build.git.worktree), "cancelled run keeps its worktree for resume");
+  const holder = await startRun(engine, `qh6-c-${Date.now()}`, { path: repo, git: true });
+  const out = engine.resume(build.id);
+  assert.strictEqual(out.ok, false, "resume must not steal a held tree");
+  assert.match(out.error, /working tree is held/);
+  release();
+  engine.cancel(holder.id);
+  await waitFor(() => engine.treeLockHolder(repo) === null);
+  cleanup(repo);
+});
+
+await test("E-5: a fix round MUST land a new impl-delta (stale one is cleared at round start)", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const scripts = {
+    build: [happyBuild, async () => { /* the builder 'fixes' nothing and never calls submit_impl_delta */ }],
+    verify: [async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(false)); }],
+  };
+  const { state } = await runEngine({ scripts });
+  assert.strictEqual(state.status, "failed");
+  assert.match(state.error ?? "", /fix round 1 ended without a new impl-delta/);
+});
+
+await test("E-7/E-8: milestone commit is awaited and tolerant of ignored paths; leftover sweep skips secrets; never commits after cancel", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g, base } = mkRepo({ ".gitignore": "src/health/service.ts\n" });
+  let logAtToolReturn = "";
+  const scripts = {
+    build: [
+      async ({ tools, cwd }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        writeDeclared(cwd);
+        fs.writeFileSync(path.join(cwd, ".env"), "API_KEY=sk-live-123\n"); // un-ignored secret
+        fs.writeFileSync(path.join(cwd, "notes.md"), "undeclared but harmless\n");
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+        logAtToolReturn = execFileSync("git", ["log", "--oneline"], { cwd }).toString(); // E-8: the commit exists by the time the tool returned
+      },
+    ],
+    verify: [happyVerify],
+  };
+  const { state, events } = await runEngine({ scripts, projectPath: repo, extraStart: { git: true } });
+  assert.strictEqual(state.status, "completed", `${state.status} ${state.error}`);
+  assert.match(logAtToolReturn, /feat: /, "milestone commit awaited before the tool returned");
+  const tracked = g(["ls-files"]).split("\n");
+  assert.ok(tracked.includes("src/health/controller.ts"), "declared file committed despite an ignored sibling");
+  assert.ok(!tracked.includes("src/health/service.ts"), "ignored path not force-added");
+  assert.ok(events.some((e) => /milestone commit skipped/.test(e.s ?? "") && /service\.ts/.test(e.s)), "the skipped ignored path is announced");
+  assert.ok(tracked.includes("notes.md"), "leftover sweep still lands ordinary undeclared edits");
+  assert.ok(!tracked.includes(".env"), "secret-looking file is NEVER committed by the sweep");
+  assert.ok(fs.existsSync(path.join(state.git.worktree, ".env")), "...and it was left on disk (the worktree is KEPT because of it, not deleted)");
+  assert.ok(!fs.existsSync(path.join(repo, ".env")), "...and never reached the owner's checkout");
+  assert.strictEqual(state.git.worktreeKept, true);
+  assert.ok(events.some((e) => /left 1 file\(s\) uncommitted on purpose.*\.env/.test(e.s ?? "")), "the refusal is loud");
+  assert.strictEqual(g(["rev-parse", "--abbrev-ref", "HEAD"]).trim(), base);
+  cleanup(repo);
+  // pure classifier
+  for (const f of [".env", ".env.local", "config/.env.production", "deploy/id_rsa", "certs/server.pem", "a/b/credentials.json", "my-service-account-prod.json"]) {
+    assert.ok(looksLikeSecretFile(f), `${f} looks secret`);
+  }
+  for (const f of [".env.example", "src/env.ts", "README.md", "environment.md", "keys.md", "id_rsa.pub.md"]) {
+    assert.ok(!looksLikeSecretFile(f), `${f} is fine`);
+  }
+});
+
+await test("E-7: cancel never commits — dirt is parked in a stash, the tree is clean, resume restores it", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g, base } = mkRepo();
+  const scripts = {
+    build: [
+      async ({ tools, cwd }) => {
+        await callTool(tools, "submit_plan", PLAN);
+        await callTool(tools, "submit_tasks", TASKS);
+        fs.writeFileSync(path.join(cwd, "DIRT.md"), "half-written\n");
+        await new Promise(() => {}); // mid-implementation when the owner cancels
+      },
+      async ({ tools, text, cwd }) => {
+        assert.match(text, /continue the IMPLEMENT phase/, "resume continues implementation instead of re-planning (#13)");
+        assert.doesNotMatch(text, /Begin the PLAN phase/);
+        assert.ok(fs.existsSync(path.join(cwd, "DIRT.md")), "parked work restored before the builder continues");
+        writeDeclared(cwd);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [happyVerify],
+  };
+  const engine = mkEngine(scripts);
+  const settled = [];
+  const id = `e7c-${Date.now()}`;
+  const st = await startRun(engine, id, { path: repo, git: true, onSettled: (x) => settled.push(x) });
+  fs.writeFileSync(path.join(repo, "OWNER-WIP.md"), "the owner's own uncommitted work\n"); // dirty owner checkout
+  const wt = st.git.worktree;
+  const wg = (args) => execFileSync("git", args, { cwd: wt, stdio: "pipe" }).toString();
+  await waitFor(() => st.artifacts.tasks && fs.existsSync(path.join(wt, "DIRT.md")));
+  engine.cancel(id);
+  assert.ok(await waitFor(() => settled.length === 1));
+  assert.strictEqual(g(["rev-parse", "--abbrev-ref", "HEAD"]).trim(), base, "owner's checkout stayed on base");
+  assert.strictEqual(g(["status", "--porcelain"]).trim(), "?? OWNER-WIP.md", "the owner's tree is exactly as they left it — nothing stashed or swept from it");
+  assert.strictEqual(wg(["status", "--porcelain"]).trim(), "", "the WORKTREE was cleaned by the stash");
+  assert.ok(!fs.existsSync(path.join(wt, "DIRT.md")), "dirt left the worktree");
+  assert.ok(!g(["log", "--all", "--oneline"]).includes("leftover"), "nothing was committed after the cancel");
+  assert.match(g(["stash", "list"]), new RegExp(`nano-cycle cancel ${id}`), "dirt parked in a labelled stash");
+  let out;
+  assert.ok(await waitFor(() => (out = engine.resume(id)).ok), out?.error);
+  assert.ok(await waitFor(() => TERMINAL.includes(st.status) && settled.length === 2), `status=${st.status}`);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.ok(g(["ls-files"]).includes("DIRT.md"), "restored work rode through to the merge");
+  assert.ok(fs.existsSync(path.join(repo, "OWNER-WIP.md")), "the owner's uncommitted file survived the whole run + merge");
+  cleanup(repo);
+});
+
+await test("#21: 'completed' only after the merge landed — a conflicting moved base reads failed (branch+worktree kept); resume retries just the merge", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g, base } = mkRepo();
+  let oldBase;
+  const scripts = {
+    build: [async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); }],
+    verify: [
+      async ({ tools }) => {
+        // base moves under the run (someone else landed work touching the SAME
+        // file the run edited): the rebase conflicts, ff-only can never succeed
+        oldBase = g(["rev-parse", base]).trim();
+        fs.writeFileSync(path.join(repo, "README.md"), "base\n\nsomeone else's edit\n");
+        g(["commit", "-qam", "diverge"]);
+        await happyVerify({ tools });
+      },
+    ],
+  };
+  const statuses = new Set();
+  const emit = { state: (run) => statuses.add(run.state.status), event: () => {} };
+  const engine = mkEngine(scripts, { emit });
+  const settled = [];
+  const id = `n21-${Date.now()}`;
+  const st = await startRun(engine, id, { path: repo, git: true, onSettled: (x) => settled.push(x) });
+  assert.ok(await waitFor(() => TERMINAL.includes(st.status) && settled.length === 1), `status=${st.status}`);
+  assert.strictEqual(st.status, "failed");
+  assert.match(st.error ?? "", /ff-merge/);
+  assert.ok(!statuses.has("completed"), "the run never read 'completed' while the merge was pending/failed");
+  assert.strictEqual(st.git.merged, false);
+  assert.ok(g(["branch", "--list", st.git.runBranch]).trim(), "run branch kept");
+  assert.ok(fs.existsSync(st.git.worktree), "worktree kept");
+  assert.strictEqual(execFileSync("git", ["status", "--porcelain"], { cwd: st.git.worktree }).toString().trim(), "", "failed rebase was aborted — worktree not left mid-rebase");
+  assert.strictEqual(g(["status", "--porcelain"]).trim(), "", "owner's checkout untouched by the failed merge");
+  // owner fixes the base, resumes: gates are NOT re-run, the merge is retried
+  g(["reset", "--hard", oldBase]);
+  const verifyOpens = openCalls.filter((c) => c.stepId === "verify").length;
+  let out;
+  assert.ok(await waitFor(() => (out = engine.resume(id)).ok), out?.error);
+  assert.ok(await waitFor(() => settled.length === 2), `status=${st.status}`);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.strictEqual(st.git.merged, true);
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, verifyOpens, "no re-verification — merge only");
+  assert.ok(!fs.existsSync(st.git.worktree ?? "/nonexistent") && !g(["branch", "--list", `nano-cycle/${id}`]).trim(), "landed run: worktree removed, branch deleted");
+  cleanup(repo);
+});
+
+// ---- one git worktree per run -------------------------------------------------------
+
+const gitIn = (cwd, args) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString();
+
+await test("worktree: agent cwd/checks/scanner == the worktree from a pinned base; owner's checkout + dirty files untouched; node_modules linked + never committed; merge lands and cleans up", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g, base } = mkRepo({ ".gitignore": "node_modules/\n", "OTHER.md": "tracked\n" });
+  fs.mkdirSync(path.join(repo, "node_modules/dep"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "node_modules/dep/index.js"), "module.exports = 1;\n");
+  fs.mkdirSync(path.join(repo, "web/node_modules"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "web/package.json"), "{}\n");
+  g(["add", "web/package.json"]);
+  g(["commit", "-qm", "web"]);
+  const baseSha = g(["rev-parse", "HEAD"]).trim();
+  // the owner's checkout is DIRTY at start and must stay exactly so
+  fs.writeFileSync(path.join(repo, "OTHER.md"), "tracked\nowner edit\n");
+  fs.writeFileSync(path.join(repo, "scratch.txt"), "owner scratch\n");
+  const seen = {};
+  const scripts = {
+    build: [
+      async (ctx) => {
+        const { cwd } = ctx;
+        seen.buildCwd = cwd;
+        assert.notStrictEqual(cwd, repo);
+        assert.strictEqual(gitIn(cwd, ["rev-parse", "HEAD"]).trim(), baseSha, "worktree starts at the pinned base sha");
+        assert.strictEqual(fs.readFileSync(path.join(cwd, "OTHER.md"), "utf8"), "tracked\n", "owner's uncommitted edit is not in the run");
+        assert.ok(!fs.existsSync(path.join(cwd, "scratch.txt")), "owner's untracked file is not in the run");
+        assert.ok(fs.lstatSync(path.join(cwd, "node_modules")).isSymbolicLink(), "root node_modules is a symlink");
+        assert.ok(fs.lstatSync(path.join(cwd, "web/node_modules")).isSymbolicLink(), "workspace node_modules is a symlink");
+        assert.ok(fs.existsSync(path.join(cwd, "node_modules/dep/index.js")), "...that resolves to the owner's dependencies");
+        assert.ok(!/node_modules/.test(gitIn(cwd, ["status", "--porcelain"])), "the symlinks are invisible to git status (excluded)");
+        writeDeclared(cwd);
+        await happyBuild(ctx);
+      },
+    ],
+    verify: [async (ctx) => { seen.verifyCwd = ctx.cwd; await happyVerify(ctx); }],
+  };
+  const mech = [];
+  const engine = mkEngine(scripts, {
+    adapters: {
+      runMechanicalChecks: async (o) => { mech.push(o.projectPath); return []; },
+      runScannerSuite: async (r) => { mech.push(`scan:${r.git.worktree}`); return { scanners: [] }; },
+    },
+  });
+  const id = `wt1-${Date.now()}`;
+  const settled = [];
+  const st = await startRun(engine, id, { path: repo, git: true, security: "scan", onSettled: (x) => settled.push(x) });
+  assert.strictEqual(st.git.baseSha, baseSha, "base sha pinned in state.git");
+  assert.strictEqual(st.git.worktree, path.join(runDir(id), "wt"));
+  assert.strictEqual(g(["rev-parse", "--abbrev-ref", "HEAD"]).trim(), base, "owner's checkout never switched");
+  assert.ok(await waitFor(() => TERMINAL.includes(st.status) && settled.length === 1), `status=${st.status} ${st.error}`);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.strictEqual(seen.buildCwd, path.join(runDir(id), "wt"));
+  assert.strictEqual(seen.verifyCwd, seen.buildCwd, "verifier works in the same worktree");
+  assert.ok(mech.includes(seen.buildCwd), "mechanical checks ran in the worktree");
+  assert.ok(openCalls.every((c) => c.cwd === seen.buildCwd), "every session cwd is the worktree");
+  assert.strictEqual(g(["rev-parse", "--abbrev-ref", "HEAD"]).trim(), base);
+  assert.match(g(["log", "--format=%s", "-5"]), /feat: /, "merge landed on base");
+  assert.ok(g(["ls-files"]).includes("src/health/controller.ts"));
+  assert.ok(!g(["ls-files"]).includes("node_modules"), "node_modules symlinks never committed");
+  assert.strictEqual(fs.readFileSync(path.join(repo, "OTHER.md"), "utf8"), "tracked\nowner edit\n", "owner's dirty tracked file untouched");
+  assert.strictEqual(fs.readFileSync(path.join(repo, "scratch.txt"), "utf8"), "owner scratch\n", "owner's untracked file untouched");
+  assert.ok(fs.statSync(path.join(repo, "node_modules")).isDirectory() && !fs.lstatSync(path.join(repo, "node_modules")).isSymbolicLink() && fs.existsSync(path.join(repo, "node_modules/dep/index.js")), "owner's node_modules intact (symlink removal did not follow it)");
+  assert.ok(!fs.existsSync(seen.buildCwd), "worktree removed after the merge");
+  assert.strictEqual(gitIn(repo, ["worktree", "list"]).trim().split("\n").length, 1, "no worktree registration left");
+  assert.ok(!g(["branch", "--list", st.git.runBranch]).trim(), "run branch deleted");
+  cleanup(repo);
+});
+
+await test("worktree: a dependency dir the project does NOT ignore is excluded via info/exclude (symlinks never show in status)", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo } = mkRepo(); // no .gitignore at all
+  fs.mkdirSync(path.join(repo, "node_modules"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "node_modules/x.js"), "1\n");
+  let status;
+  const scripts = {
+    build: [async (ctx) => { status = gitIn(ctx.cwd, ["status", "--porcelain"]); writeDeclared(ctx.cwd); await happyBuild(ctx); }],
+    verify: [happyVerify],
+  };
+  const { state } = await runEngine({ scripts, projectPath: repo, extraStart: { git: true } });
+  assert.strictEqual(state.status, "completed", state.error);
+  assert.strictEqual(status.trim(), "", "symlink not reported as untracked");
+  assert.ok(!gitIn(repo, ["ls-files"]).includes("node_modules"), "never committed");
+  cleanup(repo);
+});
+
+await test("worktree: base branch NOT checked out anywhere → merge advances the ref (update-ref), the owner's checkout is untouched", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g, base } = mkRepo();
+  const scripts = {
+    build: [async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); }],
+    verify: [async (ctx) => { g(["checkout", "-q", "-b", "elsewhere"]); await happyVerify(ctx); }], // owner moves off base mid-run
+  };
+  const { state } = await runEngine({ scripts, projectPath: repo, extraStart: { git: true } });
+  assert.strictEqual(state.status, "completed", state.error);
+  assert.strictEqual(g(["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "elsewhere", "owner's checkout left alone");
+  assert.match(g(["log", "--format=%s", base, "-3"]), /feat: /, "base ref advanced to the run's work");
+  assert.ok(!fs.existsSync(path.join(repo, "src/health/controller.ts")), "owner's working tree on 'elsewhere' has no run files");
+  cleanup(repo);
+});
+
+await test("worktree: base moved without conflict → the run branch is rebased in the worktree and lands", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g, base } = mkRepo();
+  const scripts = {
+    build: [async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); }],
+    verify: [async (ctx) => { fs.writeFileSync(path.join(repo, "UNRELATED.md"), "other work\n"); g(["add", "."]); g(["commit", "-qm", "unrelated"]); await happyVerify(ctx); }],
+  };
+  const { state, events } = await runEngine({ scripts, projectPath: repo, extraStart: { git: true } });
+  assert.strictEqual(state.status, "completed", state.error);
+  assert.ok(events.some((e) => /rebasing nano-cycle\//.test(e.s ?? "")), "rebase announced");
+  const files = g(["ls-files"]);
+  assert.ok(files.includes("UNRELATED.md") && files.includes("src/health/controller.ts"), "both lines of work are on base");
+  assert.strictEqual(g(["rev-list", "--merges", "--count", base]).trim(), "0", "linear history");
+  cleanup(repo);
+});
+
+await test("worktree: resume after the worktree DIRECTORY was deleted re-adds it on the existing branch (milestones kept); removeWorktree() cleans a kept one", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g } = mkRepo();
+  const scripts = {
+    build: [
+      async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); },
+    ],
+    verify: [async () => { await new Promise(() => {}); }, happyVerify], // first verifier hangs until the owner cancels
+  };
+  const events = [];
+  const engine = mkEngine(scripts, { emit: { state: () => {}, event: (r, n, ev) => events.push(ev) } });
+  const settled = [];
+  const id = `wt-resume-${Date.now()}`;
+  const st = await startRun(engine, id, { path: repo, git: true, onSettled: (x) => settled.push(x) });
+  const wt = st.git.worktree;
+  await waitFor(() => st.git.commits.length > 0);
+  engine.cancel(id);
+  assert.ok(await waitFor(() => settled.length === 1));
+  assert.ok(fs.existsSync(wt), "kept after cancel");
+  // lose the directory behind git's back
+  fs.rmSync(wt, { recursive: true, force: true });
+  let out;
+  assert.ok(await waitFor(() => (out = engine.resume(id)).ok), out?.error);
+  assert.ok(await waitFor(() => settled.length === 2), `status=${st.status}`);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.ok(events.some((e) => /worktree re-attached/.test(e.s ?? "")), "re-add announced");
+  assert.ok(g(["ls-files"]).includes("src/health/controller.ts"), "the milestone commit survived and merged");
+  assert.ok(!fs.existsSync(wt), "removed again after the merge");
+  // a failed (kept) run's worktree is dropped by removeWorktree — the branch stays
+  stepStores.clear(); openCalls.length = 0;
+  const scripts2 = { build: [async () => { throw new Error("boom"); }] };
+  const e2 = mkEngine(scripts2);
+  const settled2 = [];
+  const id2 = `wt-del-${Date.now()}`;
+  const st2 = await startRun(e2, id2, { path: repo, git: true, onSettled: (x) => settled2.push(x) });
+  assert.ok(await waitFor(() => settled2.length === 1));
+  assert.strictEqual(st2.status, "failed");
+  assert.ok(fs.existsSync(st2.git.worktree), "failed run keeps its worktree");
+  assert.deepStrictEqual(await e2.removeWorktree(id2), { ok: true, removed: true });
+  assert.ok(!fs.existsSync(st2.git.worktree));
+  assert.strictEqual(gitIn(repo, ["worktree", "list"]).trim().split("\n").length, 1, "worktree unregistered");
+  assert.ok(g(["branch", "--list", st2.git.runBranch]).trim(), "the unmerged branch is kept");
+  cleanup(repo);
+});
+
+await test("worktree: a dirty owner checkout at start no longer blocks; git-off runs keep cwd == project path; detached HEAD is refused", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g } = mkRepo();
+  fs.writeFileSync(path.join(repo, "README.md"), "owner edit in progress\n"); // tracked + modified
+  const eng = mkEngine({ build: [async () => { await new Promise(() => {}); }] });
+  const settledD = [];
+  const st = await startRun(eng, `wt-dirty-${Date.now()}`, { path: repo, git: true, onSettled: (x) => settledD.push(x) });
+  assert.ok(st.git.worktree && fs.existsSync(st.git.worktree), "run started on a dirty checkout");
+  assert.strictEqual(g(["status", "--porcelain"]).trim(), "M README.md", "owner's edit untouched");
+  eng.cancel(st.id);
+  assert.ok(await waitFor(() => settledD.length === 1));
+  // git off: unchanged behaviour
+  stepStores.clear(); openCalls.length = 0;
+  await runEngine({ scripts: { build: [happyBuild], verify: [happyVerify] } });
+  assert.ok(openCalls.length >= 2 && openCalls.every((c) => c.cwd === FIXTURE), "git-off runs keep cwd = project path");
+  // detached HEAD: no base branch to merge into
+  g(["checkout", "-q", "--detach"]);
+  await assert.rejects(() => startRun(mkEngine({}), `wt-det-${Date.now()}`, { path: repo, git: true }), /detached HEAD/);
+  cleanup(repo);
+});
+
+await test("#14: a missing submit_audit is never a pass — nudged once, then the audit step fails", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  // (a) never calls submit_audit
+  let scripts = {
+    build: [happyBuild],
+    verify: [async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(true)); }],
+  };
+  let r = await runEngine({ scripts });
+  assert.strictEqual(r.state.status, "failed", "accepted verify + absent audit must not complete");
+  assert.match(r.state.error ?? "", /audit step failed/);
+  assert.ok(stepStores.get("verify").prompts.some((p) => /AUDIT phase is owed/.test(p)), "nudged once");
+  // (b) the nudge works
+  stepStores.clear(); openCalls.length = 0;
+  scripts = {
+    build: [happyBuild],
+    verify: [
+      async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(true)); },
+      async ({ tools }) => { await callTool(tools, "submit_audit", auditArtifact(false)); },
+    ],
+  };
+  r = await runEngine({ scripts });
+  assert.strictEqual(r.state.status, "completed", r.state.error);
+  assert.strictEqual(r.state.artifacts.audit.verdict, "accepted");
+});
+
+await test("#15: verifier system prompt has no undefined skill paths; #dispose: every session is closed when the run ends", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { state } = await runEngine({ scripts: { build: [happyBuild], verify: [happyVerify] } });
+  assert.strictEqual(state.status, "completed", state.error);
+  const vsp = openCalls.find((c) => c.stepId === "verify").systemPrompt;
+  assert.ok(!/undefined/.test(vsp), "no 'undefined' in the verifier system prompt");
+  assert.match(vsp, /audit-deliverables\/SKILL\.md/);
+  assert.ok(openCalls.length >= 2 && openCalls.every((c) => c.handle.closed), "build + verify sessions were disposed");
+  assert.ok(openCalls.every((c) => typeof c.runId === "string" && c.runId), "sessions are tagged with the run id (prockill scoping)");
+});
+
+await test("#12/#13: plan-gate resume — reject-with-comments revises without a 'fix:' commit label; approved plan is not re-planned", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g } = mkRepo();
+  let planCalls = 0;
+  const scripts = {
+    build: [
+      async ({ tools }) => { planCalls += 1; await callTool(tools, "submit_plan", PLAN); }, // cancelled at the gate
+      async ({ tools, text, cwd }) => {
+        assert.match(text, /REJECTED your plan: add a timeout/);
+        planCalls += 1;
+        writeDeclared(cwd);
+        assert.match(await callTool(tools, "submit_plan", { ...PLAN, approach: "revised" }), /APPROVED/);
+        await callTool(tools, "submit_tasks", TASKS);
+        await callTool(tools, "submit_impl_delta", IMPL_DELTA);
+      },
+    ],
+    verify: [happyVerify],
+  };
+  const emit = noopEmit();
+  const engine = mkEngine(scripts, { emit });
+  const id = `n13-${Date.now()}`;
+  const st = await startRun(engine, id, { path: repo, git: true, approvePlan: true });
+  await waitFor(() => st.gate?.type === "plan-approval");
+  engine.gate(id, "cancel");
+  await waitFor(() => st.status === "cancelled");
+  let out;
+  assert.ok(await waitFor(() => (out = engine.resume(id)).ok), out?.error);
+  await waitFor(() => st.gate?.type === "plan-approval" && st.status === "awaiting-gate");
+  engine.gate(id, "reject", "add a timeout");
+  await waitFor(() => st.gate?.type === "plan-approval" && st.artifacts.plan?.approach === "revised");
+  engine.gate(id, "approve");
+  assert.ok(await waitFor(() => TERMINAL.includes(st.status)), `status=${st.status}`);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.strictEqual(planCalls, 2, "one original plan + one revision");
+  const subjects = g(["log", "--format=%s", "-8"]);
+  assert.match(subjects, /feat: /, "first implementation commit is labelled feat:");
+  assert.doesNotMatch(subjects, /fix: /, "plan rejection is not a fix round");
+  cleanup(repo);
+});
+
+await test("#18: unanswered clarify questions survive a restart — re-presented with zero model turns", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const qs = [{ id: "q1", question: "Which DB?", why: "storage", options: [], recommended: null }];
+  let clarifyTurns = 0;
+  const askRunNode = async (opts) => {
+    if (opts.nodeId !== "clarify") return;
+    clarifyTurns += 1;
+    await (opts.customTools ?? []).find((t) => t.name === "ask_questions")?.execute("x", { questions: qs });
+  };
+  const e1 = mkEngine({}, { adapters: { runNode: askRunNode } });
+  const id = `n18-${Date.now()}`;
+  const st = await startRun(e1, id, { clarify: true });
+  await waitFor(() => st.status === "awaiting-answers");
+  assert.strictEqual(st.gate?.type, "answers");
+  // simulate the server dying here: only state.json survives, status marked interrupted
+  const onDisk = JSON.parse(JSON.stringify(st));
+  onDisk.status = "interrupted";
+  fs.mkdirSync(runDir(id), { recursive: true });
+  fs.writeFileSync(path.join(runDir(id), "state.json"), JSON.stringify(onDisk));
+  const turnsBefore = clarifyTurns;
+  const latest = { s: null };
+  const e2 = mkEngine({}, {
+    emit: { state: (run) => { latest.s = run.state; }, event: () => {} },
+    adapters: {
+      runNode: async (opts) => {
+        if (opts.nodeId !== "clarify") return;
+        clarifyTurns += 1;
+        await (opts.customTools ?? []).find((t) => t.name === "finalize_spec")?.execute("x", { summary: "s", decisions: [], acceptance_criteria: ["AC"] });
+      },
+    },
+  });
+  const out = e2.resumeFromDisk(id, { name: "sandbox", path: FIXTURE });
+  assert.ok(out.ok, out.error);
+  await waitFor(() => latest.s?.status === "awaiting-answers");
+  assert.deepStrictEqual(latest.s.gate?.questions, qs, "the SAME pending questions are re-presented");
+  assert.strictEqual(clarifyTurns, turnsBefore, "no model turn was spent re-asking");
+  assert.strictEqual(e2.answer(id, { q1: "Postgres" }), true);
+  await waitFor(() => latest.s.artifacts.spec);
+  assert.ok(latest.s.artifacts.spec, "run continued after the answer");
+  e2.cancel(id);
+  fs.rmSync(runDir(id), { recursive: true, force: true });
+});
+
+await test("#16: a security fix that breaks verification fails the run (no unverified code ships)", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const finding = { verdict: "findings", findings: [{ id: "s1", source: "scanner", severity: "critical", title: "secret in .env", evidence: "x", file: ".env:1", fix: "remove", fixable_in_scope: true }] };
+  const scripts = {
+    build: [happyBuild, async ({ tools }) => { await callTool(tools, "submit_impl_delta", { ...IMPL_DELTA, notes: "security fix" }); }],
+    verify: [happyVerify, async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(false)); }],
+    security: [async ({ tools }) => { await callTool(tools, "submit_security", finding); }],
+  };
+  const { state } = await runEngine({ scripts, security: "scan", maxFixRounds: 0 });
+  assert.strictEqual(state.status, "failed", state.error);
+  assert.match(state.error ?? "", /verification failed after the security fix round/);
+  assert.notStrictEqual(state.artifacts.security?.verdict, "pass");
+});
+
+await test("E-6: the scanner suite is async and abortable (never blocks the event loop)", async () => {
+  const empty = fs.mkdtempSync("/tmp/nano-scan-");
+  let ticks = 0;
+  const timer = setInterval(() => (ticks += 1), 5);
+  const ac = new AbortController();
+  const p = runScannerSuite({ projectPath: empty }, ac.signal);
+  setTimeout(() => ac.abort(), 30);
+  const res = await p;
+  clearInterval(timer);
+  assert.ok(ticks >= 3, `event loop kept turning during the scan (ticks=${ticks})`);
+  assert.ok(Array.isArray(res.scanners) && res.scanners.length >= 1, "always returns a structured result");
+  const pre = new AbortController();
+  pre.abort();
+  const res2 = await runScannerSuite({ projectPath: empty }, pre.signal);
+  assert.match(res2.scanners[0].evidence, /aborted/);
+  cleanup(empty);
 });
 
 // --- summary ---------------------------------------------------------------------------

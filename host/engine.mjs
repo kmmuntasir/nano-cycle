@@ -10,7 +10,7 @@
 // verdict reconciliation, severity gating, git. Skills own method.
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
@@ -106,10 +106,19 @@ function loadSourceDocs(run) {
   if (!Array.isArray(docs) || docs.length === 0) return null;
   const parts = [];
   for (const rel of docs.slice(0, 5)) {
-    const abs = path.resolve(run.projectPath, String(rel));
-    if (!abs.startsWith(path.resolve(run.projectPath))) continue;
+    const abs = path.resolve(workDir(run), String(rel));
+    if (!isInside(workDir(run), abs)) continue;
     try {
-      let content = fs.readFileSync(abs, "utf8");
+      let content;
+      try {
+        content = fs.readFileSync(abs, "utf8");
+      } catch (e) {
+        // READ-ONLY fallback: the requirement doc may be uncommitted in the
+        // owner's checkout (so absent from the worktree's pinned base).
+        const alt = path.resolve(run.projectPath, String(rel));
+        if (workDir(run) === run.projectPath || !isInside(run.projectPath, alt)) throw e;
+        content = fs.readFileSync(alt, "utf8");
+      }
       if (content.length > 30_000) content = content.slice(0, 30_000) + "\n(truncated)";
       parts.push(`--- ${rel} ---\n${content}`);
     } catch {
@@ -140,6 +149,133 @@ function promiseExternals() {
   return { promise: box.promise, resolve: box.resolve, box };
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// E-7: files the leftover sweep must NEVER commit on the agent's behalf. A
+// template (.env.example) is fine; a real env file / private key / credential
+// blob that the project forgot to .gitignore is not.
+const SECRET_FILE_RE =
+  /(^|\/)(\.env(\.[^/]*)?|\.envrc|\.netrc|\.npmrc|\.pypirc|\.pgpass|id_(rsa|dsa|ecdsa|ed25519)|[^/]*\.(pem|key|p12|pfx|jks|keystore|ppk|kdbx)|credentials(\.[a-z]+)?|secrets?\.(json|ya?ml|toml|env)|[^/]*service[-_]?account[^/]*\.json)$/i;
+const SECRET_TEMPLATE_RE = /\.(example|sample|template|dist|defaults?)$/i;
+const LEFTOVER_MAX_BYTES = 5 * 1024 * 1024;
+export function looksLikeSecretFile(relPath) {
+  const p = String(relPath).replace(/\\/g, "/");
+  return SECRET_FILE_RE.test(p) && !SECRET_TEMPLATE_RE.test(p);
+}
+
+// The directory a run's agents, checks, scanners, commits and CI pushes use as
+// cwd: its git worktree when it has one, else the project path (git-off runs,
+// clarify-only runs). `run.projectPath` stays the registry/queue/lock identity.
+export function workDir(run) {
+  return run.git?.worktree || run.projectPath;
+}
+
+// A path the agent reported, resolved inside the run's work dir. An absolute
+// path under the project checkout (e.g. copied from a spec written before the
+// worktree existed) is re-rooted into the worktree, never into the owner's tree.
+function toWork(run, p) {
+  const wd = workDir(run);
+  const raw = String(p);
+  if (wd !== run.projectPath && path.isAbsolute(raw) && !isInside(wd, raw) && isInside(run.projectPath, raw)) {
+    return path.resolve(wd, path.relative(run.projectPath, raw));
+  }
+  return path.resolve(wd, raw);
+}
+
+// Project conventions (AGENTS.md, rules) come from the worktree; when it has
+// none (they exist only uncommitted in the owner's checkout) fall back to the
+// checkout — read-only, never written.
+function stepContext(run, stepId, onFile) {
+  const ctx = loadStepContext(workDir(run), stepId, onFile);
+  if (ctx || workDir(run) === run.projectPath) return ctx;
+  return loadStepContext(run.projectPath, stepId, onFile);
+}
+
+// Merges into one base branch are serialised per project (the tree lock keeps
+// runs sequential today; this keeps the merge step safe when that relaxes).
+const mergeChains = new Map();
+function withMergeLock(key, fn) {
+  const prev = mergeChains.get(key) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  const tail = next.catch(() => {});
+  mergeChains.set(key, tail);
+  tail.then(() => {
+    if (mergeChains.get(key) === tail) mergeChains.delete(key);
+  });
+  return next;
+}
+
+// A tool call arriving from a RETIRED execute() epoch (the run was hard-cancelled
+// or resumed under a newer one) must not write run state — the old loop's
+// closures outlive the cancel for as long as a wedged provider stream does (E-1).
+const isInert = (run) => run.superseded === true || run.finalized === true;
+const INERT_REPLY = {
+  content: [{ type: "text", text: "This run was cancelled or restarted — your tool call was ignored. Stop now and end your turn." }],
+  details: {},
+};
+
+// path is the root or beneath it — a plain startsWith lets "../app-secrets" through
+function isInside(root, abs) {
+  const rel = path.relative(path.resolve(root), path.resolve(abs));
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+// E-6: async + abortable. The scanner suite used to run under spawnSync for
+// up to 5 minutes, freezing the whole server (every run, every websocket).
+// The child gets its own process group so abort/timeout kills the scanners
+// it spawned (gitleaks, npm audit, ...) and not just the node wrapper.
+export function runScannerSuite(run, signal) {
+  return new Promise((resolve) => {
+    const unparseable = (why) => ({ scanners: [{ id: "suite", status: "skip", evidence: `scanner suite ${why}` }] });
+    if (signal?.aborted) return resolve(unparseable("aborted (run cancelled)"));
+    let out = "";
+    let finished = false;
+    const child = spawn(process.execPath, [SCANNER_SCRIPT, workDir(run)], {
+      stdio: ["ignore", "pipe", "ignore"],
+      detached: true,
+    });
+    const killGroup = () => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* gone */
+        }
+      }
+    };
+    const done = (value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = () => {
+      killGroup();
+      done(unparseable("aborted (run cancelled)"));
+    };
+    const timer = setTimeout(() => {
+      killGroup();
+      done(unparseable("timed out after 300s"));
+    }, 300_000);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (d) => {
+      if (out.length < 32 * 1024 * 1024) out += d;
+    });
+    child.on("error", (e) => done(unparseable(`failed to start: ${e.message}`)));
+    child.on("close", (code) => {
+      try {
+        done(JSON.parse(out));
+      } catch {
+        done(unparseable(`unparseable (exit ${code})`));
+      }
+    });
+  });
+}
+
 // ============================================================================
 
 export function createEngine({ modelRuntime, emit, webTools, adapters }) {
@@ -149,26 +285,49 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
   const runNodeImpl = adapters?.runNode ?? runNode;
   const mechanicalImpl = adapters?.runMechanicalChecks ?? runMechanicalChecks;
   const scannerImpl = adapters?.runScannerSuite ?? runScannerSuite;
+  const killImpl = adapters?.killRunProcesses ?? killRunProcesses;
+  const cancelGraceMs = adapters?.cancelGraceMs ?? 8000; // how long cancel waits for the cancelled loop to unwind before touching git
 
   const stepState = (run, id) => run.state.steps.find((s) => s.id === id);
   const sessionsDir = (run) => path.join(runDir(run.id), "sessions");
 
+  // Tree lock (Q-H6 / E-2). A run is ACTIVE until its loop settled AND any
+  // cancel-time git cleanup finished; only tree-holding runs exclude each other.
+  // Every check-and-acquire below is synchronous (no await between the check and
+  // runs.set / holdsTree), so two concurrent starts cannot both win.
+  const isActive = (r) => !r.done.promiseSettled || r.cleaning === true;
+  const lockHolder = (projectPath, except) => {
+    for (const r of runs.values()) {
+      if (r !== except && r.projectPath === projectPath && r.holdsTree && isActive(r)) return r;
+    }
+    return null;
+  };
+
   function beginStep(run, id) {
+    // A cancel that landed while this loop was between awaits must not
+    // resurrect a step (the cancelled loop used to run a whole verifier turn).
+    if (run.cancelRequested) throw new Error("cancelled");
     const s = stepState(run, id);
     if (!s) return null;
     s.status = "running";
-    if (!s.startedAt) s.startedAt = Date.now();
+    s.runningSince = Date.now();
+    if (!s.startedAt) s.startedAt = s.runningSince;
     run.current.set(id, new AbortController());
     emit.state(run);
     return s;
   }
 
   function endStep(run, id, patch = {}) {
+    if (run.finalized) return; // a hard cancel already settled every step
     const s = stepState(run, id);
     if (!s) return;
     s.status = patch.status ?? "done";
     s.endedAt = Date.now();
-    if (s.startedAt) s.durationMs = (s.durationMs ?? 0) + Math.max(0, s.endedAt - s.startedAt);
+    // Time accrues per running SEGMENT — summing (end - firstStart) on every
+    // round double-counted (F01 steps summed to 576m against 193m wall).
+    const since = s.runningSince ?? null;
+    if (since) s.durationMs = (s.durationMs ?? 0) + Math.max(0, s.endedAt - since);
+    s.runningSince = null;
     Object.assign(s, patch);
     run.current.delete(id);
     emit.state(run);
@@ -187,31 +346,46 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     }
   };
 
-  // A gate decision awaited from INSIDE a milestone tool (submit_plan's
-  // approval block, security override). Resolved by the gate API or by cancel
-  // (finalizeCancel resolves pending gates — the v1 leak, fixed).
-  function awaitGateDecision(run, gatePayload) {
+  // The ONE gate implementation (plan, divergence, security override, resumed
+  // plan, clarify answers). Order matters (E-3 / Q-C3): state + status are set
+  // and the resolver is ASSIGNED before emit.state fires, because the ticket
+  // queue's watcher reacts to that very emit by calling engine.gate(id,"cancel")
+  // to park the run — with no resolver yet that cancel was a silent no-op and
+  // the parked run held the tree forever. Resolved by the gate/answer API or by
+  // cancel (finalizeCancel resolves pending gates — the v1 leak, fixed).
+  function openGate(run, gatePayload, { status = "awaiting-gate", slot = "gateResolver" } = {}) {
     run.state.gate = gatePayload;
-    run.state.status = "awaiting-gate";
+    run.state.status = status;
     gateOpen(run);
+    const decision = new Promise((resolve) => {
+      run[slot] = resolve;
+    });
     emit.state(run);
-    return new Promise((resolve) => {
-      run.gateResolver = resolve;
-    }).finally(() => {
-      run.gateResolver = null;
+    return decision.finally(() => {
+      run[slot] = null;
       gateClose(run);
       run.state.gate = null;
-      if (!run.cancelRequested) run.state.status = "running";
+      // hard cancel already wrote its terminal status; a gate-cancel (queue park)
+      // flips back to running until the unwinding loop settles — never leave a
+      // gate-less "awaiting-gate" behind for observers to trip over.
+      if (!run.finalized) run.state.status = "running";
       emit.state(run);
     });
   }
+  const awaitGateDecision = (run, gatePayload) => openGate(run, gatePayload);
 
   // Hard cancel (v1 shape, adapted): abort in-flight sessions, RESOLVE pending
-  // gates/answers with "cancel" so blocked tools and waiters settle.
+  // gates/answers with "cancel" so blocked tools and waiters settle. The
+  // settle OBSERVER is fired by cancel() once the git cleanup finished (E-2).
   function finalizeCancel(run, reason = "cancelled by owner") {
     if (run.finalized) return false;
     run.finalized = true;
     run.cancelRequested = true;
+    try {
+      run.lifetime?.abort();
+    } catch {
+      /* ignore */
+    }
     for (const c of run.current.values()) {
       try {
         c.abort();
@@ -229,15 +403,19 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       run.answersResolver = null;
       r("cancel");
     }
-    try {
-      run.buildHandle?.abort();
-    } catch {
-      /* ignore */
+    for (const h of [run.buildHandle, run.verifyHandle, run.securityHandle]) {
+      try {
+        h?.abort();
+      } catch {
+        /* ignore */
+      }
     }
     const now = Date.now();
     for (const s of run.state.steps) {
       if (s.status === "running") {
-        if (s.startedAt) s.durationMs = (s.durationMs ?? 0) + Math.max(0, now - s.startedAt);
+        const since = s.runningSince ?? null;
+        if (since) s.durationMs = (s.durationMs ?? 0) + Math.max(0, now - since);
+        s.runningSince = null;
         s.status = "cancelled";
         s.endedAt = now;
         s.error = reason;
@@ -261,65 +439,214 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     }
     run.done.box.promiseSettled = true;
     emit.state(run);
-    // Out-of-band cancel never flows back through execute()'s settle() (its
-    // catch returns early once finalized) — fire the observer HERE or queue
-    // tickets strand at 'running' when the owner hard-cancels their run.
-    try {
-      run.onSettled?.("cancelled");
-    } catch {
-      /* observer errors never break the run */
-    }
     return true;
+  }
+
+  function closeHandles(run) {
+    for (const key of ["buildHandle", "verifyHandle", "securityHandle"]) {
+      try {
+        run[key]?.close();
+      } catch {
+        /* ignore */
+      }
+      run[key] = null;
+    }
   }
 
   // --- git (v1, milestone-granular) --------------------------------------------
 
-  function commitMilestone(run, subject, files) {
-    if (!run.git?.enabled) return;
-    const abs = (files ?? [])
-      .map((f) => path.resolve(run.projectPath, f))
-      .filter((a) => a.startsWith(path.resolve(run.projectPath)));
-    if (abs.length === 0) return;
-    (async () => {
-      try {
-        for (const a of abs) await git.stagePath(run.projectPath, path.relative(run.projectPath, a));
-        if (!(await git.hasStaged(run.projectPath))) return;
-        const hash = await git.commit(run.projectPath, subject);
-        run.state.git.commits.push({ subject, hash, files: abs });
-        emit.event(run.id, "build", {
-          t: "notice",
-          s: `git: committed ${abs.length} file(s) (${hash.slice(0, 7)}) on ${run.git.runBranch} — "${subject}"`,
-        });
-        emit.state(run);
-      } catch (e) {
-        emit.event(run.id, "build", { t: "notice", s: `git commit failed: ${e.message}` });
+  // One git worktree per run (REWRITE-ANALYSIS §2.4 / §6.7): the run branch is
+  // cut from a PINNED base sha into <runDir>/wt and every agent session, bash
+  // tool, check, scan, commit and CI push uses it as cwd (workDir(run)). The
+  // owner's checkout is never switched, never has to be clean, and is touched
+  // only by the final merge. Only TREE-HOLDING runs call this (Q-C2: clarify-
+  // only runs stay git-free).
+  const worktreePath = (run) => path.join(runDir(run.id), "wt");
+  const gitSet = (run, patch) => {
+    Object.assign(run.git, patch);
+    if (run.state.git && run.state.git !== run.git) Object.assign(run.state.git, patch);
+  };
+
+  // Share the owner's gitignored node_modules with the worktree (see
+  // git.linkNodeModules for the limitation: nothing else gitignored is copied).
+  async function linkDependencies(run) {
+    const g = run.git;
+    try {
+      const linked = git.linkNodeModules(run.projectPath, g.worktree);
+      if (linked.length) await git.ensureExcluded(g.worktree, linked);
+      gitSet(run, { linkedModules: linked });
+      if (linked.length) {
+        emit.event(run.id, "_run", { t: "notice", s: `git: linked ${linked.join(", ")} from the project checkout into the run worktree (not committed)` });
       }
-    })();
+    } catch (e) {
+      emit.event(run.id, "_run", { t: "notice", s: `git: could not link node_modules into the worktree (${String(e?.message ?? e).slice(0, 160)}) — install dependencies there if a check needs them` });
+    }
+  }
+
+  async function setupGit(run) {
+    if (!(await git.isRepo(run.projectPath))) {
+      throw new Error("git is enabled but the project folder is not a git repository");
+    }
+    const baseBranch = await git.currentBranch(run.projectPath);
+    if (baseBranch === "HEAD") {
+      throw new Error("git is enabled but the project checkout is on a detached HEAD — check out the base branch first");
+    }
+    const baseSha = await git.revParse(run.projectPath, baseBranch);
+    if (!baseSha) throw new Error(`git is enabled but branch ${baseBranch} has no commits yet — make an initial commit first`);
+    const wt = worktreePath(run);
+    await git.worktreePrune(run.projectPath);
+    fs.rmSync(wt, { recursive: true, force: true }); // a stale dir from an aborted start of this very id
+    const info = { enabled: true, baseBranch, runBranch: `nano-cycle/${run.id}`, baseSha, worktree: wt, linkedModules: [] };
+    await git.worktreeAdd(run.projectPath, wt, info.runBranch, baseSha);
+    run.git = info;
+    run.state.git = { ...info, commits: [], merged: false, mergeError: null };
+    await linkDependencies(run);
+    emit.event(run.id, "_run", {
+      t: "notice",
+      s: `git: worktree ${wt} on branch ${info.runBranch} created from ${baseBranch}@${baseSha.slice(0, 7)} — your checkout is not touched; milestone commits, ff-merge on accepted verdict`,
+    });
+  }
+
+  // Resume / restart: reuse the worktree if it is still registered, re-add it on
+  // the existing run branch if the directory was lost, and migrate a pre-worktree
+  // run (branch checked out in the owner's checkout) onto a worktree.
+  async function ensureWorktree(run) {
+    const g = run.git;
+    const wt = g.worktree || worktreePath(run);
+    await git.worktreePrune(run.projectPath);
+    if (g.worktree && (await git.isWorktree(run.projectPath, wt))) {
+      await linkDependencies(run);
+      return;
+    }
+    if (!(await git.branchExists(run.projectPath, g.runBranch))) {
+      throw new Error(`git: run branch ${g.runBranch} no longer exists and its worktree is gone — the run cannot be resumed`);
+    }
+    const holder = await git.branchCheckoutPath(run.projectPath, g.runBranch);
+    if (holder) {
+      // pre-worktree run: the branch is still checked out in the owner's checkout
+      try {
+        if (path.resolve(holder) === path.resolve(run.projectPath)) await git.checkout(run.projectPath, g.baseBranch);
+        else throw new Error(`checked out at ${holder}`);
+      } catch (e) {
+        throw new Error(`git: run branch ${g.runBranch} is still checked out (${String(e?.message ?? e).split("\n")[0]}) — switch that checkout back to ${g.baseBranch} and resume again`);
+      }
+    }
+    fs.rmSync(wt, { recursive: true, force: true });
+    await git.worktreeAddExisting(run.projectPath, wt, g.runBranch);
+    const baseSha = g.baseSha || (await git.git(run.projectPath, ["merge-base", g.baseBranch, g.runBranch]).then((x) => x.trim()).catch(() => null));
+    gitSet(run, { worktree: wt, ...(baseSha ? { baseSha } : {}) });
+    await linkDependencies(run);
+    emit.event(run.id, "_run", { t: "notice", s: `git: worktree re-attached at ${wt} on the existing branch ${g.runBranch}` });
+  }
+
+  // Drop the run's worktree (and the node_modules symlinks inside it first). The
+  // branch is NOT touched here.
+  async function removeRunWorktree(run) {
+    const g = run.git;
+    if (!g?.worktree) return;
+    git.unlinkNodeModules(g.worktree, g.linkedModules);
+    await git.worktreeRemove(run.projectPath, g.worktree);
+  }
+
+  // Awaited (E-8): remote CI / the verifier must observe the milestone commit,
+  // not race it. Declared files only, each staged individually so one ignored
+  // path cannot abort the rest; secret-looking files are never committed.
+  async function commitMilestone(run, subject, files) {
+    if (!run.git?.enabled || run.cancelRequested) return;
+    const rels = [];
+    for (const f of files ?? []) {
+      const abs = toWork(run, f);
+      if (isInside(workDir(run), abs)) rels.push(path.relative(workDir(run), abs));
+    }
+    if (rels.length === 0) return;
+    try {
+      const staged = [];
+      const skipped = [];
+      for (const rel of rels) {
+        if (looksLikeSecretFile(rel)) {
+          skipped.push(`${rel} (secret-looking — never committed by the driver)`);
+          continue;
+        }
+        try {
+          await git.stagePath(workDir(run), rel);
+          staged.push(rel);
+        } catch (e) {
+          skipped.push(`${rel} (${String(e?.message ?? e).split("\n")[0].slice(0, 100)})`);
+        }
+      }
+      if (skipped.length) {
+        emit.event(run.id, "build", { t: "notice", s: `git: milestone commit skipped ${skipped.length} declared file(s): ${skipped.join("; ")}` });
+      }
+      if (staged.length === 0 || !(await git.hasStaged(workDir(run)))) return;
+      const hash = await git.commit(workDir(run), subject);
+      run.state.git.commits.push({ subject, hash, files: staged.map((r) => path.resolve(workDir(run), r)) });
+      emit.event(run.id, "build", {
+        t: "notice",
+        s: `git: committed ${staged.length} file(s) (${hash.slice(0, 7)}) on ${run.git.runBranch} — "${subject}"`,
+      });
+      emit.state(run);
+    } catch (e) {
+      emit.event(run.id, "build", { t: "notice", s: `git commit failed: ${e.message}` });
+    }
   }
 
   // Post-run leftover hook: the agent sometimes edits files it never declares
-  // for a milestone commit (e.g. its own backlog entry). That dirt would ride
-  // checkout+merge onto the base branch and block the NEXT run's assertClean —
-  // stalling a ticket queue with nothing running. Sweep it into a labelled
-  // leftover commit on the run branch FIRST, loudly (file list in the notice).
-  // Runs before every base checkout, accepted or not (a kept branch's dirt
-  // would leak onto base just the same).
+  // for a milestone commit (e.g. its own backlog entry). That dirt would be lost
+  // when the worktree is removed after the merge (or sit unreviewed in a kept
+  // one). Sweep it into a labelled leftover commit on the run branch FIRST,
+  // loudly (file list in the notice). Runs before every merge/keep of a
+  // NON-cancelled run, accepted or not.
+  //
+  // E-7: no blind `git add -A`. Only paths git reports as changed (ignore rules
+  // honoured), minus secret-looking files and oversized untracked blobs; and
+  // only while the run branch is actually checked out.
   async function commitLeftovers(run) {
     const g = run.git;
-    if (!g?.enabled) return;
-    let porcelain = "";
+    if (!g?.enabled || run.cancelRequested) return;
     try {
-      porcelain = await git.statusPorcelain(run.projectPath);
+      if ((await git.currentBranch(workDir(run))) !== g.runBranch) return; // never commit onto base
     } catch {
       return;
     }
-    if (!porcelain) return;
+    let entries = [];
     try {
-      await git.stageAll(run.projectPath);
-      if (!(await git.hasStaged(run.projectPath))) return;
-      const hash = await git.commit(run.projectPath, `chore: leftover working-tree changes (${run.id})`);
+      entries = await git.statusEntries(workDir(run));
+    } catch {
+      return;
+    }
+    if (entries.length === 0) return;
+    const stage = [];
+    const skipped = [];
+    for (const e of entries) {
+      if (looksLikeSecretFile(e.path)) {
+        skipped.push(`${e.path} (secret-looking)`);
+        continue;
+      }
+      if (e.x === "?" || e.y === "?") {
+        try {
+          if (fs.statSync(path.join(workDir(run), e.path)).size > LEFTOVER_MAX_BYTES) {
+            skipped.push(`${e.path} (>5MB untracked)`);
+            continue;
+          }
+        } catch {
+          /* vanished mid-scan */
+        }
+      }
+      stage.push(e.path);
+      if (e.orig) stage.push(e.orig);
+    }
+    try {
+      if (stage.length) await git.stagePaths(workDir(run), stage);
+      if (skipped.length) {
+        emit.event(run.id, "_run", {
+          t: "notice",
+          s: `git: left ${skipped.length} file(s) uncommitted on purpose: ${skipped.slice(0, 8).join("; ")} — review them in the run worktree (they are not on the run branch)`,
+        });
+      }
+      if (!(await git.hasStaged(workDir(run)))) return;
+      const hash = await git.commit(workDir(run), `chore: leftover working-tree changes (${run.id})`);
       run.state.git.commits.push({ subject: "leftover working-tree changes", hash, files: [] });
-      const preview = porcelain.split("\n").slice(0, 8).join("\n");
+      const preview = stage.slice(0, 8).join("\n");
       emit.event(run.id, "_run", {
         t: "notice",
         s: `git: committed leftover working-tree changes (${hash.slice(0, 7)}) on ${g.runBranch} — the agent left these uncommitted:\n${preview}`,
@@ -328,51 +655,140 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     } catch (e) {
       emit.event(run.id, "_run", {
         t: "notice",
-        s: `git: leftover commit failed (${String(e?.message ?? e).slice(0, 160)}) — the next run may block on a dirty tree`,
+        s: `git: leftover commit failed (${String(e?.message ?? e).slice(0, 160)}) — those changes stay uncommitted in the run worktree`,
       });
     }
   }
 
-  async function integrate(run, accepted) {
+  // Cancel path (E-7): never commit on the owner's behalf after a cancel. The
+  // tree must still be clean for the next run, so dirt is parked in a labelled
+  // stash that resume restores (restoreParkedWork).
+  const stashLabel = (run) => `nano-cycle cancel ${run.id}`;
+  async function parkDirtyTree(run) {
     const g = run.git;
     if (!g?.enabled) return;
     try {
-      run.buildHandle?.close();
-      run.buildHandle = null;
-    } catch {
-      /* ignore */
-    }
-    await commitLeftovers(run);
-    try {
-      await git.checkout(run.projectPath, g.baseBranch);
+      if ((await git.currentBranch(workDir(run))) !== g.runBranch) return;
+      if (!(await git.statusPorcelain(workDir(run)))) return;
+      if (await git.stashPush(workDir(run), stashLabel(run))) {
+        emit.event(run.id, "_run", {
+          t: "notice",
+          s: `git: parked uncommitted changes in stash "${stashLabel(run)}" (nothing was committed after the cancel); resume restores them`,
+        });
+      }
     } catch (e) {
-      emit.event(run.id, "_run", { t: "notice", s: `git: checkout ${g.baseBranch} failed: ${e.message}` });
-      return;
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `git: could not park uncommitted changes (${String(e?.message ?? e).slice(0, 160)}) — the tree may be dirty`,
+      });
     }
+  }
+  async function restoreParkedWork(run) {
+    try {
+      const ref = await git.stashFind(workDir(run), stashLabel(run));
+      if (!ref) return;
+      await git.stashPop(workDir(run), ref);
+      emit.event(run.id, "_run", { t: "notice", s: `git: restored the uncommitted changes parked at cancel (${ref})` });
+    } catch (e) {
+      emit.event(run.id, "_run", {
+        t: "notice",
+        s: `git: could not restore the parked changes (${String(e?.message ?? e).slice(0, 160)}) — they stay in stash "${stashLabel(run)}"`,
+      });
+    }
+  }
+
+  // Returns { ok, error? } — ok means the run's work LANDED (or git is off).
+  // The caller decides the terminal status (#21: never "completed" before this).
+  //
+  // Everything up to the merge happens in the run's worktree; the owner's
+  // checkout is touched only by the ff-merge itself, under a per-project merge
+  // lock. A run that does not land KEEPS its branch AND worktree (resume needs
+  // both); a landed run loses both.
+  async function integrate(run, accepted) {
+    closeHandles(run); // sessions end with the run (pi sessions were leaked)
+    const g = run.git;
+    if (!g?.enabled) return { ok: true };
+    if (!run.holdsTree) return { ok: true }; // clarify-only runs never own the checkout (Q-C2)
+    if (run.cancelRequested) await parkDirtyTree(run);
+    else await commitLeftovers(run);
     if (!accepted) {
       run.state.git.mergeError = "run not accepted — branch kept unmerged";
       emit.event(run.id, "_run", {
         t: "notice",
-        s: `git: run not accepted — branch ${g.runBranch} kept with its commits for inspection`,
+        s: `git: run not accepted — branch ${g.runBranch} kept with its commits${g.worktree ? ` (worktree ${g.worktree})` : ""} for inspection/resume`,
       });
-      return;
+      return { ok: false, error: run.state.git.mergeError };
     }
+    return withMergeLock(run.projectPath, () => landBranch(run));
+  }
+
+  async function landBranch(run) {
+    const g = run.git;
+    const repo = run.projectPath;
+    const wd = workDir(run);
+    const fail = (why) => {
+      run.state.git.mergeError = why;
+      emit.event(run.id, "_run", { t: "notice", s: `git: ff-merge failed (${why}) — branch ${g.runBranch}${wd !== repo ? " and its worktree" : ""} kept` });
+      return { ok: false, error: `git: ff-merge of ${g.runBranch} into ${g.baseBranch} failed (${why}) — branch kept` };
+    };
     try {
-      await git.ffMerge(run.projectPath, g.runBranch);
-      await git.deleteBranch(run.projectPath, g.runBranch);
-      run.state.git.merged = true;
-      run.state.git.mergeError = null; // a fix-resumed run carries the earlier failure's error — success clears it
-      emit.event(run.id, "_run", {
-        t: "notice",
-        s: `git: ff-merged ${g.runBranch} into ${g.baseBranch} and deleted the branch — ready to push`,
-      });
+      const baseNow = await git.revParse(repo, g.baseBranch);
+      if (!baseNow) return fail(`base branch ${g.baseBranch} no longer exists`);
+      if (!(await git.isAncestor(repo, baseNow, g.runBranch))) {
+        // base moved while the run worked: rebase the run branch onto it (in
+        // the worktree — the owner's checkout is not involved)
+        emit.event(run.id, "_run", { t: "notice", s: `git: ${g.baseBranch} moved since ${String(g.baseSha ?? "").slice(0, 7) || "the run started"} — rebasing ${g.runBranch} onto it` });
+        try {
+          await git.rebaseOnto(wd, g.baseBranch);
+        } catch (e) {
+          return fail(`rebase onto the moved ${g.baseBranch} failed: ${String(e?.message ?? e).split("\n")[0]}`);
+        }
+      }
+      const tip = await git.headSha(wd);
+      const holder = await git.branchCheckoutPath(repo, g.baseBranch);
+      if (holder) {
+        // base is checked out (normally the owner's checkout): git itself refuses
+        // when the merge would overwrite their uncommitted work — we never force it
+        await git.ffMerge(holder, g.runBranch);
+      } else {
+        await git.updateBranchRef(repo, g.baseBranch, tip, baseNow);
+      }
     } catch (e) {
-      run.state.git.mergeError = String(e?.message ?? e);
+      return fail(String(e?.message ?? e));
+    }
+    run.state.git.merged = true;
+    run.state.git.mergeError = null; // a fix-resumed run carries the earlier failure's error — success clears it
+    // The worktree is disposable ONLY when nothing worth keeping is left in it:
+    // files the leftover sweep refused to commit (secret-looking, >5MB) would be
+    // destroyed with it. Gitignored files (build output, caches) are discarded.
+    let kept = [];
+    try {
+      kept = (await git.statusEntries(wd)).map((e) => e.path);
+    } catch {
+      /* unreadable worktree — treat as clean */
+    }
+    if (kept.length) {
+      run.state.git.worktreeKept = true;
       emit.event(run.id, "_run", {
         t: "notice",
-        s: `git: ff-merge failed (${run.state.git.mergeError}) — branch ${g.runBranch} kept`,
+        s: `git: ff-merged ${g.runBranch} into ${g.baseBranch} — run worktree ${wd} KEPT because it holds ${kept.length} uncommitted file(s) the driver would not commit (${kept.slice(0, 5).join(", ")}); delete the run to clean it up`,
       });
+      return { ok: true };
     }
+    let cleaned = "";
+    try {
+      await removeRunWorktree(run);
+      gitSet(run, { worktree: null, linkedModules: [] });
+      run.state.git.worktreeRemoved = true;
+      await git.deleteBranch(repo, g.runBranch, { force: true }); // landed (ancestry verified above)
+    } catch (e) {
+      cleaned = ` (cleanup incomplete: ${String(e?.message ?? e).split("\n")[0].slice(0, 120)})`;
+    }
+    emit.event(run.id, "_run", {
+      t: "notice",
+      s: `git: ff-merged ${g.runBranch} into ${g.baseBranch}, removed the run worktree and deleted the branch — ready to push${cleaned}`,
+    });
+    return { ok: true };
   }
 
   // --- Step 1: clarify (v1, lifted with steps-state instead of nodes) ----------
@@ -396,20 +812,14 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         t: "notice",
         s: `resume: re-presenting ${pending.questions.length} unanswered question(s) from round ${round} — no model turn needed`,
       });
-      run.state.gate = { type: "answers", nodeId: "clarify", round: pending.round, questions: pending.questions };
-      run.state.status = "awaiting-answers";
-      gateOpen(run);
-      emit.state(run);
-      const answers = await new Promise((resolve) => {
-        run.answersResolver = resolve;
-      });
-      run.answersResolver = null;
-      gateClose(run);
-      if (answers === "cancel") throw new Error("cancelled at answers gate");
+      const answers = await openGate(
+        run,
+        { type: "answers", nodeId: "clarify", round: pending.round, questions: pending.questions },
+        { status: "awaiting-answers", slot: "answersResolver" },
+      );
+      if (answers === "cancel" || run.cancelRequested) throw new Error("cancelled at answers gate");
       rounds.push({ questions: pending.questions, answers });
       run.state.qa = [...(run.state.qa ?? []), { round, at: Date.now(), questions: pending.questions, answers }];
-      run.state.gate = null;
-      run.state.status = "running";
       emit.state(run);
     }
     while (true) {
@@ -419,7 +829,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         qna: r.questions.map((q) => ({ question: q.question, answer: r.answers[q.id] ?? "(no answer)" })),
       }));
       const mode = run.options.requireQuestions && rounds.length === 0 ? "questions-only" : "both";
-      let prompt = clarifyPrompt(run.task, history, run.projectPath);
+      let prompt = clarifyPrompt(run.task, history, workDir(run));
       if (waveIds) {
         const specs = run.state.artifacts.specs ?? {};
         const locked = waveIds.filter((id) => specs[id]);
@@ -466,24 +876,18 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
       emptyRounds = 0;
 
-      run.state.gate = { type: "answers", nodeId: "clarify", round, questions: qs };
-      run.state.status = "awaiting-answers";
-      gateOpen(run);
-      emit.state(run);
       emit.event(run.id, "clarify", {
         t: "notice",
         s: `asking ${qs.length} question(s): ${qs.map((q) => q.id).join(", ")}`,
       });
-      const answers = await new Promise((resolve) => {
-        run.answersResolver = resolve;
-      });
-      run.answersResolver = null;
-      gateClose(run);
-      if (answers === "cancel") throw new Error("cancelled at answers gate");
+      const answers = await openGate(
+        run,
+        { type: "answers", nodeId: "clarify", round, questions: qs },
+        { status: "awaiting-answers", slot: "answersResolver" },
+      );
+      if (answers === "cancel" || run.cancelRequested) throw new Error("cancelled at answers gate");
       rounds.push({ questions: qs, answers });
       run.state.qa = [...(run.state.qa ?? []), { round, at: Date.now(), questions: qs, answers }];
-      run.state.gate = null;
-      run.state.status = "running";
       emit.state(run);
     }
   }
@@ -510,6 +914,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         let digest = "";
         const usage = { input: 0, output: 0, cacheRead: 0 };
         await runNodeImpl({
+          runId: run.id,
           nodeId: "clarify",
           stepId: "clarify",
           tools: ["read", "grep", "find", "ls"],
@@ -520,7 +925,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             "You are a read-only ANALYST. Investigate the project and answer with a concise, " +
             "evidence-backed digest citing file paths. You have no write tools.",
           prompt: String(params.question),
-          cwd: run.projectPath,
+          cwd: workDir(run),
           modelSpec: run.models.clarify ?? "auto",
           modelRuntime,
           signal: run.current.get("clarify")?.signal,
@@ -552,6 +957,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           description: "Ask the owner up to 5 high-leverage clarification questions.",
           schema: ARTIFACT_SCHEMAS.questions,
           onCall: (p) => {
+            if (isInert(run)) return;
             store.result = { type: "questions", questions: p.questions ?? [] };
             ctrl.abort(); // hard pause — the owner answers in the GUI
           },
@@ -578,6 +984,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
               })
             : specSchema,
           execute: async (_id, p) => {
+            if (isInert(run)) return INERT_REPLY;
             if (waveIds) {
               const tid = String(p?.ticket_id ?? "").trim();
               if (!waveIds.includes(tid)) {
@@ -618,6 +1025,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     for (let attempt = 0; attempt <= 1; attempt++) {
       try {
         await runNodeImpl({
+          runId: run.id,
           nodeId: "clarify",
           stepId: "clarify",
           tools: available,
@@ -633,7 +1041,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
                 (mode === "questions-only"
                   ? "\n\nIMPORTANT: respond ONLY by calling the ask_questions tool — finalize_spec is unavailable this round (the owner requires at least one question round). Do not write your answer as text."
                   : "\n\nIMPORTANT: respond ONLY by calling the ask_questions tool or the finalize_spec tool — do not write your answer as text."),
-          cwd: run.projectPath,
+          cwd: workDir(run),
           modelSpec: run.models.clarify ?? "auto",
           modelRuntime,
           signal: ctrl.signal,
@@ -694,17 +1102,23 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     return hits.size ? [...hits].join("+") : null;
   }
 
-  // A milestone tool's hard stop aborts the in-flight prompt() — the SDK
-  // rejects the pending promise with an AbortError. That is SUCCESS only when
-  // the milestone tool explicitly marked the stop. Never suppress a provider
-  // error merely because an older artifact exists: during the initial build
-  // turn the plan may already be recorded while the provider fails later in
-  // task breakdown or implementation.
-  async function safePrompt(handle, text, milestoneRecorded, ctrl) {
-    if (ctrl) ctrl.milestoneStop = false;
+  // A milestone tool's hard stop aborts the in-flight session. pi RESOLVES
+  // prompt() on abort (it does not reject), so the normal case needs no
+  // special handling: the caller inspects the artifact it expected. The catch
+  // below only covers adapters that DO surface the abort as an AbortError — and
+  // then only when the milestone tool explicitly marked the stop AND the
+  // milestone is recorded. Never suppress a provider error merely because an
+  // older artifact exists: during the initial build turn the plan may already be
+  // recorded while the provider fails later in task breakdown or implementation.
+  // `getCtrl` is a getter: fix rounds begin a NEW step controller each round, and
+  // capturing the first one made every later milestone stop invisible (#12).
+  async function safePrompt(handle, text, milestoneRecorded, getCtrl) {
+    const ctrl0 = typeof getCtrl === "function" ? getCtrl() : getCtrl;
+    if (ctrl0) ctrl0.milestoneStop = false;
     try {
       await handle.prompt(text);
     } catch (err) {
+      const ctrl = typeof getCtrl === "function" ? getCtrl() : getCtrl;
       const deliberateMilestoneStop = ctrl?.milestoneStop === true && /abort/i.test(String(err?.message ?? err));
       if (deliberateMilestoneStop && milestoneRecorded()) return;
       throw err;
@@ -718,13 +1132,18 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     return /^(none|no|n\/a|na|nothing|null|\.| - )$/i.test(s) ? undefined : s || undefined;
   }
 
-  function buildMilestoneTools(run, ctrl) {
-    const stop = () => {
+  function buildMilestoneTools(run) {
+    const stop = (ctrlOverride) => {
       // Hard turn stop (mirrors v1 ask_questions): the milestone is recorded;
       // further work this turn is waste. The explicit marker lets safePrompt
-      // distinguish this deliberate abort from a provider/stall failure.
-      ctrl.milestoneStop = true;
-      ctrl.abort();
+      // distinguish this deliberate abort from a provider/stall failure. The
+      // controller is resolved NOW — the persistent build session outlives the
+      // per-round step controller it was opened under.
+      const ctrl = ctrlOverride ?? run.current.get("build");
+      if (ctrl) {
+        ctrl.milestoneStop = true;
+        ctrl.abort();
+      }
       run.buildHandle?.abort();
     };
 
@@ -734,6 +1153,16 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       description: "Submit the implementation plan (PLAN phase milestone). Call EXACTLY ONCE per plan revision. Leave divergence EMPTY unless the task truly cannot be done as specified.",
       parameters: MILESTONE_SCHEMAS.plan,
       execute: async (_id, p) => {
+        if (isInert(run)) return INERT_REPLY;
+        // After a resume where the owner already approved the stored plan, a
+        // model that calls submit_plan again must not re-plan and re-gate (#13).
+        if (run.planApproved && run.state.artifacts.plan) {
+          emit.event(run.id, "build", { t: "notice", s: "submit_plan ignored — the stored plan is already approved" });
+          return {
+            content: [{ type: "text", text: "The stored plan is ALREADY APPROVED — do NOT re-plan. Proceed to the TASK BREAKDOWN phase: read " + SKILL_DIRS.taskBreakdown + "/SKILL.md, then call submit_tasks." }],
+            details: {},
+          };
+        }
         const divergence = realDivergence(p?.divergence);
         const { errors, warnings } = validatePlan(p, run.spec);
         for (const w of warnings) emit.event(run.id, "build", { t: "notice", s: `plan warning: ${w}` });
@@ -779,6 +1208,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           });
           if (decision?.action === "reject") {
             run.state.pendingPlanGate = null;
+            run.state.artifacts.plan = null; // a rejected plan must never be mistaken for an approved one on resume
             emit.state(run);
             const comments = String(decision.comments ?? "").slice(0, 2000);
             emit.event(run.id, "build", { t: "notice", s: `plan REJECTED by owner${comments ? `: ${comments.slice(0, 200)}` : ""}` });
@@ -814,6 +1244,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       description: "Submit the task breakdown (TASK BREAKDOWN phase milestone). Call EXACTLY ONCE per revision.",
       parameters: MILESTONE_SCHEMAS.tasks,
       execute: async (_id, p) => {
+        if (isInert(run)) return INERT_REPLY;
         const { errors, warnings } = validateTasks(p, run.state.artifacts.plan);
         for (const w of warnings) emit.event(run.id, "build", { t: "notice", s: `tasks warning: ${w}` });
         if (errors.length) {
@@ -842,7 +1273,10 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       description: "Report the implementation result (IMPLEMENT phase milestone). Call EXACTLY ONCE per round when all tasks are done.",
       parameters: MILESTONE_SCHEMAS.implDelta,
       execute: async (_id, p) => {
+        if (isInert(run)) return INERT_REPLY;
         run.state.artifacts.implDelta = p;
+        run.state.pendingFix = null; // the fix this round owed has landed
+        const stepCtrl = run.current.get("build");
         endStep(run, "build"); // per-round done; fix rounds re-begin the step
         const partial = (p.task_completion ?? []).filter((t) => t.status !== "done");
         emit.event(run.id, "build", {
@@ -854,9 +1288,9 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         const type = (run.state.steps.find((s) => s.id === "build")?.rounds ?? 0) > 0 ? "fix" : "feat";
         const suffix = commitSuffixFor(run.task, run.id, run.options.ticketId ?? undefined);
         const maxTitle = Math.max(16, 72 - type.length - 2 - suffix.length - 1);
-        commitMilestone(run, `${type}: ${title.slice(0, maxTitle)} ${suffix}`, p.files_written);
+        await commitMilestone(run, `${type}: ${title.slice(0, maxTitle)} ${suffix}`, p.files_written); // E-8: awaited
         emit.state(run);
-        stop();
+        stop(stepCtrl);
         return {
           content: [{ type: "text", text: partial.length ? `Recorded — note: ${partial.length} task(s) reported partial/skipped; verification will judge the tree as-is. STOP now; verification begins.` : "Recorded. STOP now — verification begins outside this session." }],
           details: {},
@@ -877,6 +1311,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         instructions: Type.Optional(Type.String({ description: "Extra instructions for the subagent (optional)" })),
       }),
       execute: async (_toolCallId, params) => {
+        if (isInert(run)) return INERT_REPLY;
         const task = (run.state.artifacts.tasks?.tasks ?? []).find((t) => t.id === params.task_id);
         if (!task) {
           return { content: [{ type: "text", text: `unknown task_id "${params.task_id}" — use a slug from submit_tasks` }], details: {} };
@@ -909,7 +1344,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           if (params.instructions) parts.push(`Additional instructions from the lead builder:\n${params.instructions}`);
           parts.push("Run lint/tests for what you changed before reporting. Report via report_artifact: summary, files_written, notes.");
           let systemPrompt = "You are a CODER subagent. Implement fully; failure paths too; run lint/tests before reporting.";
-          const ctx = loadStepContext(run.projectPath, "build", (f) =>
+          const ctx = stepContext(run, "build", (f) =>
             emit.event(run.id, "build", { t: "notice", s: `context injected: ${f.name} (${f.chars} chars)` }),
           );
           if (ctx) systemPrompt += `\n\n${ctx}`;
@@ -923,6 +1358,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             onCall: (p2) => store.artifacts.push(p2),
           });
           await runNodeImpl({
+            runId: run.id,
             nodeId: "build",
             stepId: "build",
             tools: ["read", "write", "edit", "bash", "grep", "find", "ls", "report_artifact"],
@@ -932,7 +1368,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
             thinking: "high",
             systemPrompt,
             prompt: parts.join("\n\n"),
-            cwd: run.projectPath,
+            cwd: workDir(run),
             modelSpec: run.models.builder ?? "auto",
             modelRuntime,
             signal: run.current.get("build")?.signal,
@@ -964,20 +1400,20 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
   async function getOrCreateBuildSession(run) {
     if (run.buildHandle) return run.buildHandle;
     const step = stepState(run, "build");
-    const ctrl = run.current.get("build");
     let systemPrompt = builderSystem({ skillDirs: SKILL_DIRS });
-    const ctx = loadStepContext(run.projectPath, "build", (f) =>
+    const ctx = stepContext(run, "build", (f) =>
       emit.event(run.id, "build", { t: "notice", s: `context injected: ${f.name} (${f.chars} chars)` }),
     );
     if (ctx) systemPrompt += `\n\n${ctx}`;
     const handle = await openSessionImpl({
+      runId: run.id,
       stepId: "build",
       sessionFile: step?.sessionFile ?? null,
       sessionsDir: sessionsDir(run),
       tools: [...STEP_PROFILES.build.tools],
-      customTools: buildMilestoneTools(run, ctrl),
+      customTools: buildMilestoneTools(run),
       systemPrompt,
-      cwd: run.projectPath,
+      cwd: workDir(run),
       modelSpec: run.models.builder ?? "auto",
       modelRuntime,
       thinking: STEP_PROFILES.build.thinking,
@@ -986,8 +1422,20 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         if (ev.t === "usage" && s) addUsage(s.usage, ev.usage);
         emit.event(run.id, nodeId, ev);
       },
-      signal: ctrl?.signal,
+      // Session-LIFETIME signal: the persistent build session spans many rounds,
+      // each with its own step controller — binding to the first round's
+      // controller left every later round un-abortable by cancel.
+      signal: run.lifetime?.signal,
     });
+    if (run.cancelRequested || run.superseded) {
+      // cancelled while the session was loading: finalizeCancel could not see this handle
+      try {
+        handle.close();
+      } catch {
+        /* ignore */
+      }
+      throw new Error("cancelled");
+    }
     if (step && !step.sessionFile) {
       step.sessionFile = handle.sessionFile;
       emit.state(run);
@@ -999,7 +1447,22 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     return handle;
   }
 
-  // One full build turn. kind: 'initial' | { feedback: { round, source, gaps } }
+  // Which build turn does the persisted state call for? One rule shared by the
+  // first execute and every resume (a resume used to re-send "Begin the PLAN
+  // phase" even when plan+tasks were already recorded — the builder re-planned
+  // and re-opened the plan gate, #13).
+  //   no plan            → initial
+  //   plan, no tasks     → plan-approved (the stored plan stands)
+  //   tasks, no impl     → tasks-accepted (continue IMPLEMENT)
+  function buildKindFor(run) {
+    if (run.state.pendingFix) return { feedback: { ...run.state.pendingFix, resumed: true } };
+    if (!run.state.artifacts.plan) return "initial";
+    if (!run.state.artifacts.tasks) return "plan-approved";
+    return "tasks-accepted";
+  }
+
+  // One full build turn. kind: 'initial' | 'plan-approved' | 'tasks-accepted'
+  // | { feedback: { round, source, gaps[] , noRound?, resumed? } }
   async function buildTurn(run, kind) {
     beginStep(run, "build");
     const handle = await getOrCreateBuildSession(run);
@@ -1009,15 +1472,21 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     if (kind === "initial") {
       text = builderPrompt({
         task: run.task,
-        workspace: run.projectPath,
+        workspace: workDir(run),
         spec: run.spec,
         sourceDocText: sourceDocsFor(run),
       });
+      if (run.git?.worktree) {
+        text +=
+          `\n\nISOLATION: ${workDir(run)} is an isolated git worktree of ${run.projectPath} on branch ${run.git.runBranch}. ` +
+          `Read and write ONLY under it — never edit files in ${run.projectPath} itself (the owner's checkout); anything written there is lost to this run.`;
+      }
       expected = () => run.cancelRequested || run.state.artifacts.plan;
     } else if (kind === "plan-approved") {
       const plan = run.state.artifacts.plan;
+      run.planApproved = true;
       text = [
-        "Your run was cancelled while your submitted plan was awaiting owner approval. The run has now been resumed and the owner has APPROVED your submitted plan (restated):",
+        "Your run was interrupted and has now been resumed. The owner has APPROVED your submitted plan (restated):",
         JSON.stringify(
           {
             task_summary: plan?.task_summary,
@@ -1031,25 +1500,42 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         "Do NOT investigate again and do NOT re-plan or call submit_plan. Proceed directly to the TASK BREAKDOWN phase: read " + SKILL_DIRS.taskBreakdown + "/SKILL.md, then call submit_tasks exactly once.",
       ].join("\n\n");
       expected = () => run.cancelRequested || run.state.artifacts.tasks;
-    } else {
-      step.rounds = (step.rounds ?? 0) + 1;
+    } else if (kind === "tasks-accepted") {
+      run.planApproved = true;
+      text = [
+        "Your run was interrupted and has now been resumed. Your plan and task breakdown are recorded and accepted (do NOT re-plan, do NOT call submit_plan or submit_tasks again).",
+        `Tasks: ${(run.state.artifacts.tasks?.tasks ?? []).map((t) => `${t.id} (${t.title})`).join("; ")}`,
+        "Re-check the working tree for what is already built, then continue the IMPLEMENT phase: read " + SKILL_DIRS.implementation + "/SKILL.md, finish every remaining task fully, and call submit_impl_delta when ALL tasks are done and lint/tests are green.",
+      ].join("\n\n");
       expected = () => run.cancelRequested || run.state.artifacts.implDelta;
+    } else {
+      const fb = kind.feedback;
+      if (!fb.noRound && !fb.resumed) step.rounds = (step.rounds ?? 0) + 1;
       text = builderFeedbackTurn({
-        round: kind.feedback.round,
-        source: kind.feedback.source,
-        gaps: kind.feedback.gaps
+        round: fb.round,
+        source: fb.source,
+        gaps: fb.gaps
           .map((g) => {
             const hint = taskHint(run, g);
             return hint ? `[task: ${hint}] ${g}` : g;
           })
           .join("\n"),
         plan: run.state.artifacts.plan,
-        tasks: tasksWithStatus(run),
+        tasks: tasksWithStatus(run), // computed BEFORE the clear below (needs the old task_completion)
         spec: run.spec,
       });
+      // E-5: a fix round owes a NEW impl-delta. Leaving the old one made every
+      // "ended without a new impl-delta" guard unfireable and let verify judge
+      // stale claims. pendingFix lets a cancel/restart mid-fix re-issue this
+      // same feedback instead of skipping the fix.
+      if (!fb.noRound) {
+        run.state.pendingFix = { round: fb.round, source: fb.source, gaps: fb.gaps };
+        run.state.artifacts.implDelta = null;
+      }
+      expected = () => run.cancelRequested || run.state.artifacts.implDelta;
       emit.state(run);
     }
-    await safePrompt(handle, text, expected, run.current.get("build"));
+    await safePrompt(handle, text, expected, () => run.current.get("build"));
     if (run.cancelRequested) throw new Error("cancelled");
     // Milestone nudge (v1 pattern): the turn ended without the expected call.
     if (!expected()) {
@@ -1066,7 +1552,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
 
   async function runMechanicalGate(run) {
     emit.event(run.id, "_run", { t: "notice", s: "mechanical checks: running (driver-deterministic)" });
-    const checks = await mechanicalImpl({ projectPath: run.projectPath, runId: run.id, emit });
+    const checks = await mechanicalImpl({ projectPath: workDir(run), runId: run.id, emit, signal: run.current.get("verify")?.signal });
     run.state.mechanicalChecks = { round: run.state.round ?? 0, at: new Date().toISOString(), checks };
     for (const c of checks) {
       emit.event(run.id, "_run", {
@@ -1080,7 +1566,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
   async function runRemoteCiGate(run) {
     if (!run.options.remoteCi) return;
     if (run.ciCapability === undefined) {
-      run.ciCapability = await detectCiCapability(run.projectPath);
+      run.ciCapability = await detectCiCapability(workDir(run), run.current.get("verify")?.signal);
       if (!run.ciCapability.ok) {
         run.state.remoteChecks = {
           round: run.state.round ?? 0,
@@ -1101,7 +1587,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         t: "notice",
         s: `remote CI: pushing ${run.git.runBranch} to origin (owner opted in — this triggers hosted CI)`,
       });
-      await git.pushBranch(run.projectPath, run.git.runBranch);
+      await git.pushBranch(workDir(run), run.git.runBranch);
     } catch (e) {
       run.state.remoteChecks = {
         round: run.state.round ?? 0,
@@ -1114,8 +1600,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       emit.state(run);
       return;
     }
-    const sha = await git.headSha(run.projectPath);
-    const result = await watchRunsForSha({ cwd: run.projectPath, sha, emit: (ev) => emit.event(run.id, "_run", ev) });
+    const sha = await git.headSha(workDir(run));
+    const result = await watchRunsForSha({ cwd: workDir(run), sha, emit: (ev) => emit.event(run.id, "_run", ev), signal: run.current.get("verify")?.signal });
     run.state.remoteChecks = { round: run.state.round ?? 0, at: new Date().toISOString(), ...result };
     emit.event(run.id, "_run", {
       t: "notice",
@@ -1148,7 +1634,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     });
   }
 
-  function reconcileVerify(run, verifyArtifact) {
+  function reconcileVerify(run, verifyArtifact, { quiet = false } = {}) {
     const failingChecks = (verifyArtifact?.checks ?? []).filter((c) => !c.pass);
     const mechFailing = (run.state.mechanicalChecks?.checks ?? []).filter((c) => c.status === "fail");
     const remoteFailing =
@@ -1165,7 +1651,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       else gatingChecks.push(c);
       if (envLimited) recordDeferred(run, c, env);
     }
-    if (nonGating.length > 0) {
+    if (nonGating.length > 0 && !quiet) {
       emit.event(run.id, "verify", {
         t: "notice",
         s: `${nonGating.length} check(s) not verifiable from this environment — recorded, non-gating`,
@@ -1174,7 +1660,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     let verdict = verifyArtifact?.verdict ?? "gaps-found";
     if (verdict === "accepted" && (gatingChecks.length > 0 || mechFailing.length > 0 || remoteFailing.length > 0)) {
       verdict = "gaps-found";
-      emit.event(run.id, "verify", {
+      if (!quiet) emit.event(run.id, "verify", {
         t: "notice",
         s: `verdict overridden: "accepted" despite ${gatingChecks.length} failing check(s)${mechFailing.length ? ` and ${mechFailing.length} mechanical failure(s)` : ""}${remoteFailing.length ? " and a failed remote CI run" : ""}`,
       });
@@ -1198,6 +1684,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     beginStep(run, "verify");
     const step = stepState(run, "verify");
     step.sessionFiles = step.sessionFiles ?? [];
+    // Each round is judged by ITS OWN session: a verify/audit artifact left by a
+    // cancelled or earlier round made "expected()" true before the verifier did
+    // anything (and a missing submit_audit look like a pass).
+    run.state.artifacts.verify = null;
+    run.state.artifacts.audit = null;
     if (run.options.remoteCi) await runRemoteCiGate(run);
     if (run.cancelRequested) throw new Error("cancelled");
     await runMechanicalGate(run);
@@ -1205,7 +1696,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
 
     const ctrl = run.current.get("verify");
     let systemPrompt = verifierSystem({ skillDirs: SKILL_DIRS });
-    const ctx = loadStepContext(run.projectPath, "verify", (f) =>
+    const ctx = stepContext(run, "verify", (f) =>
       emit.event(run.id, "verify", { t: "notice", s: `context injected: ${f.name} (${f.chars} chars)` }),
     );
     if (ctx) systemPrompt += `\n\n${ctx}`;
@@ -1224,6 +1715,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         description: "Submit the verification verdict (VERIFY phase milestone). Call EXACTLY ONCE.",
         parameters: ARTIFACT_SCHEMAS.verify,
         execute: async (_id, p) => {
+          if (isInert(run)) return INERT_REPLY;
           run.state.artifacts.verify = p;
           emit.event(run.id, "verify", {
             t: "notice",
@@ -1261,6 +1753,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         description: "Submit the audit verdict (AUDIT phase milestone). Call EXACTLY ONCE after submit_verify was accepted.",
         parameters: ARTIFACT_SCHEMAS.audit,
         execute: async (_id, p) => {
+          if (isInert(run)) return INERT_REPLY;
           run.state.artifacts.audit = p;
           const blocking = (p.findings ?? []).filter((f) => f.blocking);
           emit.event(run.id, "verify", {
@@ -1277,12 +1770,13 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     );
 
     const handle = await openSessionImpl({
+      runId: run.id,
       stepId: "verify",
       sessionsDir: sessionsDir(run),
       tools,
       customTools,
       systemPrompt,
-      cwd: run.projectPath,
+      cwd: workDir(run),
       modelSpec: run.models.verifier ?? "auto",
       modelRuntime,
       thinking: STEP_PROFILES.verify.thinking,
@@ -1293,6 +1787,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       },
       signal: ctrl.signal,
     });
+    if (run.cancelRequested || run.superseded) {
+      // cancelled while the session was loading — never spend a verifier turn on it
+      handle.close();
+      throw new Error("cancelled");
+    }
     run.verifyHandle = handle;
     step.sessionFiles.push(handle.sessionFile);
     emit.state(run);
@@ -1301,7 +1800,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         handle,
         verifierPrompt({
           task: run.task,
-          workspace: run.projectPath,
+          workspace: workDir(run),
           spec: run.spec,
           sourceDocText: sourceDocsFor(run),
           acVerification: run.spec?.ac_verification ?? null,
@@ -1314,11 +1813,27 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           fixRound: round,
         }),
         () => run.cancelRequested || run.state.artifacts.verify,
-        ctrl,
+        () => run.current.get("verify") ?? ctrl,
       );
       if (!run.cancelRequested && !run.state.artifacts.verify) {
         emit.event(run.id, "verify", { t: "notice", s: "turn ended without submit_verify — nudging once" });
         await handle.prompt("You ended your turn without calling submit_verify. Call it NOW with the structured verdict. Do nothing else first.");
+      }
+      // #14: a missing submit_audit must NEVER read as an audit pass. If verify
+      // was accepted (so the audit phase was owed) and no audit landed: nudge
+      // once, then fail the audit step loudly.
+      const auditOwed = () =>
+        !run.cancelRequested &&
+        run.options.audit &&
+        run.state.artifacts.verify &&
+        !run.state.artifacts.audit &&
+        reconcileVerify(run, run.state.artifacts.verify, { quiet: true }).verdict === "accepted";
+      if (auditOwed()) {
+        emit.event(run.id, "verify", { t: "notice", s: "verify accepted but turn ended without submit_audit — nudging once" });
+        await handle.prompt(`Verification was accepted, so the AUDIT phase is owed. Read ${SKILL_DIRS.auditDeliverables}/SKILL.md and call submit_audit NOW with the structured verdict. Do nothing else first.`);
+      }
+      if (auditOwed()) {
+        throw new Error("audit step failed: verify was accepted but the verifier never called submit_audit (even after a nudge) — an absent audit is not a pass");
       }
     } finally {
       handle.close();
@@ -1328,27 +1843,14 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
 
   // --- Step 4: security -----------------------------------------------------------
 
-  function runScannerSuite(run) {
-    const r = spawnSync(process.execPath, [SCANNER_SCRIPT, run.projectPath], {
-      timeout: 300_000,
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024,
-    });
-    try {
-      return JSON.parse(r.stdout ?? "");
-    } catch {
-      return {
-        scanners: [{ id: "suite", status: "skip", evidence: `scanner suite unparseable (exit ${r.status})` }],
-      };
-    }
-  }
-
   async function securityRound(run, round) {
     beginStep(run, "security");
     const step = stepState(run, "security");
     step.sessionFiles = step.sessionFiles ?? [];
+    run.state.artifacts.security = null; // judged by THIS round's session only
     emit.event(run.id, "security", { t: "notice", s: "scanner suite: running (driver-deterministic)" });
-    const scannerResults = scannerImpl(run);
+    const scannerResults = await scannerImpl(run, run.current.get("security")?.signal);
+    if (run.cancelRequested) throw new Error("cancelled");
     run.state.scannerResults = { round, at: new Date().toISOString(), ...scannerResults };
     for (const s of scannerResults.scanners ?? []) {
       emit.event(run.id, "security", { t: "notice", s: `scanner: ${s.id} — ${s.status}${s.status === "fail" ? `: ${String(s.evidence).slice(0, 240)}` : ""}` });
@@ -1357,12 +1859,13 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
 
     const ctrl = run.current.get("security");
     let systemPrompt = securitySystem({ skillDirs: SKILL_DIRS, vapt: run.options.security === "scan+vapt" });
-    const ctx = loadStepContext(run.projectPath, "security", (f) =>
+    const ctx = stepContext(run, "security", (f) =>
       emit.event(run.id, "security", { t: "notice", s: `context injected: ${f.name} (${f.chars} chars)` }),
     );
     if (ctx) systemPrompt += `\n\n${ctx}`;
 
     const handle = await openSessionImpl({
+      runId: run.id,
       stepId: "security",
       sessionsDir: sessionsDir(run),
       tools: [...STEP_PROFILES.security.tools],
@@ -1373,7 +1876,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           description: "Re-run the deterministic scanner suite (for post-fix re-checks). Returns structured JSON.",
           parameters: Type.Object({}),
           execute: async () => {
-            const out = scannerImpl(run);
+            const out = await scannerImpl(run, run.current.get("security")?.signal);
             return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }], details: {} };
           },
         }),
@@ -1383,6 +1886,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           description: "Submit the security verdict (SECURITY milestone). Call EXACTLY ONCE.",
           parameters: MILESTONE_SCHEMAS.security,
           execute: async (_id, p) => {
+            if (isInert(run)) return INERT_REPLY;
             run.state.artifacts.security = p;
             emit.event(run.id, "security", {
               t: "notice",
@@ -1397,7 +1901,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         }),
       ],
       systemPrompt,
-      cwd: run.projectPath,
+      cwd: workDir(run),
       modelSpec: run.models.security ?? "auto",
       modelRuntime,
       thinking: STEP_PROFILES.security.thinking,
@@ -1408,6 +1912,10 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       },
       signal: ctrl.signal,
     });
+    if (run.cancelRequested || run.superseded) {
+      handle.close();
+      throw new Error("cancelled");
+    }
     run.securityHandle = handle;
     step.sessionFiles.push(handle.sessionFile);
     emit.state(run);
@@ -1416,13 +1924,13 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         handle,
         securityPrompt({
           task: run.task,
-          workspace: run.projectPath,
+          workspace: workDir(run),
           scannerResults: run.state.scannerResults,
           vapt: run.options.security === "scan+vapt",
           priorReports: { verify: run.state.artifacts.verify, implDelta: run.state.artifacts.implDelta },
         }),
         () => run.cancelRequested || run.state.artifacts.security,
-        ctrl,
+        () => run.current.get("security") ?? ctrl,
       );
       if (!run.cancelRequested && !run.state.artifacts.security) {
         emit.event(run.id, "security", { t: "notice", s: "turn ended without submit_security — nudging once" });
@@ -1487,6 +1995,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
   // and release the project slot. (V12 owner run caught the missing settle on
   // the failure early-returns — state.json stayed "running" forever.)
   function settle(run) {
+    if (run.superseded) return; // a newer execute() epoch owns this run now (E-1)
     run.state.finishedAt = Date.now();
     run.done.promiseSettled = true;
     emit.state(run);
@@ -1503,25 +2012,191 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     }
   }
 
+  // Terminal failure: record, integrate (keep the branch), settle exactly once.
+  async function failRun(run, error) {
+    if (run.finalized || run.superseded) return;
+    run.state.status = "failed";
+    run.state.error = error;
+    emit.event(run.id, "_run", { t: "notice", s: `run failed: ${error}` });
+    await integrate(run, false);
+    if (run.finalized || run.superseded) return;
+    settle(run); // the V12 lesson — every exit path MUST settle
+  }
+
+  // Verify loop (bounded fix rounds; feedback resumes the build session).
+  // Returns true once verify (+audit) accept; false when the fix budget is spent.
+  async function verifyLoop(run, startRound) {
+    for (let round = startRound; round <= run.options.maxFixRounds; round++) {
+      run.state.round = round;
+      emit.state(run);
+      await verifyRound(run, round);
+      if (run.cancelRequested) throw new Error("cancelled");
+      const rec = reconcileVerify(run, run.state.artifacts.verify);
+      const ab = auditBlocking(run);
+      if (rec.verdict === "accepted" && ab.length === 0) {
+        endStep(run, "verify");
+        return true;
+      }
+      const gaps = assembleGaps(rec, ab);
+      if (round < run.options.maxFixRounds) {
+        emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1} (resuming the build session)` });
+        await buildTurn(run, { feedback: { round: round + 1, source: "verification", gaps } });
+        if (run.cancelRequested) throw new Error("cancelled");
+        if (!run.state.artifacts.implDelta) throw new Error(`fix round ${round + 1} ended without a new impl-delta`);
+      }
+      // else: rounds exhausted — loop ends, failure reasons assembled by the caller.
+    }
+    return false;
+  }
+
+  // Steps 2-4: build → verify → security. Returns "ok", or "failed" when the
+  // run already failed AND settled here.
+  async function runGates(run) {
+    // STEP 2 — build. Which turn is owed comes from the persisted artifacts
+    // (buildKindFor), so first run, resume, and plan-gate resume share one rule.
+    const stage = () => (run.state.artifacts.implDelta ? 3 : run.state.artifacts.tasks ? 2 : run.state.artifacts.plan ? 1 : 0);
+    for (let guard = 0; guard < 3 && !run.state.artifacts.implDelta; guard++) {
+      const before = stage();
+      await buildTurn(run, buildKindFor(run));
+      if (run.cancelRequested) throw new Error("cancelled");
+      if (stage() <= before) break; // no progress — fail below with the precise missing milestone
+    }
+    if (!run.state.artifacts.plan) throw new Error("build ended without an approved plan");
+    if (!run.state.artifacts.tasks) throw new Error("build ended without a task breakdown");
+    if (!run.state.artifacts.implDelta) throw new Error("build ended without an impl-delta report");
+
+    // Fix-resume (owner-triggered): ONE build feedback turn driven by the
+    // LAST verify report OR the security findings — stale artifacts are
+    // consumed as feedback and cleared; the gates then re-run (the changed
+    // tree is always re-verified, #16).
+    if (run.state.fixResume) {
+      // WHICH gate failed? Step status is the truth — a security-exhausted
+      // run still carries its ACCEPTED verify artifact, so artifact
+      // presence alone would pick the wrong branch.
+      const secStepFailed = stepState(run, "security")?.status === "failed";
+      let gaps = [];
+      let securityOnly = false;
+      if (secStepFailed && run.state.artifacts.security) {
+        const { fixable, unfixable } = securityBlocking(run);
+        gaps = fixable.map((f) => `[security/${f.severity}]${f.file ? ` ${f.file}:` : ""} ${f.title} — ${f.evidence}${f.fix ? ` (fix: ${f.fix})` : ""}`);
+        if (unfixable.length > 0) {
+          gaps.push(`[security] ${unfixable.length} unfixable finding(s) remain (${unfixable.map((f) => f.title).join("; ")}) — the owner override gate will decide after re-scan`);
+        }
+        run.state.artifacts.security = null;
+        securityOnly = true;
+      } else if (run.state.artifacts.verify) {
+        gaps = assembleGaps(reconcileVerify(run, run.state.artifacts.verify), auditBlocking(run));
+        run.state.artifacts.verify = null;
+        run.state.artifacts.audit = null;
+      }
+      run.state.fixResume = false;
+      emit.event(run.id, "build", {
+        t: "notice",
+        s: `fix-resume: building against the LAST ${securityOnly ? "security findings" : "verify report"} (${gaps.length} gap(s)) — the changed tree is re-verified${securityOnly ? " before the security re-scan" : ""}`,
+      });
+      emit.state(run);
+      await buildTurn(run, { feedback: { round: (run.state.round ?? 0) + 1, source: securityOnly ? "security (fix-resume)" : "verification (fix-resume)", gaps } });
+      if (run.cancelRequested) throw new Error("cancelled");
+      if (!run.state.artifacts.implDelta) throw new Error("fix-resume turn ended without a new impl-delta");
+      emit.state(run);
+    }
+
+    // STEP 3 — verify loop.
+    if (!(await verifyLoop(run, run.state.round ?? 0))) {
+      endStep(run, "verify", { status: "failed", error: "gates not accepted" });
+      if (run.options.security !== "off") endStep(run, "security", { status: "cancelled", error: "skipped — verify failed" });
+      await failRun(
+        run,
+        `gates still failing after ${run.options.maxFixRounds} fix round(s): ${assembleFailureReasons(run) ?? "verification did not accept"}`,
+      );
+      return "failed";
+    }
+
+    // STEP 4 — security (optional; own bounded fix round + owner override).
+    if (run.options.security !== "off") {
+      for (let round = run.state.securityRound ?? 0; round <= SECURITY_FIX_ROUNDS; round++) {
+        run.state.securityRound = round;
+        emit.state(run);
+        await securityRound(run, round);
+        if (run.cancelRequested) throw new Error("cancelled");
+        const { fixable, unfixable } = securityBlocking(run);
+        if (fixable.length === 0) {
+          if (unfixable.length > 0) {
+            emit.event(run.id, "security", {
+              t: "notice",
+              s: `${unfixable.length} unfixable critical/high finding(s) — owner override required`,
+            });
+            const decision = await openGate(run, {
+              type: "security-override",
+              nodeId: "security",
+              findings: unfixable.map((f) => ({ severity: f.severity, title: f.title, evidence: String(f.evidence).slice(0, 300), fix: f.fix ?? null })),
+            });
+            if (decision === "cancel" || decision?.action === "cancel" || run.cancelRequested) throw new Error("cancelled at security gate");
+            run.state.securityAccepted = { at: new Date().toISOString(), findings: unfixable.map((f) => f.id) };
+            emit.event(run.id, "security", { t: "notice", s: "owner accepted the security risk — recording and continuing" });
+          }
+          endStep(run, "security");
+          break;
+        }
+        if (round < SECURITY_FIX_ROUNDS) {
+          const gaps = fixable.map(
+            (f) => `[security/${f.severity}]${f.file ? ` ${f.file}:` : ""} ${f.title} — ${f.evidence}${f.fix ? ` (fix: ${f.fix})` : ""}`,
+          );
+          emit.event(run.id, "security", { t: "notice", s: `${fixable.length} fixable critical/high finding(s) — security fix round (resuming the build session)` });
+          await buildTurn(run, { feedback: { round: round + 1, source: "security", gaps } });
+          if (run.cancelRequested) throw new Error("cancelled");
+          if (!run.state.artifacts.implDelta) throw new Error(`security fix round ended without a new impl-delta`);
+          // #16: the security fix changed the tree after verify accepted it —
+          // the changed tree gets its own verify (+ fix rounds) before the re-scan.
+          emit.event(run.id, "verify", { t: "notice", s: "security fix landed — re-verifying the changed tree" });
+          if (!(await verifyLoop(run, run.state.round ?? 0))) {
+            endStep(run, "verify", { status: "failed", error: "gates not accepted after the security fix" });
+            endStep(run, "security", { status: "failed", error: "security fix broke verification" });
+            await failRun(
+              run,
+              `verification failed after the security fix round: ${assembleFailureReasons(run) ?? "verification did not accept"}`,
+            );
+            return "failed";
+          }
+          run.state.artifacts.security = null;
+        } else {
+          endStep(run, "security", { status: "failed", error: "findings not fixed" });
+          await failRun(
+            run,
+            `security findings not fixed after ${SECURITY_FIX_ROUNDS} round(s): ${assembleFailureReasons(run) ?? fixable.map((f) => f.title).join("; ")}`,
+          );
+          return "failed";
+        }
+      }
+      if (run.cancelRequested) throw new Error("cancelled");
+    }
+    return "ok";
+  }
+
   async function execute(run) {
     try {
-      // Git-on runs ALWAYS execute on their own branch (v1 resume safety).
-      if (run.git?.enabled) {
-        try {
-          await git.checkout(run.projectPath, run.git.runBranch);
-        } catch (e) {
-          throw new Error(
-            `git: could not restore run branch ${run.git.runBranch} (${e?.message ?? e}) — resolve the working tree (clean or stash) and resume again`,
-          );
+      // Git-on runs ALWAYS execute on their own branch in their own worktree
+      // (v1 resume safety) — but only TREE-HOLDING runs have one (Q-C2). A
+      // promoted clarify run creates its worktree here, under the tree lock it
+      // now holds; a resumed run re-attaches / reuses its worktree.
+      if (run.options.git && run.holdsTree) {
+        if (!run.git?.enabled) {
+          await setupGit(run);
+        } else {
+          await ensureWorktree(run);
+          await restoreParkedWork(run);
         }
+        if (run.finalized || run.superseded) return;
       }
       // Resume after cancel-at-plan-gate: the plan artifact was persisted at
       // submit time — re-present the SAME plan for approval (no model re-plan)
-      // BEFORE any build work (v1 FIX-REPORT regression, kept fixed).
+      // BEFORE any build work (v1 FIX-REPORT regression, kept fixed). Uses the
+      // same openGate as the live gates, so the queue can park it identically.
       const pendingGate = run.state.pendingPlanGate;
       if (pendingGate && !run.state.artifacts.implDelta) {
         emit.event(run.id, "build", { t: "notice", s: "resume: re-presenting the stored plan for approval — the builder will NOT re-plan" });
-        run.state.gate =
+        const decision = await openGate(
+          run,
           pendingGate.type === "divergence"
             ? { type: "divergence", nodeId: "build", divergence: pendingGate.plan.divergence }
             : {
@@ -1533,33 +2208,30 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
                   files: (pendingGate.plan.files ?? []).map((f) => f.path),
                   acceptance_criteria: pendingGate.plan.acceptance_criteria ?? [],
                 },
-              };
-        emit.state(run);
-        const decision = await new Promise((resolve) => {
-          run.gateResolver = resolve;
-        }).finally(() => {
-          run.gateResolver = null;
-          run.state.gate = null;
-          emit.state(run);
-        });
+              },
+        );
         if (decision === "cancel" || decision?.action === "cancel" || run.cancelRequested) throw new Error("cancelled at gate");
+        run.state.pendingPlanGate = null;
         if (pendingGate.type === "plan-approval" && decision?.action === "reject") {
-          run.state.pendingPlanGate = null;
+          run.state.artifacts.plan = null; // the rejected plan must not be mistaken for an approved one
           emit.state(run);
-          // rejection comments go back through the SAME session — the builder revises
+          // rejection comments go back through the SAME session — the builder
+          // revises. noRound: this is still the FIRST implementation, so its
+          // milestone commit is "feat:", not "fix:" (#13).
           await buildTurn(run, {
             feedback: {
               round: 0,
               source: "owner plan rejection",
+              noRound: true,
               gaps: [`The owner REJECTED your plan${decision.comments ? `: ${decision.comments}` : ""} — produce a revised plan and call submit_plan again.`],
             },
           });
         } else {
           // approved (or divergence accepted): the stored plan STANDS — the
-          // builder continues from its own context straight to task breakdown.
-          run.state.pendingPlanGate = null;
+          // build stage below continues from the builder's own context straight
+          // to task breakdown (buildKindFor → plan-approved).
+          run.planApproved = true;
           emit.state(run);
-          await buildTurn(run, "plan-approved");
         }
       }
 
@@ -1592,184 +2264,24 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
               ? "clarification complete — spec locked; run parked as clarified (awaiting queue promotion)"
               : "clarify disabled — run parked as clarified (awaiting queue promotion)",
         });
-        // A clarify run builds nothing and merges nothing — checkout base and
-        // report exactly that. The generic integrate(run, false) would set a
-        // misleading "merge failed — branch kept" error on a run that has
-        // nothing to merge.
-        if (run.git?.enabled) {
-          try {
-            run.buildHandle?.close();
-            run.buildHandle = null;
-            await git.checkout(run.projectPath, run.git.baseBranch);
-          } catch (e) {
-            emit.event(run.id, "_run", { t: "notice", s: `git: checkout ${run.git.baseBranch} failed: ${e?.message ?? e}` });
-          }
-          if ((run.state.git?.commits ?? []).length === 0) {
-            try {
-              await git.deleteBranch(run.projectPath, run.git.runBranch);
-              emit.event(run.id, "_run", { t: "notice", s: `git: empty clarify branch ${run.git.runBranch} removed` });
-            } catch {
-              /* branch cleanup is best-effort */
-            }
-          } else {
-            run.state.git.mergeError = "clarify-only run — specs only, nothing to merge; branch kept";
-          }
-        }
+        // A clarify-only run builds nothing, merges nothing and (Q-C2) never
+        // touched git: nothing to check out or clean up.
+        closeHandles(run);
         settle(run);
         return;
       }
 
-      // STEP 2 — build (initial turn only when no impl-delta milestone yet;
-      // fix-round feedback turns arrive from the verify/security loops below).
-      if (!run.state.artifacts.implDelta) {
-        await buildTurn(run, "initial");
-        if (run.cancelRequested) throw new Error("cancelled");
-        if (!run.state.artifacts.plan) throw new Error("build ended without an approved plan");
-        if (!run.state.artifacts.tasks) throw new Error("build ended without a task breakdown");
-        if (!run.state.artifacts.implDelta) throw new Error("build ended without an impl-delta report");
-      }
-
-      // Fix-resume (owner-triggered): ONE build feedback turn driven by the
-      // LAST verify report OR the security findings — stale artifacts are
-      // consumed as feedback and cleared; the matching gate then re-runs once.
-      if (run.state.fixResume) {
-        // WHICH gate failed? Step status is the truth — a security-exhausted
-        // run still carries its ACCEPTED verify artifact, so artifact
-        // presence alone would pick the wrong branch.
-        const verifyStepFailed = stepState(run, "verify")?.status === "failed";
-        const secStepFailed = stepState(run, "security")?.status === "failed";
-        let gaps = [];
-        let securityOnly = false;
-        if (secStepFailed && run.state.artifacts.security) {
-          const { fixable, unfixable } = securityBlocking(run);
-          gaps = fixable.map((f) => `[security/${f.severity}]${f.file ? ` ${f.file}:` : ""} ${f.title} — ${f.evidence}${f.fix ? ` (fix: ${f.fix})` : ""}`);
-          if (unfixable.length > 0) {
-            gaps.push(`[security] ${unfixable.length} unfixable finding(s) remain (${unfixable.map((f) => f.title).join("; ")}) — the owner override gate will decide after re-scan`);
-          }
-          run.state.artifacts.security = null;
-          securityOnly = true; // verify accepted already — do not re-run it
-        } else if (run.state.artifacts.verify) {
-          gaps = assembleGaps(reconcileVerify(run, run.state.artifacts.verify), auditBlocking(run));
-          run.state.artifacts.verify = null;
-          run.state.artifacts.audit = null;
-        }
-        run.state.fixResume = false;
-        run.state.fixResumeSecurityOnly = securityOnly;
-        emit.event(run.id, "build", {
-          t: "notice",
-          s: `fix-resume: building against the LAST ${securityOnly ? "security findings" : "verify report"} (${gaps.length} gap(s)) — ${securityOnly ? "verify already accepted, jumping to security re-scan" : "no re-verify until the fix lands"}`,
-        });
-        emit.state(run);
-        await buildTurn(run, { feedback: { round: (run.state.round ?? 0) + 1, source: securityOnly ? "security (fix-resume)" : "verification (fix-resume)", gaps } });
-        if (run.cancelRequested) throw new Error("cancelled");
-        if (!run.state.artifacts.implDelta) throw new Error("fix-resume turn ended without a new impl-delta");
-        emit.state(run);
-      }
-
-      // STEP 3 — verify loop (bounded fix rounds; feedback resumes the build
-      // session). Skipped entirely on a security-only fix-resume: verify
-      // already accepted that tree stage; the security re-scan judges the fix.
-      if (run.state.fixResumeSecurityOnly) {
-        run.state.fixResumeSecurityOnly = false;
-        endStep(run, "verify");
-        emit.event(run.id, "verify", { t: "notice", s: "verify already accepted — jumping straight to the security re-scan" });
+      // STEPS 2-4. A run whose gates already passed (it failed only at the
+      // final merge) resumes straight to integrate instead of re-verifying.
+      if (!run.state.gatesPassed) {
+        if ((await runGates(run)) === "failed") return;
+        if (run.finalized || run.superseded) return;
+        run.state.gatesPassed = true;
         emit.state(run);
       } else {
-        let accepted = false;
-        for (let round = run.state.round ?? 0; round <= run.options.maxFixRounds; round++) {
-          run.state.round = round;
-          emit.state(run);
-          await verifyRound(run, round);
-          if (run.cancelRequested) break;
-          const rec = reconcileVerify(run, run.state.artifacts.verify);
-          const ab = auditBlocking(run);
-          if (rec.verdict === "accepted" && ab.length === 0) {
-            accepted = true;
-            endStep(run, "verify");
-            break;
-          }
-          const gaps = assembleGaps(rec, ab);
-          if (round < run.options.maxFixRounds) {
-            emit.event(run.id, "verify", { t: "notice", s: `gaps-found — fix round ${round + 1} (resuming the build session)` });
-            await buildTurn(run, { feedback: { round: round + 1, source: "verification", gaps } });
-            if (run.cancelRequested) break;
-            if (!run.state.artifacts.implDelta) throw new Error(`fix round ${round + 1} ended without a new impl-delta`);
-            run.state.artifacts.verify = null;
-            run.state.artifacts.audit = null;
-          }
-          // else: rounds exhausted — loop ends, failure reasons assembled below.
-        }
-        if (run.cancelRequested) throw new Error("cancelled");
-        if (!accepted) {
-          endStep(run, "verify", { status: "failed", error: "gates not accepted" });
-          if (run.options.security !== "off") endStep(run, "security", { status: "cancelled", error: "skipped — verify failed" });
-          run.state.status = "failed";
-          run.state.error =
-            `gates still failing after ${run.options.maxFixRounds} fix round(s): ${assembleFailureReasons(run) ?? "verification did not accept"}`;
-          emit.event(run.id, "_run", { t: "notice", s: `run failed: ${run.state.error}` });
-          await integrate(run, false);
-          settle(run); // the V12 lesson, second verse — every exit path MUST settle
-          return;
-        }
+        emit.event(run.id, "_run", { t: "notice", s: "resume: gates already passed — retrying the merge only" });
       }
 
-      // STEP 4 — security (optional; own bounded fix round + owner override).
-      if (run.options.security !== "off") {
-        for (let round = run.state.securityRound ?? 0; round <= SECURITY_FIX_ROUNDS; round++) {
-          run.state.securityRound = round;
-          emit.state(run);
-          await securityRound(run, round);
-          if (run.cancelRequested) break;
-          const { fixable, unfixable } = securityBlocking(run);
-          if (fixable.length === 0) {
-            if (unfixable.length > 0) {
-              emit.event(run.id, "security", {
-                t: "notice",
-                s: `${unfixable.length} unfixable critical/high finding(s) — owner override required`,
-              });
-              run.state.gate = {
-                type: "security-override",
-                nodeId: "security",
-                findings: unfixable.map((f) => ({ severity: f.severity, title: f.title, evidence: String(f.evidence).slice(0, 300), fix: f.fix ?? null })),
-              };
-              emit.state(run);
-              const decision = await new Promise((resolve) => {
-                run.gateResolver = resolve;
-              }).finally(() => {
-                run.gateResolver = null;
-                run.state.gate = null;
-                emit.state(run);
-              });
-              if (decision === "cancel" || decision?.action === "cancel" || run.cancelRequested) throw new Error("cancelled at security gate");
-              run.state.securityAccepted = { at: new Date().toISOString(), findings: unfixable.map((f) => f.id) };
-              emit.event(run.id, "security", { t: "notice", s: "owner accepted the security risk — recording and continuing" });
-            }
-            endStep(run, "security");
-            break;
-          }
-          if (round < SECURITY_FIX_ROUNDS) {
-            const gaps = fixable.map(
-              (f) => `[security/${f.severity}]${f.file ? ` ${f.file}:` : ""} ${f.title} — ${f.evidence}${f.fix ? ` (fix: ${f.fix})` : ""}`,
-            );
-            emit.event(run.id, "security", { t: "notice", s: `${fixable.length} fixable critical/high finding(s) — security fix round (resuming the build session)` });
-            await buildTurn(run, { feedback: { round: round + 1, source: "security", gaps } });
-            if (run.cancelRequested) break;
-            if (!run.state.artifacts.implDelta) throw new Error(`security fix round ended without a new impl-delta`);
-            run.state.artifacts.security = null;
-          } else {
-            endStep(run, "security", { status: "failed", error: "findings not fixed" });
-            run.state.status = "failed";
-            run.state.error = `security findings not fixed after ${SECURITY_FIX_ROUNDS} round(s): ${assembleFailureReasons(run) ?? fixable.map((f) => f.title).join("; ")}`;
-            emit.event(run.id, "_run", { t: "notice", s: `run failed: ${run.state.error}` });
-            await integrate(run, false);
-            settle(run);
-            return;
-          }
-        }
-        if (run.cancelRequested) throw new Error("cancelled");
-      }
-
-      run.state.status = "completed";
       if (run.state.deferredChecks?.length) {
         emit.event(run.id, "_run", {
           t: "notice",
@@ -1783,9 +2295,22 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           s: `recorded security findings (non-blocking): ${sec.findings.map((f) => `[${f.severity}] ${f.title}`).slice(0, 5).join("; ")}`,
         });
       }
-      await integrate(run, true);
+      // #21: "completed" only once the work actually LANDED. A failed
+      // checkout/ff-merge used to read "completed" with the branch stranded.
+      const landed = await integrate(run, true);
+      if (run.finalized || run.superseded) return;
+      if (landed.ok) {
+        run.state.status = "completed";
+      } else {
+        run.state.status = "failed";
+        run.state.error = landed.error ?? "git: the run's work did not land on the base branch";
+        emit.event(run.id, "_run", { t: "notice", s: `run failed: ${run.state.error}` });
+      }
     } catch (err) {
-      if (run.finalized) {
+      if (run.finalized || run.superseded) {
+        // Hard-cancelled (or superseded by a resume): cancel()/restartExecute own
+        // the state, the git cleanup and the settle observer. Never integrate or
+        // settle here — that would run against the NEWER epoch's tree (E-1).
         run.done.promiseSettled = true;
         run.done.box.promiseSettled = true;
         try {
@@ -1800,6 +2325,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         if (st.status === "running") endStep(run, st.id, { status: "failed", error: String(err?.message ?? err).slice(0, 200) });
       }
       await integrate(run, false);
+      if (run.finalized || run.superseded) return;
       if (run.cancelRequested) {
         run.state.status = "cancelled";
       } else {
@@ -1816,7 +2342,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
   return {
     activeRunFor(projectName) {
       for (const run of runs.values()) {
-        if (run.projectName === projectName && !run.done.promiseSettled) return run.id;
+        if (run.projectName === projectName && isActive(run)) return run.id;
       }
       return null;
     },
@@ -1840,7 +2366,6 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       waveTickets,
       onSettled,
     }) {
-      const options0 = { stopAfterClarify: !!stopAfterClarify };
       // v3.1 wave mode: ONE clarify conversation for the whole batch of
       // tickets (finalize_spec carries ticket_id; specs land in
       // state.artifacts.specs). Requires clarify — a wave without a PM is
@@ -1857,37 +2382,29 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
       // Phase-aware tree lock: clarify-only runs (stopAfterClarify) are
       // read-only — many may overlap; only tree-holding runs exclude each other.
-      for (const other of runs.values()) {
-        if (other.projectPath !== project.path || other.done.promiseSettled) continue;
-        if (!options0.stopAfterClarify && other.holdsTree) {
+      // Check-and-acquire is SYNCHRONOUS (Q-H6): the run is registered in `runs`
+      // with holdsTree before the first await, so two concurrent starts cannot
+      // both pass the check while the other is still doing its git setup.
+      const willHoldTree = !stopAfterClarify;
+      if (willHoldTree) {
+        const other = lockHolder(project.path);
+        if (other) {
           throw new Error(
             `a run is already active on project "${project.name}" (${other.id}) and holds the working tree — wait for it to finish or cancel it`,
           );
         }
       }
-      let gitInfo = null;
-      if (gitRequested) {
-        if (!(await git.isRepo(project.path))) {
-          throw new Error("git is enabled but the project folder is not a git repository");
-        }
-        await git.assertClean(project.path);
-        gitInfo = {
-          enabled: true,
-          baseBranch: await git.currentBranch(project.path),
-          runBranch: `nano-cycle/${id}`,
-        };
-        await git.createBranch(project.path, gitInfo.runBranch, gitInfo.baseBranch);
-      }
+      const gitWanted = !!gitRequested;
       const securityMode = ["off", "scan", "scan+vapt"].includes(securityRequested) ? securityRequested : "off";
       const options = {
         stopAfterClarify: !!stopAfterClarify,
         clarify: !!clarify,
         requireQuestions: clarify && requireQuestions === true,
         maxFixRounds: Number.isFinite(maxFixRounds) ? Math.min(Math.max(maxFixRounds, 0), 5) : MAX_FIX_ROUNDS,
-        git: !!gitInfo,
+        git: gitWanted,
         audit: auditRequested !== false,
         approvePlan: approvePlan !== false,
-        remoteCi: remoteChecksRequested === true && !!gitInfo,
+        remoteCi: remoteChecksRequested === true && gitWanted,
         security: securityMode,
         ticketId: ticketId ?? null,
       };
@@ -1904,7 +2421,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         finishedAt: null,
         gateWaitMs: 0,
         gateSince: null,
-        git: gitInfo ? { ...gitInfo, commits: [], merged: false, mergeError: null } : null,
+        git: null, // filled by setupGit (tree-holding runs only)
         models,
         options,
         steps: [
@@ -1940,6 +2457,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       };
       const run = {
         id,
+        epoch: 1,
         task,
         projectName: project.name,
         projectPath: project.path,
@@ -1949,6 +2467,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         sourceDocCache: undefined,
         state,
         current: new Map(),
+        lifetime: new AbortController(),
         buildHandle: null,
         verifyHandle: null,
         securityHandle: null,
@@ -1956,10 +2475,13 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         answersResolver: null,
         cancelRequested: false,
         finalized: false,
+        superseded: false,
+        cleaning: false,
+        planApproved: false,
         ciCapability: undefined,
-        holdsTree: !options.stopAfterClarify,
+        holdsTree: willHoldTree,
         onSettled: typeof onSettled === "function" ? onSettled : null,
-        git: gitInfo,
+        git: null,
         __emit: emit,
         done: (() => {
           const d = promiseExternals();
@@ -1968,19 +2490,28 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         })(),
       };
       runs.set(id, run);
+      if (gitWanted && willHoldTree) {
+        run.setup = setupGit(run);
+        try {
+          await run.setup;
+        } catch (e) {
+          runs.delete(id); // never started: release the lock reservation
+          throw e;
+        }
+      }
       emit.state(run);
-      if (gitInfo) {
+      if (gitWanted && !willHoldTree) {
         emit.event(id, "_run", {
           t: "notice",
-          s: `git: branch ${gitInfo.runBranch} created from ${gitInfo.baseBranch} — milestone commits, ff-merge on accepted verdict`,
+          s: "git: clarify-only run does not touch the working tree — the run worktree is created when the build starts",
         });
-      } else {
+      } else if (!gitWanted) {
         emit.event(id, "_run", {
           t: "notice",
           s: "git: OFF — all work will be uncommitted (one rm -rf from loss; audits score this as process debt). Enable Git, and Remote CI with a remote, for durable CI-proven runs",
         });
       }
-      if (remoteChecksRequested === true && !gitInfo?.enabled) {
+      if (remoteChecksRequested === true && !gitWanted) {
         emit.event(id, "_run", { t: "notice", s: "remote CI: requested but git is disabled for this run — remote CI verification off" });
       }
       if (securityMode !== "off") {
@@ -1989,7 +2520,8 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           s: `security step enabled: ${securityMode}${securityMode === "scan+vapt" ? " (scanners + running-app VAPT)" : " (scanner triage)"}`,
         });
       }
-      execute(run).catch(() => {}); // execute() never throws — it finalizes state
+      if (run.finalized) return state; // cancelled while the branch was being created: cancel() owns the cleanup
+      run.loop = execute(run).catch(() => {}); // execute() never throws — it finalizes state
       return state;
     },
 
@@ -2045,22 +2577,46 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         run.answersResolver = null;
         r("cancel");
       }
+      // The lock is held until the cleanup below finished (E-2): the next queued
+      // run used to `checkout -b` while this run's git work was still in flight.
+      // `cleaning` is raised BEFORE finalizeCancel: its emit.state is observed
+      // synchronously by the queue, whose pump would otherwise see a free lock.
+      if (!run.finalized) run.cleaning = true;
       const first = finalizeCancel(run);
       if (first) {
         emit.event(run.id, "_run", { t: "notice", s: "cancel requested — stopping sessions and run processes" });
-        try {
-          const res = killRunProcesses({ cwdPrefix: run.projectPath });
-          const n = res.terminated.length + res.killed.length;
-          if (n > 0) {
-            emit.event(run.id, "_run", {
-              t: "notice",
-              s: `terminated ${n} run process(es) (pids ${[...res.terminated, ...res.killed].join(", ")})`,
-            });
+        (async () => {
+          try {
+            try {
+              const res = await killImpl({ cwdPrefix: workDir(run), runId: run.id });
+              const n = res.terminated.length + res.killed.length;
+              if (n > 0) {
+                emit.event(run.id, "_run", {
+                  t: "notice",
+                  s: `terminated ${n} run process(es) (pids ${[...res.terminated, ...res.killed].join(", ")})`,
+                });
+              }
+            } catch {
+              /* best-effort only */
+            }
+            // Let the cancelled loop unwind first (sessions abort → prompts
+            // resolve) so no milestone commit is still in flight when we leave
+            // the run branch. Bounded: a wedged loop must not pin the tree.
+            await Promise.race([Promise.resolve(run.setup).catch(() => {}), sleep(5000)]);
+            await Promise.race([Promise.resolve(run.loop), sleep(cancelGraceMs)]);
+            await integrate(run, false);
+          } catch {
+            /* cleanup is best-effort; the observer must still fire */
+          } finally {
+            run.cleaning = false;
+            emit.state(run);
+            try {
+              run.onSettled?.("cancelled");
+            } catch {
+              /* observer errors never break the run */
+            }
           }
-        } catch {
-          /* best-effort only */
-        }
-        integrate(run, false).catch(() => {}).finally(() => emit.state(run));
+        })();
       }
       return true;
     },
@@ -2071,8 +2627,15 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       if (!["cancelled", "failed"].includes(run.state.status)) {
         return { ok: false, error: "only cancelled or failed runs can be resumed" };
       }
-      if (!run.done.promiseSettled) {
+      if (!run.done.promiseSettled || run.cleaning) {
         return { ok: false, error: "run is still winding down — try again in a moment" };
+      }
+      // Q-H6: an in-session resume re-acquires the tree like any other start.
+      if (run.holdsTree) {
+        const holder = lockHolder(run.projectPath, run);
+        if (holder) {
+          return { ok: false, error: `the working tree is held by run ${holder.id} — wait for it to finish or cancel it` };
+        }
       }
       // fix mode: skip the failed gate's re-run — ONE build turn against the
       // LAST verify report OR security findings
@@ -2081,6 +2644,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           return { ok: false, error: "no verify/security report on this run — plain resume instead" };
         }
         run.state.fixResume = true;
+        run.state.gatesPassed = false;
         for (const s of run.state.steps) {
           if (s.id === "build" && ["cancelled", "failed", "running"].includes(s.status)) {
             s.status = "queued";
@@ -2115,9 +2679,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       if (!run.done.promiseSettled) {
         return { ok: false, error: "run is still settling — try again in a moment" };
       }
-      const holder = [...runs.values()].find(
-        (r) => r !== run && r.projectPath === run.projectPath && !r.done.promiseSettled && r.holdsTree,
-      );
+      const holder = lockHolder(run.projectPath, run);
       if (holder) {
         return { ok: false, error: `the working tree is held by run ${holder.id} — the queue will retry when it finishes` };
       }
@@ -2127,12 +2689,47 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       return restartExecute(run, "promoted by the ticket queue — continuing into build/verify/security");
     },
 
+    // Run delete: drop the run's git worktree (and its node_modules symlinks).
+    // The run BRANCH is kept — an unmerged run's commits are never silently
+    // destroyed. Refuses while the run is live. Never throws.
+    async removeWorktree(id) {
+      try {
+        const live = runs.get(id);
+        if (live && isActive(live)) return { ok: false, error: "run is still active" };
+        let state = live?.state;
+        if (!state) {
+          try {
+            state = JSON.parse(fs.readFileSync(path.join(runDir(id), "state.json"), "utf8"));
+          } catch {
+            state = null;
+          }
+        }
+        const wt = state?.git?.worktree || path.join(runDir(id), "wt");
+        if (!fs.existsSync(wt)) {
+          return { ok: true, removed: false };
+        }
+        let repo = null;
+        try {
+          repo = path.dirname(await git.commonGitDir(wt));
+        } catch {
+          try {
+            repo = resolveProject(state?.project).path;
+          } catch {
+            /* unresolvable — disk cleanup only */
+          }
+        }
+        git.unlinkNodeModules(wt, state?.git?.linkedModules);
+        if (repo) await git.worktreeRemove(repo, wt);
+        else fs.rmSync(wt, { recursive: true, force: true });
+        return { ok: true, removed: true };
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+    },
+
     // v3: does any active run hold this project's working tree?
     treeLockHolder(projectPath) {
-      for (const r of runs.values()) {
-        if (r.projectPath === projectPath && !r.done.promiseSettled && r.holdsTree) return r.id;
-      }
-      return null;
+      return lockHolder(projectPath)?.id ?? null;
     },
 
     // Restart recovery: rebuild the controller from runs/<id>/state.json. The
@@ -2166,9 +2763,13 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           return { ok: false, error: `cannot resolve project "${state.project}" — register it first` };
         }
       }
+      if (opts.promote) state.options.stopAfterClarify = false; // persists via state.options
+      // A clarify-only run never holds the tree (Q-C2); a resumed BUILD run does.
+      const holdsTree = !state.options.stopAfterClarify;
       // Phase-aware lock (same law as promote): only a tree-HOLDING run blocks.
-      for (const other of runs.values()) {
-        if (other.projectPath === projectPath && !other.done.promiseSettled && other.holdsTree) {
+      if (holdsTree) {
+        const other = lockHolder(projectPath);
+        if (other) {
           return { ok: false, error: `the working tree is held by run ${other.id} — the queue will retry when it finishes` };
         }
       }
@@ -2184,10 +2785,14 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           return { ok: false, error: "no verify/security report on this run — plain resume instead" };
         }
         state.fixResume = true;
+        state.gatesPassed = false;
       }
-      if (opts.promote) state.options.stopAfterClarify = false; // persists via state.options
+      // Pre-Q-C2 clarify runs carry an empty git block for a branch that no
+      // longer exists; the promoted build creates its own under the lock.
+      if (opts.promote && state.git?.enabled && !(state.git.commits ?? []).length) state.git = null;
       const run = {
         id,
+        epoch: 1,
         task: state.task,
         projectName: state.project,
         projectPath,
@@ -2197,6 +2802,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         sourceDocCache: undefined,
         state,
         current: new Map(),
+        lifetime: new AbortController(),
         buildHandle: null,
         verifyHandle: null,
         securityHandle: null,
@@ -2204,10 +2810,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         answersResolver: null,
         cancelRequested: false,
         finalized: false,
+        superseded: false,
+        cleaning: false,
+        planApproved: false,
         ciCapability: undefined,
-        pendingPlanGate: null,
-        pendingQuestions: null,
-        holdsTree: true, // a resumed run continues building — it owns the tree
+        holdsTree,
         onSettled: typeof opts.onSettled === "function" ? opts.onSettled : null,
         git: state.git?.enabled ? state.git : null,
         __emit: emit,
@@ -2228,22 +2835,59 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     },
   };
 
-  function restartExecute(run, notice) {
-    run.cancelRequested = false;
-    run.finalized = false;
-    run.buildHandle = null; // reopened lazily from step.sessionFile
+  // Start a NEW execute() epoch for a run. The previous controller object (whose
+  // loop may still be unwinding after a cancel) is retired: it stays
+  // cancelled/finalized/superseded forever, so every closure it still holds
+  // (tools, gate waiters, the catch handler) is inert and cannot integrate,
+  // settle or write state under the new epoch (E-1). Everything the new epoch
+  // needs is fresh; durable truth lives in run.state.
+  function restartExecute(old, notice) {
+    old.superseded = true;
+    old.cancelRequested = true;
+    old.finalized = true;
+    try {
+      old.lifetime?.abort();
+    } catch {
+      /* ignore */
+    }
+    const run = {
+      ...old,
+      epoch: (old.epoch ?? 1) + 1,
+      current: new Map(),
+      lifetime: new AbortController(),
+      buildHandle: null, // reopened lazily from step.sessionFile
+      verifyHandle: null,
+      securityHandle: null,
+      gateResolver: null,
+      answersResolver: null,
+      cancelRequested: false,
+      finalized: false,
+      superseded: false,
+      cleaning: false,
+      planApproved: false,
+      gateSince: null,
+      loop: null,
+      setup: null,
+      done: (() => {
+        const d = promiseExternals();
+        d.promiseSettled = false;
+        return d;
+      })(),
+    };
+    // #18: a gate left open when the process died (or the run was cancelled
+    // before finalizeCancel could stash it) must survive the reset below.
+    const g = run.state.gate;
+    if (g?.type === "answers" && g.questions?.length && !run.state.pendingQuestions) {
+      run.state.pendingQuestions = { round: g.round ?? 1, questions: g.questions };
+    }
     run.state.status = "running";
     run.state.finishedAt = null;
     run.state.error = null;
     run.state.gate = null;
-    run.gateResolver = null;
-    run.answersResolver = null;
-    const d = promiseExternals();
-    d.promiseSettled = false;
-    run.done = d;
+    runs.set(run.id, run);
     emit.state(run);
     emit.event(run.id, "_run", { t: "notice", s: notice });
-    execute(run).catch(() => {}); // execute() never throws — it finalizes state
+    run.loop = execute(run).catch(() => {}); // execute() never throws — it finalizes state
     return { ok: true };
   }
 }
