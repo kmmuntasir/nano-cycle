@@ -301,15 +301,20 @@ function subdirs(dir) {
   }
 }
 
-/** Symlink node_modules dirs from `mainDir` into `wtDir`. Returns the relative paths linked. */
-export function linkNodeModules(mainDir, wtDir) {
+/** Root + one level of workspace dirs (+ packages/*, apps/*, …), relative to `mainDir`. */
+function workspaceDirs(mainDir) {
   const candidates = [""];
   for (const d of subdirs(mainDir)) {
     candidates.push(d);
     if (WORKSPACE_PARENTS.includes(d)) for (const c of subdirs(path.join(mainDir, d))) candidates.push(path.join(d, c));
   }
+  return candidates;
+}
+
+/** Symlink node_modules dirs from `mainDir` into `wtDir`. Returns the relative paths linked. */
+export function linkNodeModules(mainDir, wtDir) {
   const linked = [];
-  for (const rel of candidates) {
+  for (const rel of workspaceDirs(mainDir)) {
     const src = path.join(mainDir, rel, "node_modules");
     const dest = path.join(wtDir, rel, "node_modules");
     try {
@@ -328,6 +333,65 @@ export function linkNodeModules(mainDir, wtDir) {
     }
   }
   return linked;
+}
+
+// Real env files (.env, .env.local, .env.production, …) — NOT templates.
+const ENV_FILE_RE = /^\.env(\..+)?$/;
+const ENV_TEMPLATE_RE = /\.(example|sample|template|dist|defaults?)$/i;
+
+/** COPY (never link) the project's gitignored .env / .env.* files — root and one
+ *  level of workspace dirs — into the worktree. Only files git ignores in the
+ *  checkout are copied (an untracked, un-ignored env file is the owner's
+ *  business, and tracked ones are already in the worktree); templates are
+ *  skipped; existing files are never overwritten. Returns the relative paths. */
+export async function copyEnvFiles(mainDir, wtDir) {
+  const copied = [];
+  for (const rel of workspaceDirs(mainDir)) {
+    let names = [];
+    try {
+      names = fs.readdirSync(path.join(mainDir, rel));
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!ENV_FILE_RE.test(name) || ENV_TEMPLATE_RE.test(name)) continue;
+      const relFile = path.join(rel, name);
+      const src = path.join(mainDir, relFile);
+      const dest = path.join(wtDir, relFile);
+      try {
+        if (!fs.lstatSync(src).isFile()) continue;
+        if (!fs.statSync(path.join(wtDir, rel)).isDirectory()) continue;
+        try {
+          fs.lstatSync(dest);
+          continue; // tracked or already copied
+        } catch {
+          /* absent */
+        }
+        await git(mainDir, ["check-ignore", "-q", "--", relFile]); // rejects (exit 1) when NOT ignored
+        fs.copyFileSync(src, dest);
+        fs.chmodSync(dest, 0o600);
+        copied.push(relFile);
+      } catch {
+        /* not ignored / unreadable — never copied */
+      }
+    }
+  }
+  return copied;
+}
+
+/** Paths changed between two revs (`a..b`), repo-relative. */
+export async function diffNames(cwd, a, b) {
+  return (await git(cwd, ["diff", "--name-only", "-z", `${a}..${b}`])).split("\0").filter(Boolean);
+}
+
+/** Every path the checkout reports as dirty (modified/staged/untracked, renames' sources too). */
+export async function dirtyPaths(cwd) {
+  const out = new Set();
+  for (const e of await statusEntries(cwd)) {
+    out.add(e.path);
+    if (e.orig) out.add(e.orig);
+  }
+  return out;
 }
 
 /** Remove the symlinks created by linkNodeModules (only symlinks — never a real dir). */

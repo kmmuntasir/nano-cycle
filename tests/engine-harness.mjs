@@ -1673,20 +1673,152 @@ await test("worktree: base branch NOT checked out anywhere → merge advances th
   cleanup(repo);
 });
 
-await test("worktree: base moved without conflict → the run branch is rebased in the worktree and lands", async () => {
+await test("worktree: base moved (tree changes) → rebase, RE-VERIFY the rebased tree, then land; pure ff and tree-neutral base moves skip re-verify", async () => {
   stepStores.clear(); openCalls.length = 0;
   const { repo, g, base } = mkRepo();
+  const verifyPrompts = [];
   const scripts = {
     build: [async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); }],
-    verify: [async (ctx) => { fs.writeFileSync(path.join(repo, "UNRELATED.md"), "other work\n"); g(["add", "."]); g(["commit", "-qm", "unrelated"]); await happyVerify(ctx); }],
+    verify: [
+      async (ctx) => { fs.writeFileSync(path.join(repo, "UNRELATED.md"), "other work\n"); g(["add", "."]); g(["commit", "-qm", "unrelated"]); await happyVerify(ctx); },
+      async (ctx) => { verifyPrompts.push(gitIn(ctx.cwd, ["ls-files"])); await happyVerify(ctx); },
+    ],
   };
   const { state, events } = await runEngine({ scripts, projectPath: repo, extraStart: { git: true } });
   assert.strictEqual(state.status, "completed", state.error);
   assert.ok(events.some((e) => /rebasing nano-cycle\//.test(e.s ?? "")), "rebase announced");
+  assert.ok(events.some((e) => /re-verifying before the merge/.test(e.s ?? "")), "re-verify announced");
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, 2, "verifier ran again on the rebased tree");
+  assert.ok(/UNRELATED\.md/.test(verifyPrompts[0] ?? "") && /controller\.ts/.test(verifyPrompts[0] ?? ""), "the second verify saw base's new commit AND the run's work");
   const files = g(["ls-files"]);
   assert.ok(files.includes("UNRELATED.md") && files.includes("src/health/controller.ts"), "both lines of work are on base");
   assert.strictEqual(g(["rev-list", "--merges", "--count", base]).trim(), "0", "linear history");
   cleanup(repo);
+
+  // pure ff: no movement → one verify only
+  stepStores.clear(); openCalls.length = 0;
+  const r2 = mkRepo();
+  let out = await runEngine({ scripts: { build: [async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); }], verify: [happyVerify] }, projectPath: r2.repo, extraStart: { git: true } });
+  assert.strictEqual(out.state.status, "completed", out.state.error);
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, 1, "pure ff: verified once");
+  cleanup(r2.repo);
+
+  // base moved by an EMPTY commit: the rebased tree equals the verified one → no re-verify
+  stepStores.clear(); openCalls.length = 0;
+  const r3 = mkRepo();
+  out = await runEngine({
+    scripts: { build: [async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); }], verify: [async (ctx) => { r3.g(["commit", "-q", "--allow-empty", "-m", "noop"]); await happyVerify(ctx); }] },
+    projectPath: r3.repo, extraStart: { git: true },
+  });
+  assert.strictEqual(out.state.status, "completed", out.state.error);
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, 1, "tree-neutral base move: verified once");
+  cleanup(r3.repo);
+});
+
+await test("worktree: re-verification after a rebase that FAILS fails the run (branch + worktree kept, nothing merged)", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g, base } = mkRepo();
+  const scripts = {
+    build: [async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); }],
+    verify: [
+      async (ctx) => { fs.writeFileSync(path.join(repo, "UNRELATED.md"), "x\n"); g(["add", "."]); g(["commit", "-qm", "unrelated"]); await happyVerify(ctx); },
+      async ({ tools }) => { await callTool(tools, "submit_verify", verifyArtifact(false)); },
+    ],
+  };
+  const r = await runEngine({ scripts, projectPath: repo, maxFixRounds: 0, extraStart: { git: true } });
+  assert.strictEqual(r.state.status, "failed");
+  assert.match(r.state.error ?? "", /after rebasing onto the moved/);
+  assert.strictEqual(r.state.git.merged, false);
+  assert.ok(!g(["ls-files"]).includes("src/health/controller.ts"), "unverified rebased tree never reached base");
+  assert.ok(fs.existsSync(r.state.git.worktree) && g(["branch", "--list", r.state.git.runBranch]).trim(), "branch + worktree kept");
+  assert.strictEqual(r.state.gatesPassed === true, false, "a failed re-verify never resumes as 'merge only'");
+  cleanup(repo);
+});
+
+await test("worktree: dirty base checkout — merge refused BEFORE touching it when dirty paths overlap (named, Resume retries); no overlap merges", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g } = mkRepo({ "OTHER.md": "tracked\n" });
+  const scripts = {
+    build: [async (ctx) => { writeDeclared(ctx.cwd); await happyBuild(ctx); }],
+    verify: [async (ctx) => {
+      // the owner edits README.md (which the run also changed) and drops an untracked file that collides with a run file
+      fs.writeFileSync(path.join(repo, "README.md"), "owner wip\n");
+      fs.mkdirSync(path.join(repo, "src/health"), { recursive: true });
+      fs.writeFileSync(path.join(repo, "src/health/service.ts"), "owner untracked\n");
+      fs.writeFileSync(path.join(repo, "OTHER.md"), "tracked\nowner edit\n"); // not touched by the run
+      await happyVerify(ctx);
+    }],
+  };
+  const engine = mkEngine(scripts);
+  const settled = [];
+  const id = `dirty-${Date.now()}`;
+  const st = await startRun(engine, id, { path: repo, git: true, onSettled: (x) => settled.push(x) });
+  assert.ok(await waitFor(() => settled.length === 1), `status=${st.status}`);
+  assert.strictEqual(st.status, "failed");
+  assert.match(st.error ?? "", /README\.md/);
+  assert.match(st.error ?? "", /src\/health\/service\.ts/);
+  assert.match(st.error ?? "", /commit\/stash these in .*then Resume to retry the merge/);
+  assert.strictEqual(fs.readFileSync(path.join(repo, "README.md"), "utf8"), "owner wip\n", "owner's file untouched");
+  assert.ok(fs.existsSync(st.git.worktree) && g(["branch", "--list", st.git.runBranch]).trim(), "branch + worktree kept");
+  // owner resolves: stash everything, resume → merge only
+  g(["stash", "push", "--include-untracked", "-m", "owner"]);
+  const verifyOpens = openCalls.filter((c) => c.stepId === "verify").length;
+  let res;
+  assert.ok(await waitFor(() => (res = engine.resume(id)).ok), res?.error);
+  assert.ok(await waitFor(() => settled.length === 2), `status=${st.status}`);
+  assert.strictEqual(st.status, "completed", st.error);
+  assert.strictEqual(openCalls.filter((c) => c.stepId === "verify").length, verifyOpens, "merge only");
+  assert.ok(g(["ls-files"]).includes("src/health/controller.ts"));
+  cleanup(repo);
+});
+
+await test("worktree: gitignored .env / .env.* are COPIED (not linked, not templates, not committed), removed with the worktree", async () => {
+  stepStores.clear(); openCalls.length = 0;
+  const { repo, g } = mkRepo({ ".gitignore": ".env\n.env.*\n!.env.example\nnode_modules/\n", ".env.example": "KEY=\n" });
+  fs.mkdirSync(path.join(repo, "web"));
+  fs.writeFileSync(path.join(repo, "web/package.json"), "{}\n");
+  g(["add", "."]);
+  g(["commit", "-qm", "web"]);
+  fs.writeFileSync(path.join(repo, ".env"), "KEY=secret\n");
+  fs.writeFileSync(path.join(repo, ".env.local"), "LOCAL=1\n");
+  fs.writeFileSync(path.join(repo, "web/.env"), "WEB=1\n");
+  fs.writeFileSync(path.join(repo, "web/.env.sample"), "WEB=\n"); // template (untracked, not ignored): never copied
+  fs.writeFileSync(path.join(repo, "notes.secret"), "not an env file\n");
+  fs.writeFileSync(path.join(repo, "README.local"), "x\n");
+  let cwdSeen, statusSeen;
+  const scripts = {
+    build: [async (ctx) => {
+      cwdSeen = ctx.cwd;
+      assert.strictEqual(fs.readFileSync(path.join(ctx.cwd, ".env"), "utf8"), "KEY=secret\n");
+      assert.ok(fs.lstatSync(path.join(ctx.cwd, ".env")).isFile() && !fs.lstatSync(path.join(ctx.cwd, ".env")).isSymbolicLink(), "a copy, not a link");
+      assert.ok(fs.existsSync(path.join(ctx.cwd, ".env.local")) && fs.existsSync(path.join(ctx.cwd, "web/.env")));
+      assert.ok(fs.existsSync(path.join(ctx.cwd, ".env.example")), "tracked template is there because it is tracked");
+      assert.ok(!fs.existsSync(path.join(ctx.cwd, "web/.env.sample")), "templates are never copied");
+      assert.ok(!fs.existsSync(path.join(ctx.cwd, "notes.secret")) && !fs.existsSync(path.join(ctx.cwd, "README.local")), "nothing else is copied");
+      fs.appendFileSync(path.join(ctx.cwd, ".env"), "EDIT=in-worktree\n");
+      statusSeen = gitIn(ctx.cwd, ["status", "--porcelain"]);
+      writeDeclared(ctx.cwd);
+      await happyBuild(ctx);
+    }],
+    verify: [happyVerify],
+  };
+  const { state } = await runEngine({ scripts, projectPath: repo, extraStart: { git: true } });
+  assert.strictEqual(state.status, "completed", state.error);
+  assert.strictEqual(statusSeen.trim(), "", "env copies are invisible to git status");
+  const tracked = g(["ls-files"]);
+  assert.ok(!/(^|\n)(web\/)?\.env(\.local)?(\n|$)/.test(tracked), "env files never committed");
+  assert.strictEqual(fs.readFileSync(path.join(repo, ".env"), "utf8"), "KEY=secret\n", "the owner's .env was not modified by the run's edit of its copy");
+  assert.ok(!fs.existsSync(cwdSeen), "copies removed with the worktree");
+  cleanup(repo);
+  // an env file that is NOT gitignored is not the driver's to copy
+  stepStores.clear(); openCalls.length = 0;
+  const r2 = mkRepo();
+  fs.writeFileSync(path.join(r2.repo, ".env"), "UNIGNORED=1\n");
+  let had;
+  const out = await runEngine({ scripts: { build: [async (ctx) => { had = fs.existsSync(path.join(ctx.cwd, ".env")); writeDeclared(ctx.cwd); await happyBuild(ctx); }], verify: [happyVerify] }, projectPath: r2.repo, extraStart: { git: true } });
+  assert.strictEqual(out.state.status, "completed", out.state.error);
+  assert.strictEqual(had, false, "un-ignored env file is not copied");
+  cleanup(r2.repo);
 });
 
 await test("worktree: resume after the worktree DIRECTORY was deleted re-adds it on the existing branch (milestones kept); removeWorktree() cleans a kept one", async () => {
@@ -1717,9 +1849,9 @@ await test("worktree: resume after the worktree DIRECTORY was deleted re-adds it
   assert.ok(events.some((e) => /worktree re-attached/.test(e.s ?? "")), "re-add announced");
   assert.ok(g(["ls-files"]).includes("src/health/controller.ts"), "the milestone commit survived and merged");
   assert.ok(!fs.existsSync(wt), "removed again after the merge");
-  // a failed (kept) run's worktree is dropped by removeWorktree — the branch stays
+  // a failed run WITH unmerged commits: removeWorktree drops the worktree, prunes, keeps the branch (safe -d refuses)
   stepStores.clear(); openCalls.length = 0;
-  const scripts2 = { build: [async () => { throw new Error("boom"); }] };
+  const scripts2 = { build: [async (ctx) => { writeDeclared(ctx.cwd); fs.writeFileSync(path.join(ctx.cwd, "README.md"), "second run\n"); await happyBuild(ctx); }], verify: [async () => { throw new Error("boom"); }] };
   const e2 = mkEngine(scripts2);
   const settled2 = [];
   const id2 = `wt-del-${Date.now()}`;
@@ -1727,10 +1859,20 @@ await test("worktree: resume after the worktree DIRECTORY was deleted re-adds it
   assert.ok(await waitFor(() => settled2.length === 1));
   assert.strictEqual(st2.status, "failed");
   assert.ok(fs.existsSync(st2.git.worktree), "failed run keeps its worktree");
-  assert.deepStrictEqual(await e2.removeWorktree(id2), { ok: true, removed: true });
+  assert.deepStrictEqual(await e2.removeWorktree(id2), { ok: true, removed: true, keptBranch: st2.git.runBranch, reason: "unmerged" });
   assert.ok(!fs.existsSync(st2.git.worktree));
   assert.strictEqual(gitIn(repo, ["worktree", "list"]).trim().split("\n").length, 1, "worktree unregistered");
   assert.ok(g(["branch", "--list", st2.git.runBranch]).trim(), "the unmerged branch is kept");
+  // a failed run with NOTHING unmerged: the branch is deleted (safe -d)
+  stepStores.clear(); openCalls.length = 0;
+  const e3 = mkEngine({ build: [async () => { throw new Error("boom"); }] });
+  const settled3 = [];
+  const id3 = `wt-del2-${Date.now()}`;
+  const st3 = await startRun(e3, id3, { path: repo, git: true, onSettled: (x) => settled3.push(x) });
+  assert.ok(await waitFor(() => settled3.length === 1));
+  const out3 = await e3.removeWorktree(id3);
+  assert.strictEqual(out3.deletedBranch, st3.git.runBranch);
+  assert.ok(!g(["branch", "--list", st3.git.runBranch]).trim(), "fully-merged (empty) branch deleted with -d");
   cleanup(repo);
 });
 

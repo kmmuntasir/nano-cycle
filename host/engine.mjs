@@ -45,6 +45,11 @@ import { killRunProcesses } from "./prockill.mjs";
 import { runDir } from "./state.mjs";
 import { resolveProject } from "./projects.mjs";
 
+// Rebase-induced re-verification: how many times a moved base may send a run
+// back through the verify gate, and how many fix rounds each such pass gets.
+const REBASE_REVERIFY_MAX = 2;
+const REBASE_FIX_ROUNDS = 1;
+
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCANNER_SCRIPT = path.join(ROOT_DIR, "skills", "security-scan", "scripts", "run-scanners.mjs");
 const SKILL_DIRS = {
@@ -467,19 +472,29 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     if (run.state.git && run.state.git !== run.git) Object.assign(run.state.git, patch);
   };
 
-  // Share the owner's gitignored node_modules with the worktree (see
-  // git.linkNodeModules for the limitation: nothing else gitignored is copied).
+  // Share the owner's gitignored node_modules with the worktree (symlinks) and
+  // COPY its gitignored .env / .env.* files (see git.linkNodeModules /
+  // git.copyEnvFiles). LIMITATION: nothing else gitignored (dist/, .venv, caches)
+  // is carried over. Neither kind is ever committed: they are ignored or added
+  // to the exclude file, and the leftover sweep still refuses secret-looking
+  // files. They disappear with the worktree.
   async function linkDependencies(run) {
     const g = run.git;
+    let linked = [];
+    let envFiles = [];
     try {
-      const linked = git.linkNodeModules(run.projectPath, g.worktree);
-      if (linked.length) await git.ensureExcluded(g.worktree, linked);
-      gitSet(run, { linkedModules: linked });
+      linked = git.linkNodeModules(run.projectPath, g.worktree);
+      envFiles = await git.copyEnvFiles(run.projectPath, g.worktree);
+      if (linked.length || envFiles.length) await git.ensureExcluded(g.worktree, [...linked, ...envFiles]);
+      gitSet(run, { linkedModules: linked, envFiles });
       if (linked.length) {
         emit.event(run.id, "_run", { t: "notice", s: `git: linked ${linked.join(", ")} from the project checkout into the run worktree (not committed)` });
       }
+      if (envFiles.length) {
+        emit.event(run.id, "_run", { t: "notice", s: `git: copied gitignored env file(s) into the run worktree (not committed, deleted with it): ${envFiles.join(", ")}` });
+      }
     } catch (e) {
-      emit.event(run.id, "_run", { t: "notice", s: `git: could not link node_modules into the worktree (${String(e?.message ?? e).slice(0, 160)}) — install dependencies there if a check needs them` });
+      emit.event(run.id, "_run", { t: "notice", s: `git: could not link dependencies into the worktree (${String(e?.message ?? e).slice(0, 160)}) — install them there if a check needs them` });
     }
   }
 
@@ -496,7 +511,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     const wt = worktreePath(run);
     await git.worktreePrune(run.projectPath);
     fs.rmSync(wt, { recursive: true, force: true }); // a stale dir from an aborted start of this very id
-    const info = { enabled: true, baseBranch, runBranch: `nano-cycle/${run.id}`, baseSha, worktree: wt, linkedModules: [] };
+    const info = { enabled: true, baseBranch, runBranch: `nano-cycle/${run.id}`, baseSha, worktree: wt, linkedModules: [], envFiles: [], verifiedTree: null };
     await git.worktreeAdd(run.projectPath, wt, info.runBranch, baseSha);
     run.git = info;
     run.state.git = { ...info, commits: [], merged: false, mergeError: null };
@@ -734,6 +749,10 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
     try {
       const baseNow = await git.revParse(repo, g.baseBranch);
       if (!baseNow) return fail(`base branch ${g.baseBranch} no longer exists`);
+      // The tree the gates verified (leftovers are already swept in). A run whose
+      // gates passed in an earlier epoch keeps its marker; a fresh pass sets it.
+      const treeNow = async () => (await git.git(wd, ["rev-parse", "HEAD^{tree}"])).trim();
+      if (!g.verifiedTree) gitSet(run, { verifiedTree: await treeNow() });
       if (!(await git.isAncestor(repo, baseNow, g.runBranch))) {
         // base moved while the run worked: rebase the run branch onto it (in
         // the worktree — the owner's checkout is not involved)
@@ -741,14 +760,27 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
         try {
           await git.rebaseOnto(wd, g.baseBranch);
         } catch (e) {
-          return fail(`rebase onto the moved ${g.baseBranch} failed: ${String(e?.message ?? e).split("\n")[0]}`);
+          return fail(`rebase onto the moved ${g.baseBranch} failed (${String(e?.message ?? e).split("\n")[0]}) — resolve it on ${g.baseBranch}, then Resume to retry the merge`);
         }
+      }
+      // New base commits changed what the run branch contains: the verified
+      // state is stale, send the run back through the verify gate.
+      if ((await treeNow()) !== g.verifiedTree) {
+        emit.event(run.id, "_run", { t: "notice", s: `git: the rebased tree differs from the verified one — re-verifying before the merge` });
+        return { ok: false, reverify: true };
       }
       const tip = await git.headSha(wd);
       const holder = await git.branchCheckoutPath(repo, g.baseBranch);
       if (holder) {
-        // base is checked out (normally the owner's checkout): git itself refuses
-        // when the merge would overwrite their uncommitted work — we never force it
+        // base is checked out (normally the owner's checkout). Refuse BEFORE
+        // touching it when the merge would hit files they have uncommitted work in.
+        const touched = await git.diffNames(holder, g.baseBranch, g.runBranch);
+        const dirty = await git.dirtyPaths(holder);
+        const overlap = touched.filter((f) => dirty.has(f));
+        if (overlap.length) {
+          const list = overlap.slice(0, 8).join(", ") + (overlap.length > 8 ? `, … (+${overlap.length - 8})` : "");
+          return fail(`uncommitted changes in ${holder} overlap files this run changes: ${list} — commit/stash these in ${holder}, then Resume to retry the merge`);
+        }
         await git.ffMerge(holder, g.runBranch);
       } else {
         await git.updateBranchRef(repo, g.baseBranch, tip, baseNow);
@@ -2274,6 +2306,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       // STEPS 2-4. A run whose gates already passed (it failed only at the
       // final merge) resumes straight to integrate instead of re-verifying.
       if (!run.state.gatesPassed) {
+        if (run.git?.enabled) gitSet(run, { verifiedTree: null }); // the gates (re)verify; the marker is taken at the merge
         if ((await runGates(run)) === "failed") return;
         if (run.finalized || run.superseded) return;
         run.state.gatesPassed = true;
@@ -2297,7 +2330,28 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       }
       // #21: "completed" only once the work actually LANDED. A failed
       // checkout/ff-merge used to read "completed" with the branch stranded.
-      const landed = await integrate(run, true);
+      let landed = await integrate(run, true);
+      // Rebase onto a moved base changed the tree: verify the NEW tree (one
+      // verify + REBASE_FIX_ROUNDS fix round, the #16 path), then try again.
+      for (let attempt = 1; landed.reverify && !run.finalized && !run.superseded; attempt++) {
+        if (attempt > REBASE_REVERIFY_MAX) {
+          landed = { ok: false, error: `git: ${run.git.baseBranch} kept moving — the rebased tree was re-verified ${REBASE_REVERIFY_MAX} time(s) and the base changed again; Resume to retry the merge` };
+          break;
+        }
+        run.state.gatesPassed = false; // a crash/failure mid re-verify must not resume as "merge only"
+        gitSet(run, { verifiedTree: null });
+        emit.state(run);
+        const startRound = Math.max(0, run.options.maxFixRounds - REBASE_FIX_ROUNDS);
+        if (!(await verifyLoop(run, startRound))) {
+          endStep(run, "verify", { status: "failed", error: "gates not accepted after rebasing onto the moved base" });
+          await failRun(run, `verification failed after rebasing onto the moved ${run.git.baseBranch}: ${assembleFailureReasons(run) ?? "verification did not accept"}`);
+          return;
+        }
+        if (run.finalized || run.superseded) return;
+        run.state.gatesPassed = true;
+        emit.state(run);
+        landed = await integrate(run, true);
+      }
       if (run.finalized || run.superseded) return;
       if (landed.ok) {
         run.state.status = "completed";
@@ -2689,9 +2743,11 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
       return restartExecute(run, "promoted by the ticket queue — continuing into build/verify/security");
     },
 
-    // Run delete: drop the run's git worktree (and its node_modules symlinks).
-    // The run BRANCH is kept — an unmerged run's commits are never silently
-    // destroyed. Refuses while the run is live. Never throws.
+    // Run delete: drop the run's git worktree (+ its node_modules symlinks and
+    // copied env files), prune stale registrations, and delete the run BRANCH
+    // only when it is fully merged (`git branch -d` — never -D): an unmerged
+    // run's commits are never silently destroyed. Refuses while the run is
+    // live. Never throws. Returns { ok, removed, keptBranch?, reason? }.
     async removeWorktree(id) {
       try {
         const live = runs.get(id);
@@ -2705,23 +2761,47 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
           }
         }
         const wt = state?.git?.worktree || path.join(runDir(id), "wt");
-        if (!fs.existsSync(wt)) {
-          return { ok: true, removed: false };
-        }
         let repo = null;
-        try {
-          repo = path.dirname(await git.commonGitDir(wt));
-        } catch {
+        if (fs.existsSync(wt)) {
           try {
-            repo = resolveProject(state?.project).path;
+            repo = path.dirname(await git.commonGitDir(wt));
+          } catch {
+            /* fall through to the registry */
+          }
+        }
+        if (!repo && state?.project) {
+          try {
+            repo = resolveProject(state.project).path;
           } catch {
             /* unresolvable — disk cleanup only */
           }
         }
-        git.unlinkNodeModules(wt, state?.git?.linkedModules);
-        if (repo) await git.worktreeRemove(repo, wt);
-        else fs.rmSync(wt, { recursive: true, force: true });
-        return { ok: true, removed: true };
+        const existed = fs.existsSync(wt);
+        if (existed) {
+          git.unlinkNodeModules(wt, state?.git?.linkedModules);
+          if (repo) await git.worktreeRemove(repo, wt);
+          else fs.rmSync(wt, { recursive: true, force: true });
+        }
+        const out = { ok: true, removed: existed };
+        if (repo) {
+          try {
+            await git.worktreePrune(repo);
+          } catch {
+            /* best effort */
+          }
+          const branch = state?.git?.runBranch;
+          if (branch && (await git.branchExists(repo, branch))) {
+            try {
+              await git.deleteBranch(repo, branch); // safe -d: refuses unless merged
+              out.deletedBranch = branch;
+            } catch {
+              out.keptBranch = branch;
+              out.reason = "unmerged";
+              console.log(`[run delete ${id}] kept branch ${branch} (unmerged) in ${repo}`);
+            }
+          }
+        }
+        return out;
       } catch (e) {
         return { ok: false, error: String(e?.message ?? e) };
       }

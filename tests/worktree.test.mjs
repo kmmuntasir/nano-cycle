@@ -152,6 +152,40 @@ await test("commitFile commits ONLY its path (the owner's other staged work is n
   assert.strictEqual(await git.commitFile(repo, "doc.md", "again"), null, "nothing to commit → null");
 });
 
+await test("copyEnvFiles copies only gitignored real env files (root + workspace), never templates/links/overwrites; diffNames + dirtyPaths", async () => {
+  const { repo, g, wt } = mkRepo({ ".gitignore": ".env\n.env.*\n!.env.example\n", ".env.example": "K=\n", "web/package.json": "{}\n", "nested/deep/package.json": "{}\n" });
+  fs.writeFileSync(path.join(repo, ".env"), "A=1\n");
+  fs.writeFileSync(path.join(repo, ".env.production"), "B=1\n");
+  fs.writeFileSync(path.join(repo, ".env.sample"), "S=\n");
+  fs.writeFileSync(path.join(repo, "web/.env"), "W=1\n");
+  fs.writeFileSync(path.join(repo, "nested/deep/.env"), "TOO_DEEP=1\n"); // two levels down: out of scope
+  fs.writeFileSync(path.join(repo, "other.txt"), "x\n");
+  await git.worktreeAdd(repo, wt, "run/e", await git.revParse(repo, "main"));
+  fs.writeFileSync(path.join(wt, ".env"), "EDITED=1\n"); // pre-existing dest is never overwritten
+  const copied = await git.copyEnvFiles(repo, wt);
+  assert.deepStrictEqual(copied.sort(), [".env.production", "web/.env"]);
+  assert.strictEqual(fs.readFileSync(path.join(wt, ".env"), "utf8"), "EDITED=1\n");
+  assert.ok(!fs.existsSync(path.join(wt, ".env.sample")) && !fs.existsSync(path.join(wt, "other.txt")) && !fs.existsSync(path.join(wt, "nested/deep/.env")));
+  assert.ok(!fs.lstatSync(path.join(wt, "web/.env")).isSymbolicLink());
+  assert.strictEqual(execFileSync("git", ["status", "--porcelain"], { cwd: wt }).toString().trim(), "");
+  // a project whose .gitignore does not cover the copy in the worktree gets the exclude entry
+  assert.deepStrictEqual(await git.copyEnvFiles(repo, wt), [], "idempotent");
+  // diffNames / dirtyPaths
+  const wg = (args) => execFileSync("git", args, { cwd: wt, stdio: "pipe" }).toString();
+  wg(["config", "user.email", "t@e.c"]);
+  wg(["config", "user.name", "t"]);
+  fs.writeFileSync(path.join(wt, "a.txt"), "changed\n");
+  fs.writeFileSync(path.join(wt, "new.txt"), "n\n");
+  wg(["add", "."]);
+  wg(["commit", "-qm", "work"]);
+  assert.deepStrictEqual((await git.diffNames(repo, "main", "run/e")).sort(), ["a.txt", "new.txt"]);
+  fs.writeFileSync(path.join(repo, "a.txt"), "dirty\n");
+  fs.writeFileSync(path.join(repo, "fresh.txt"), "u\n");
+  const dirty = await git.dirtyPaths(repo);
+  assert.ok(dirty.has("a.txt") && dirty.has("fresh.txt") && !dirty.has("new.txt"));
+  g(["checkout", "--", "a.txt"]);
+});
+
 const failed = results.filter(([, ok]) => !ok);
 console.log(`\n${results.length - failed.length}/${results.length} worktree scenarios passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

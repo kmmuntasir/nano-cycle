@@ -712,10 +712,10 @@ const server = http.createServer(async (req, res) => {
         }
         // the run's git worktree lives INSIDE the run dir: unregister it from the
         // project repo first (a bare rm would leave a dangling worktree record)
-        await pipeline.removeWorktree(id);
+        const wtOut = await pipeline.removeWorktree(id);
         discardRun(id); // drop any buffered writes so they can't resurrect the dir
         fs.rmSync(path.join(runsDir(), id), { recursive: true, force: true });
-        return json(res, 200, { ok: true });
+        return json(res, 200, { ok: true, ...(wtOut?.keptBranch ? { keptBranch: wtOut.keptBranch, reason: wtOut.reason } : {}) });
       }
       if (req.method === "POST" && action === "gate") {
         const body = expect(await readBody(req), { action: "string?", comments: "string?" });
