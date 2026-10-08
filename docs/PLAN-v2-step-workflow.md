@@ -2,7 +2,7 @@
 
 **Status:** IMPLEMENTED on branch `v2-step-workflow` — live V1/V2 passed, remaining live validation (V3–V12) is the owner's: see `docs/V2-VALIDATION.md`
 **Supersedes:** the tier/DAG pipeline engine (`host/pipeline.mjs`)
-**Evidence base:** `PIPELINE-VS-REFERENCE-ROOT-CAUSE-ANALYSIS.md` (RC1–RC10), `comparison.md`, five runs of forensics, and the A/B finding that single-prompting with frontier models matches the multi-node pipeline.
+**Evidence base:** `docs/reports/PIPELINE-VS-REFERENCE-ROOT-CAUSE-ANALYSIS.md` (RC1–RC10), `docs/reports/comparison.md`, five runs of forensics, and the A/B finding that single-prompting with frontier models matches the multi-node pipeline.
 
 ---
 
