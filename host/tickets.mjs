@@ -3,6 +3,7 @@
 // The queue (host/queue.mjs) owns status transitions; this module owns the data.
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 // Tests point NANO_TICKETS_DIR at a throwaway dir — the default is the LIVE
@@ -37,21 +38,75 @@ export function ticketsDir() {
   return TICKETS_DIR;
 }
 
-export function loadTickets(project) {
-  const p = ticketsPath(project);
-  if (!fs.existsSync(p)) return defaultStore(project);
-  try {
-    const store = JSON.parse(fs.readFileSync(p, "utf8"));
-    return { ...defaultStore(project), ...store };
-  } catch {
-    return defaultStore(project);
+// Paths whose last read failed to parse. saveTickets REFUSES to write over
+// them — a corrupt store used to read as empty and the next write destroyed the
+// owner's whole backlog (Q-H5). Cleared when a read succeeds again (the owner
+// repaired the file from its .corrupt-* backup).
+const corruptPaths = new Set();
+
+export class TicketStoreCorruptError extends Error {
+  constructor(project, file, backup, cause) {
+    super(
+      `ticket store for "${project}" is corrupt (${file}): ${cause}. ` +
+        `A backup was kept at ${backup ?? "(backup failed)"}; fix or remove the file — refusing to overwrite it.`,
+    );
+    this.name = "TicketStoreCorruptError";
+    this.code = "TICKETS_CORRUPT";
+    this.project = project;
+    this.file = file;
+    this.backup = backup;
   }
 }
 
+export function loadTickets(project) {
+  const p = ticketsPath(project);
+  if (!fs.existsSync(p)) return defaultStore(project);
+  let store;
+  try {
+    store = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (!store || typeof store !== "object" || Array.isArray(store) || (store.tickets !== undefined && !Array.isArray(store.tickets))) {
+      throw new Error("not a ticket store object");
+    }
+  } catch (e) {
+    corruptPaths.add(p);
+    // Keep the evidence (once per distinct content) and surface the error.
+    let backup = null;
+    try {
+      const raw = fs.readFileSync(p);
+      const tag = createHash("sha1").update(raw).digest("hex").slice(0, 8);
+      backup = `${p}.corrupt-${tag}`;
+      if (!fs.existsSync(backup)) fs.writeFileSync(backup, raw);
+    } catch {
+      backup = null;
+    }
+    throw new TicketStoreCorruptError(project, p, backup, String(e?.message ?? e));
+  }
+  corruptPaths.delete(p);
+  return { ...defaultStore(project), ...store };
+}
+
 export function saveTickets(project, store) {
+  const p = ticketsPath(project);
+  if (corruptPaths.has(p)) {
+    throw new TicketStoreCorruptError(project, p, null, "previous read failed to parse");
+  }
   fs.mkdirSync(TICKETS_DIR, { recursive: true });
   store.updatedAt = new Date().toISOString();
-  fs.writeFileSync(ticketsPath(project), JSON.stringify(store, null, 2));
+  // Atomic: a crash mid-write leaves the old file intact (temp + rename).
+  const tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  try {
+    const fd = fs.openSync(tmp, "w");
+    try {
+      fs.writeFileSync(fd, JSON.stringify(store, null, 2));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, p);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort */ }
+    throw e;
+  }
 }
 
 export function deleteTickets(project) {
@@ -157,6 +212,9 @@ export function setTicketStatus(project, id, status, extra = {}) {
   t.status = status;
   t.blockedReason = status === "blocked" ? (extra.reason ?? t.blockedReason ?? "unspecified") : null;
   t.blockedNote = status === "blocked" ? (extra.note ?? t.blockedNote ?? null) : null;
+  // Where a dependency-cascade block came from, so releasing it never skips a
+  // gate the ticket hadn't passed yet (Q-H2: a draft must not jump to queued).
+  t.blockedFrom = status === "blocked" ? (extra.from ?? (from === "blocked" ? t.blockedFrom : null) ?? null) : null;
   if (extra.runId) t.runId = extra.runId;
   t.updatedAt = new Date().toISOString();
   t.history.push({ at: t.updatedAt, from, to: status, ...(extra.runId ? { runId: extra.runId } : {}), ...(extra.note ? { note: String(extra.note).slice(0, 300) } : {}) });

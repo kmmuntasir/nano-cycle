@@ -1,7 +1,9 @@
 // Ticket store unit tests — TODO 5. Run: node tests/tickets.test.mjs
 import "./_test-dirs.mjs"; // FIRST: isolate tickets/runs stores (never the live data)
 import assert from "node:assert";
-import { createTicket, updateTicket, deleteTicket, setTicketStatus, loadTickets, importTickets } from "../host/tickets.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { createTicket, updateTicket, deleteTicket, setTicketStatus, loadTickets, saveTickets, importTickets, ticketsDir } from "../host/tickets.mjs";
 
 const results = [];
 const test = (name, fn) => {
@@ -75,6 +77,69 @@ test("importTickets: creates with sourceDoc + done flag, skips existing, forward
   const again = importTickets("tick-import", { tickets: [{ id: "F01", title: "one", description: "d1" }], sourceDoc: "docs/features.md" });
   assert.deepStrictEqual(again, { created: [], skipped: ["F01"] });
   assert.strictEqual(loadTickets("tick-import").tickets.length, 3);
+});
+
+// --- Q-H5: atomic writes, corrupt stores are never treated as empty -----------
+
+test("Q-H5: saves are atomic — no temp files left, file always parses", () => {
+  const P = "tick-atomic";
+  createTicket(P, { title: "a" });
+  for (let i = 0; i < 20; i++) setTicketStatus(P, "T01", i % 2 ? "draft" : "clarified");
+  const leftovers = fs.readdirSync(ticketsDir()).filter((f) => f.startsWith(`${P}.`) && f.endsWith(".tmp"));
+  assert.deepStrictEqual(leftovers, [], "no stray temp files");
+  assert.doesNotThrow(() => JSON.parse(fs.readFileSync(path.join(ticketsDir(), `${P}.json`), "utf8")));
+});
+
+test("Q-H5: a failed write leaves the previous store intact (rename never happens)", () => {
+  const P = "tick-failwrite";
+  createTicket(P, { title: "keep me" });
+  const file = path.join(ticketsDir(), `${P}.json`);
+  const before = fs.readFileSync(file, "utf8");
+  const store = loadTickets(P);
+  store.tickets[0].self = store; // circular → JSON.stringify throws mid-save
+  assert.throws(() => saveTickets(P, store));
+  assert.strictEqual(fs.readFileSync(file, "utf8"), before, "original bytes untouched");
+  assert.deepStrictEqual(fs.readdirSync(ticketsDir()).filter((f) => f.startsWith(`${P}.`) && f.endsWith(".tmp")), []);
+});
+
+test("Q-H5: a corrupt store is NOT read as empty — error + .corrupt backup + writes refused", () => {
+  const P = "tick-corrupt";
+  createTicket(P, { title: "precious" });
+  const file = path.join(ticketsDir(), `${P}.json`);
+  const good = fs.readFileSync(file, "utf8");
+  const truncated = good.slice(0, Math.floor(good.length / 2));
+  fs.writeFileSync(file, truncated);
+  assert.throws(() => loadTickets(P), (e) => e.code === "TICKETS_CORRUPT" && /corrupt/.test(e.message));
+  const backups = fs.readdirSync(ticketsDir()).filter((f) => f.startsWith(`${P}.json.corrupt-`));
+  assert.strictEqual(backups.length, 1, "a backup of the corrupt bytes was kept");
+  assert.strictEqual(fs.readFileSync(path.join(ticketsDir(), backups[0]), "utf8"), truncated);
+  // every mutator refuses; the corrupt file is never overwritten with a fresh store
+  assert.throws(() => saveTickets(P, { project: P, tickets: [], queue: {}, config: {} }), /corrupt/);
+  assert.throws(() => createTicket(P, { title: "new" }), /corrupt/);
+  assert.strictEqual(fs.readFileSync(file, "utf8"), truncated, "file untouched");
+  // repair (restore the good bytes) → reads and writes work again
+  fs.writeFileSync(file, good);
+  assert.strictEqual(loadTickets(P).tickets[0].title, "precious");
+  createTicket(P, { title: "after repair" });
+  assert.strictEqual(loadTickets(P).tickets.length, 2);
+});
+
+test("Q-H5: a JSON value that is not a store object counts as corrupt too", () => {
+  const P = "tick-null";
+  fs.mkdirSync(ticketsDir(), { recursive: true });
+  fs.writeFileSync(path.join(ticketsDir(), `${P}.json`), "null");
+  assert.throws(() => loadTickets(P), /corrupt/);
+});
+
+test("Q-H2: cascade remembers where a ticket was (blockedFrom) and clears it when unblocked", () => {
+  const P = "tick-from";
+  createTicket(P, { id: "A", title: "a" });
+  setTicketStatus(P, "A", "blocked", { reason: "depends on X", from: "draft" });
+  assert.strictEqual(loadTickets(P).tickets[0].blockedFrom, "draft");
+  setTicketStatus(P, "A", "blocked", { reason: "depends on X" }); // re-block keeps the origin
+  assert.strictEqual(loadTickets(P).tickets[0].blockedFrom, "draft");
+  setTicketStatus(P, "A", "draft");
+  assert.strictEqual(loadTickets(P).tickets[0].blockedFrom, null);
 });
 
 const failed = results.filter(([, ok]) => !ok).length;

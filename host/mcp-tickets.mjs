@@ -13,19 +13,26 @@
 // Any MCP client:
 //   command: node, args: [<repo>/host/mcp-tickets.mjs]
 // Base URL: env NANO_CYCLE_URL (default http://127.0.0.1:4177) — the host
-// server must be running.
+// server must be running. When the host requires auth, set NANO_TOKEN and every
+// request carries `Authorization: Bearer $NANO_TOKEN`.
 import readline from "node:readline";
+import { readTokenFile } from "./auth.mjs";
 
 const BASE = (process.env.NANO_CYCLE_URL ?? "http://127.0.0.1:4177").replace(/\/$/, "");
+const TOKEN = (process.env.NANO_TOKEN ?? "").trim() || readTokenFile() || ""; // env, else the server's token file
+const API_TIMEOUT_MS = Number(process.env.NANO_MCP_TIMEOUT_MS) || 120_000;
 const enc = encodeURIComponent;
 
 async function api(method, apiPath, body) {
   let res;
   try {
+    const headers = body !== undefined ? { "content-type": "application/json" } : {};
+    if (TOKEN) headers.authorization = `Bearer ${TOKEN}`;
     res = await fetch(BASE + apiPath, {
       method,
-      headers: body !== undefined ? { "content-type": "application/json" } : {},
+      headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
     });
   } catch (e) {
     throw new Error(`nano-cycle unreachable at ${BASE} (is the server running? npm start) — ${e?.message ?? e}`);
@@ -36,6 +43,9 @@ async function api(method, apiPath, body) {
     data = JSON.parse(text);
   } catch {
     data = text.slice(0, 2000);
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new Error(`nano-cycle rejected the request (HTTP ${res.status}) — set NANO_TOKEN to the host's access token`);
   }
   if (!res.ok) {
     const msg = data && typeof data === "object" && "error" in data ? data.error : `HTTP ${res.status}`;
@@ -197,12 +207,47 @@ const TOOLS = [
 
 // --- minimal MCP stdio (newline-delimited JSON-RPC 2.0) ---------------------------
 
+// JSON-RPC 2.0 error codes
+const E_PARSE = -32700;
+const E_INVALID_REQUEST = -32600;
+const E_METHOD_NOT_FOUND = -32601;
+const E_INVALID_PARAMS = -32602;
+const E_INTERNAL = -32603;
+
+class RpcError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
 function send(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
 }
 
+const rpcError = (id, code, message) => ({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
+
+// Cheap argument check against the tool's own schema (required + primitive
+// types) so a malformed call is a -32602 instead of a confusing API error.
+function checkArgs(tool, args) {
+  if (args === null || typeof args !== "object" || Array.isArray(args)) {
+    throw new RpcError(E_INVALID_PARAMS, `arguments for ${tool.name} must be an object`);
+  }
+  const schema = tool.inputSchema;
+  for (const key of schema.required ?? []) {
+    if (args[key] === undefined || args[key] === null) throw new RpcError(E_INVALID_PARAMS, `${tool.name}: missing required argument "${key}"`);
+  }
+  for (const [key, def] of Object.entries(schema.properties ?? {})) {
+    const v = args[key];
+    if (v === undefined || v === null || !def.type) continue;
+    const ok = def.type === "array" ? Array.isArray(v) : def.type === "object" ? typeof v === "object" && !Array.isArray(v) : typeof v === def.type;
+    if (!ok) throw new RpcError(E_INVALID_PARAMS, `${tool.name}: argument "${key}" must be ${def.type}`);
+  }
+}
+
 async function handle(msg) {
   const { id, method, params } = msg;
+  const isNotification = id === undefined;
   switch (method) {
     case "initialize":
       return {
@@ -224,11 +269,14 @@ async function handle(msg) {
       };
     case "tools/call": {
       const tool = TOOLS.find((t) => t.name === params?.name);
-      if (!tool) {
-        return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: `unknown tool "${params?.name}"` }] } };
-      }
+      // Unknown tool / bad arguments are protocol errors (MCP spec); a failure
+      // INSIDE a tool (host API error, unreachable server) is an isError result
+      // the model can read and react to.
+      if (!tool) return rpcError(id, E_INVALID_PARAMS, `unknown tool "${params?.name}"`);
+      const args = params?.arguments ?? {};
+      checkArgs(tool, args);
       try {
-        const out = await tool.run(params?.arguments ?? {});
+        const out = await tool.run(args);
         return {
           jsonrpc: "2.0",
           id,
@@ -239,26 +287,40 @@ async function handle(msg) {
       }
     }
     default:
-      return undefined; // notifications (initialized/cancelled) and unknown methods: silence
+      // notifications (initialized/cancelled…) get no reply; an unknown METHOD
+      // that expects one is -32601.
+      if (isNotification || String(method).startsWith("notifications/")) return undefined;
+      return rpcError(id, E_METHOD_NOT_FOUND, `method not found: ${method}`);
   }
 }
 
-process.stderr.write(`[nano-cycle-mcp] serving ${BASE} (${TOOLS.length} tools)\n`);
-const rl = readline.createInterface({ input: process.stdin, terminal: false });
-rl.on("line", (line) => {
+function dispatch(line) {
   const s = line.trim();
   if (!s) return;
   let msg;
   try {
     msg = JSON.parse(s);
   } catch {
-    return; // not JSON-RPC — ignore
+    send(rpcError(null, E_PARSE, "parse error: invalid JSON"));
+    return;
+  }
+  if (msg === null || typeof msg !== "object" || Array.isArray(msg) || typeof msg.method !== "string") {
+    // a response/array/garbage object — only answer if it could have been a request
+    if (msg && typeof msg === "object" && !Array.isArray(msg) && msg.method === undefined && ("result" in msg || "error" in msg)) return; // a client response: ignore
+    send(rpcError(msg && typeof msg === "object" ? msg.id : null, E_INVALID_REQUEST, "invalid request"));
+    return;
   }
   handle(msg)
     .then((resp) => {
       if (resp) send(resp);
     })
     .catch((e) => {
-      if (msg.id !== undefined) send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: String(e?.message ?? e) } });
+      if (msg.id === undefined) return; // never reply to a notification
+      const code = Number.isInteger(e?.code) && e.code <= -32000 && e.code >= -32768 ? e.code : E_INTERNAL;
+      send(rpcError(msg.id, code, String(e?.message ?? e)));
     });
-});
+}
+
+process.stderr.write(`[nano-cycle-mcp] serving ${BASE} (${TOOLS.length} tools${TOKEN ? ", auth token set" : ""})\n`);
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on("line", dispatch);

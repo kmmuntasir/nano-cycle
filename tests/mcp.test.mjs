@@ -32,11 +32,18 @@ const server = http.createServer((req, res) => {
     } catch {
       body = null;
     }
-    hits.push({ method: req.method, path: req.url, body });
+    hits.push({ method: req.method, path: req.url, body, auth: req.headers.authorization ?? null });
     const json = (b) => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(b));
     };
+    if (req.url.startsWith("/api/secure")) {
+      if (req.headers.authorization !== "Bearer s3cret") {
+        res.writeHead(401, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: "unauthorized" }));
+      }
+      return json({ ok: true });
+    }
     if (req.method === "GET" && req.url === "/api/projects") return json([{ name: "demo", path: "/tmp/demo" }]);
     if (req.method === "GET" && req.url === "/api/tickets/demo") return json(store);
     if (req.method === "POST" && req.url === "/api/tickets/demo") {
@@ -60,9 +67,11 @@ const port = server.address().port;
 
 // --- stdio JSON-RPC driver ----------------------------------------------------------
 
-function spawnMcp() {
+function spawnMcp(extraEnv = {}) {
+  const env = { ...process.env, NANO_CYCLE_URL: `http://127.0.0.1:${port}`, ...extraEnv };
+  if (!("NANO_TOKEN" in extraEnv)) delete env.NANO_TOKEN;
   const child = spawn(process.execPath, [path.join(import.meta.dirname, "..", "host", "mcp-tickets.mjs")], {
-    env: { ...process.env, NANO_CYCLE_URL: `http://127.0.0.1:${port}` },
+    env,
     stdio: ["pipe", "pipe", "inherit"],
   });
   let nextId = 1;
@@ -76,9 +85,10 @@ function spawnMcp() {
       buf = buf.slice(i + 1);
       if (!line) continue;
       const msg = JSON.parse(line);
-      if (msg.id !== undefined && pending.has(msg.id)) {
-        pending.get(msg.id)(msg);
-        pending.delete(msg.id);
+      const key = msg.id === undefined ? null : msg.id;
+      if (pending.has(key)) {
+        pending.get(key)(msg);
+        pending.delete(key);
       }
     }
   });
@@ -94,6 +104,14 @@ function spawnMcp() {
           }
         }, 5000);
         child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      });
+    },
+    // a raw line (malformed JSON etc.); replies with id null are keyed under null
+    raw(line) {
+      return new Promise((resolve, reject) => {
+        pending.set(null, resolve);
+        setTimeout(() => (pending.has(null) ? (pending.delete(null), reject(new Error("timeout waiting for raw reply"))) : 0), 5000);
+        child.stdin.write(line + "\n");
       });
     },
     notify(method, params) {
@@ -169,10 +187,61 @@ await test("nano_queue clarify + nano_inbox → queue actions route through", as
   assert.match(textOf(inbox), /"items": \[\]/);
 });
 
-await test("unknown tool → isError result, not a crash", async () => {
+await test("unknown tool → JSON-RPC -32602 (protocol error), not a crash", async () => {
   const r = await mcp.call("tools/call", { name: "nano_nope", arguments: {} });
-  assert.strictEqual(r.result.isError, true);
-  assert.match(textOf(r), /unknown tool/);
+  assert.strictEqual(r.error?.code, -32602);
+  assert.match(r.error.message, /unknown tool/);
+});
+
+await test("missing required argument → -32602, no host call made", async () => {
+  const before = hits.length;
+  const r = await mcp.call("tools/call", { name: "nano_get_tickets", arguments: {} });
+  assert.strictEqual(r.error?.code, -32602);
+  assert.match(r.error.message, /project/);
+  assert.strictEqual(hits.length, before);
+});
+
+await test("unknown method with an id → -32601; notifications get no reply", async () => {
+  const r = await mcp.call("resources/list", {});
+  assert.strictEqual(r.error?.code, -32601);
+  mcp.notify("notifications/cancelled", { requestId: 1 }); // must not produce a reply
+  const ping = await mcp.call("ping", {});
+  assert.deepStrictEqual(ping.result, {});
+});
+
+await test("malformed JSON → -32700 with id null; stays alive", async () => {
+  const r = await mcp.raw("{not json");
+  assert.strictEqual(r.error?.code, -32700);
+  assert.strictEqual(r.id, null);
+  const ping = await mcp.call("ping", {});
+  assert.deepStrictEqual(ping.result, {});
+});
+
+await test("NANO_TOKEN → Authorization: Bearer header on every host call; absent → none", async () => {
+  hits.length = 0;
+  await mcp.call("tools/call", { name: "nano_list_projects", arguments: {} });
+  assert.strictEqual(hits.at(-1).auth, null, "no token configured → no header");
+  const authed = spawnMcp({ NANO_TOKEN: "s3cret" });
+  try {
+    await authed.call("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+    await authed.call("tools/call", { name: "nano_list_projects", arguments: {} });
+    assert.strictEqual(hits.at(-1).auth, "Bearer s3cret");
+  } finally {
+    authed.close();
+  }
+});
+
+await test("a 401 from the host becomes an actionable isError result", async () => {
+  // the mock gates /api/secure*; a base URL ending in it routes every tool call there
+  const bad = spawnMcp({ NANO_TOKEN: "wrong", NANO_CYCLE_URL: `http://127.0.0.1:${port}/api/secure?x=` });
+  try {
+    await bad.call("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+    const r = await bad.call("tools/call", { name: "nano_list_projects", arguments: {} });
+    assert.strictEqual(r.result.isError, true);
+    assert.match(textOf(r), /NANO_TOKEN|HTTP 401/);
+  } finally {
+    bad.close();
+  }
 });
 
 await test("API error surfaces as an isError tool result", async () => {

@@ -165,10 +165,28 @@ export function parseFeaturesMarkdown(markdown) {
   }));
 }
 
+/** True when `abs` is `root` or lies inside it. Uses path.relative, NOT a string
+ *  prefix: `/work/app-secrets` startsWith `/work/app` but is a different tree.
+ *  When both exist, symlinks are resolved too so a link can't tunnel out. */
+export function isPathInside(root, abs) {
+  const inside = (r, a) => {
+    const rel = path.relative(r, a);
+    return rel === "" || (rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel));
+  };
+  const r = path.resolve(root);
+  const a = path.resolve(abs);
+  if (!inside(r, a)) return false;
+  try {
+    return inside(fs.realpathSync(r), fs.realpathSync(a));
+  } catch {
+    return true; // target doesn't exist yet — the lexical check stands
+  }
+}
+
 /** Import a doc file into tickets (does NOT modify the file). */
 export function importFromFile(projectPath, relPath) {
   const abs = path.resolve(projectPath, relPath);
-  if (!abs.startsWith(path.resolve(projectPath))) throw new Error("import path escapes the project");
+  if (!isPathInside(projectPath, abs)) throw new Error("import path escapes the project");
   if (!fs.existsSync(abs)) throw new Error(`file not found: ${relPath}`);
   const tickets = parseFeaturesMarkdown(fs.readFileSync(abs, "utf8"));
   if (tickets.length === 0) {

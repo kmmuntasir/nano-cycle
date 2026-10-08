@@ -1,6 +1,6 @@
 // Backlog parser + status flip unit tests — TODO 6. Run: node tests/backlog.test.mjs
 import assert from "node:assert";
-import { parseFeaturesMarkdown, importFromFile, flipStatus } from "../host/backlog.mjs";
+import { parseFeaturesMarkdown, importFromFile, flipStatus, isPathInside } from "../host/backlog.mjs";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -187,6 +187,29 @@ test("parse: generalized ids — GM-##, NANO-###, F1 with punctuation; prose exc
   ].join("\n");
   const t = parseFeaturesMarkdown(md);
   assert.deepStrictEqual(t.map((x) => x.id), ["GM-101", "NANO-42", "A10", "F1"], JSON.stringify(t.map((x) => x.id)));
+});
+
+test("path containment uses path.relative — a sibling sharing the prefix is NOT inside", () => {
+  assert.strictEqual(isPathInside("/work/app", "/work/app/docs/f.md"), true);
+  assert.strictEqual(isPathInside("/work/app", "/work/app"), true);
+  assert.strictEqual(isPathInside("/work/app", "/work/app-secrets/f.md"), false, "string-prefix match must not pass");
+  assert.strictEqual(isPathInside("/work/app", "/work/app/../other/f.md"), false);
+  assert.strictEqual(isPathInside("/work/app", "/work/app/..hidden/f.md"), true, "a dir literally named ..hidden is inside");
+});
+
+test("importFromFile refuses ../<project>-secrets and symlinks that tunnel out", () => {
+  const base = fs.mkdtempSync("/tmp/nano-backlog-esc-");
+  const proj = path.join(base, "app");
+  const evil = path.join(base, "app-secrets");
+  fs.mkdirSync(path.join(proj, "docs"), { recursive: true });
+  fs.mkdirSync(evil);
+  fs.writeFileSync(path.join(evil, "f.md"), "## F01 — Stolen\n\nbody\n");
+  fs.symlinkSync(path.join(evil, "f.md"), path.join(proj, "docs", "link.md"));
+  fs.writeFileSync(path.join(proj, "docs", "ok.md"), "## F01 — Fine\n\nbody\n");
+  assert.throws(() => importFromFile(proj, "../app-secrets/f.md"), /escapes the project/);
+  assert.throws(() => importFromFile(proj, "docs/link.md"), /escapes the project/);
+  assert.strictEqual(importFromFile(proj, "docs/ok.md").tickets[0].title, "Fine");
+  fs.rmSync(base, { recursive: true, force: true });
 });
 
 const failed = results.filter(([, ok]) => !ok).length;

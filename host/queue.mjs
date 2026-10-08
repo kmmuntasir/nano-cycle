@@ -8,11 +8,14 @@
 // queue keeps delivering independent tickets. `dependsOn` blocks transitively.
 //
 // Gate detection is event-driven: the manager wraps the server's emit.state —
-// a queue-owned run whose state shows an owner-gate (divergence /
-// security-override / answers during a non-inbox phase) parks the ticket and
-// cancels the run (branch + session kept for retry/resume).
+// a queue-owned run whose state shows an owner-gate (status awaiting-gate;
+// divergence / security-override / anything else) parks the ticket and
+// cancels the run (branch + session kept for retry/resume). Parking is
+// idempotent and re-evaluated on every pump, so a cancel that arrives before
+// the engine has installed its gateResolver (or is otherwise lost) is retried
+// instead of leaving a dead run holding the tree.
 import { loadTickets, saveTickets, setTicketStatus, setQueueState, setQueueConfig, ticketsDir } from "./tickets.mjs";
-import { flipStatus } from "./backlog.mjs";
+import { flipStatus, isPathInside } from "./backlog.mjs";
 import { newRunId, runsDir } from "./state.mjs";
 import fs from "node:fs";
 import path from "node:path";
@@ -23,7 +26,14 @@ const GATE_PARK_REASONS = {
 };
 
 export function createQueueManager({ engine, emit, resolveProject, git, broadcast, pumpRetryMs = 60_000 }) {
-  const watching = new Set(); // runIds this manager has parked (avoids double-cancel)
+  // runId -> { run, project, ticketId, confirmed, tries, timer }: gate-parked
+  // runs whose cancel the engine has not yet accepted / whose settle we have
+  // not yet seen. Cleared by onBuildSettled (so a retry that hits a NEW gate
+  // on the same run parks again).
+  const parking = new Map();
+  // Runs started by the owner's "Run now": interactive, not queue-driven — the
+  // owner is at the gate, so the watcher must not park them.
+  const directRuns = new Set();
   let watcherInstalled = false;
   // Deferred promotions (tree held / dirty at promote time) MUST NOT stall the
   // queue: nothing is running, so no future settle would ever re-pump. Retry
@@ -81,6 +91,75 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (next !== store.queue.state) setQueueState(project, { state: next });
   }
 
+  const TERMINAL = ["completed", "failed", "cancelled"];
+  const PARK_MAX_TRIES = 20;
+
+  // Park a ticket whose run is waiting at an owner gate. Idempotent: the first
+  // call blocks the ticket and starts the cancel; later calls only re-try the
+  // cancel while the engine hasn't accepted it.
+  function parkAtGate(project, ticketId, run) {
+    const runId = run.id;
+    const existing = parking.get(runId);
+    if (existing) {
+      existing.run = run;
+      if (!existing.confirmed) tryCancelGate(runId);
+      return;
+    }
+    const t = loadTickets(project).tickets.find((x) => x.id === ticketId);
+    if (!t || t.status !== "running" || t.runId !== runId) return;
+    // The gate payload may not be visible yet (status-only) — any awaiting-gate
+    // of a queue-owned run is an owner decision the queue must not sit on.
+    const reason = GATE_PARK_REASONS[run.state?.gate?.type] ?? "owner-gate";
+    parking.set(runId, { run, project, ticketId, confirmed: false, tries: 0, timer: null });
+    setTicketStatus(project, t.id, "blocked", { reason, runId });
+    emit.event?.(runId, "_run", {
+      t: "notice",
+      s: `queue: ticket ${t.id} parked (${reason}) — gate awaits the owner; the queue moves on`,
+    });
+    broadcastQueue(project);
+    tryCancelGate(runId);
+  }
+
+  // Ask the engine to release the gate. engine.gate() is false while the
+  // run's gateResolver isn't installed (emit.state fires before it on older
+  // engines); fall back to a hard cancel, then retry on a short timer while the
+  // run still shows awaiting-gate.
+  function tryCancelGate(runId) {
+    const p = parking.get(runId);
+    if (!p || p.confirmed) return;
+    if (p.timer) { clearTimeout(p.timer); p.timer = null; }
+    if (TERMINAL.includes(p.run?.state?.status)) { p.confirmed = true; return; }
+    let accepted = false;
+    try { accepted = engine.gate(runId, "cancel") !== false; } catch { /* retry below */ }
+    if (!accepted && typeof engine.cancel === "function") {
+      try { accepted = engine.cancel(runId) !== false; } catch { /* retry below */ }
+    }
+    if (accepted) {
+      p.confirmed = true;
+      return;
+    }
+    p.tries += 1;
+    if (p.tries >= PARK_MAX_TRIES) return; // pump's reconcile keeps trying from here
+    p.timer = setTimeout(() => tryCancelGate(runId), 100 * Math.min(p.tries, 10));
+    p.timer.unref?.();
+  }
+
+  // Re-evaluate on every pump: unconfirmed parks are retried, and a running
+  // ticket whose run is parked at a gate on disk (a lost/early event, a
+  // restart) is parked now — so a gate can never stay dead.
+  function reconcileGates(project, projectPath) {
+    for (const [runId, p] of parking) {
+      if (p.project === project && !p.confirmed) tryCancelGate(runId);
+    }
+    for (const t of loadTickets(project).tickets) {
+      if (t.status !== "running" || !t.runId || parking.has(t.runId) || directRuns.has(t.runId)) continue;
+      const rs = readRunState(t.runId);
+      if (rs?.status === "awaiting-gate" && engine.treeLockHolder(projectPath) === t.runId) {
+        parkAtGate(project, t.id, { id: t.runId, state: { ...rs, ticketId: t.id, project } });
+      }
+    }
+  }
+
   // Wrap emit.state once: watch queue-owned runs for parked conditions.
   function installStateWatcher() {
     if (watcherInstalled) return;
@@ -89,31 +168,44 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     emit.state = (run) => {
       orig(run);
       try {
-        if (run.state.status === "awaiting-gate" && run.state.ticketId) {
-          const store = loadTickets(run.state.project);
-          const t = store.tickets.find((x) => x.id === run.state.ticketId);
-          if (t?.status === "running" && !watching.has(run.id)) {
-            const reason = GATE_PARK_REASONS[run.state.gate?.type];
-            if (reason) {
-              watching.add(run.id);
-              console.error('[watcher] parking', t.id, 'reason', reason);
-              setTicketStatus(run.state.project, t.id, "blocked", { reason, runId: run.id });
-              emit.event(run.id, "_run", {
-                t: "notice",
-                s: `queue: ticket ${t.id} parked (${reason}) — gate awaits the owner; the queue moves on`,
-              });
-              broadcastQueue(run.state.project);
-              engine.gate(run.id, "cancel"); // release the run; branch + session kept for retry
+        const st = run.state;
+        if (st.status === "awaiting-gate" && st.ticketId && !directRuns.has(run.id)) {
+          // Deferred one microtask: the engine installs gateResolver right
+          // after emitting; the cancel must land on the installed resolver.
+          const project = st.project;
+          const ticketId = st.ticketId;
+          queueMicrotask(() => {
+            try {
+              if (run.state.status === "awaiting-gate") parkAtGate(project, ticketId, run);
+            } catch {
+              /* watcher must never break a run */
             }
-          }
+          });
+        }
+        // Safety net for a queue-owned run whose settle callback never reaches
+        // us (an in-session resume that carries no onSettled): once the run is
+        // terminal and its ticket still says running, settle it ourselves. The
+        // normal onSettled fires synchronously after this emit and moves the
+        // ticket off 'running', making the net a no-op.
+        if (st.ticketId && TERMINAL.includes(st.status)) {
+          const timer = setTimeout(() => {
+            try {
+              if (!TERMINAL.includes(run.state.status)) return; // resumed meanwhile
+              const t = loadTickets(st.project).tickets.find((x) => x.id === st.ticketId);
+              if (t?.status === "running" && t.runId === run.id) onBuildSettled(st.project, t.id, run.id, run.state.status);
+            } catch {
+              /* net is best-effort */
+            }
+          }, 750);
+          timer.unref?.();
         }
         // A DIRECT (non-queue) run settled: if it held the tree while the pump
         // deferred a promotion (e.g. released mid-manual-run), nothing else
         // would re-pump — do it here. Queue-owned runs drive their own pumps
         // via onBuildSettled (deferring to it also keeps the backlog-flip
         // commit sequenced BEFORE the next promote).
-        if (!run.state.ticketId && ["completed", "failed", "cancelled", "clarified"].includes(run.state.status)) {
-          pump(run.state.project);
+        if (!st.ticketId && ["completed", "failed", "cancelled", "clarified"].includes(st.status)) {
+          pump(st.project);
         }
       } catch {
         /* watcher must never break a run */
@@ -252,17 +344,68 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       .sort((a, b) => (a.order ?? 999) - (b.order ?? 999) || String(a.createdAt).localeCompare(String(b.createdAt)));
   }
 
-  const pumpInFlight = new Set();
-  function pump(project) {
-    if (pumpInFlight.has(project)) return; // the fresh-start await is in flight
-    pumpInFlight.add(project);
-    Promise.resolve(pumpOnce(project)).catch(() => {}).finally(() => pumpInFlight.delete(project));
+  // A released (queued) ticket whose dependency is blocked or gone can never
+  // run — park it with the reason instead of leaving it queued forever (the
+  // columns tell the truth; Q-H3). Returns true when something was parked.
+  function parkUnrunnable(project) {
+    const store = loadTickets(project);
+    const byId = new Map(store.tickets.map((t) => [t.id, t]));
+    let parked = false;
+    for (const t of store.tickets) {
+      if (t.status !== "queued") continue;
+      const bad = (t.dependsOn ?? []).find((d) => !byId.has(d) || byId.get(d).status === "blocked");
+      if (bad === undefined) continue;
+      setTicketStatus(project, t.id, "blocked", {
+        reason: `depends on ${bad}`,
+        note: byId.has(bad) ? undefined : `dependency ${bad} no longer exists`,
+        from: "queued",
+      });
+      parked = true;
+    }
+    return parked;
   }
 
+  // pump() is re-entrant-safe: a call that lands while a pass is in flight
+  // (the fresh-start await, or a settle fired from inside the pass) marks the
+  // project dirty and the pass loops once more when it finishes — it used to be
+  // swallowed, so the next ticket never started (Q-H1).
+  const pumpInFlight = new Set();
+  const pumpDirty = new Set();
+  function pump(project) {
+    if (pumpInFlight.has(project)) {
+      pumpDirty.add(project);
+      return;
+    }
+    pumpInFlight.add(project);
+    (async () => {
+      try {
+        do {
+          pumpDirty.delete(project);
+          try {
+            await pumpOnce(project);
+          } catch {
+            // a broken store / unresolvable project must not kill the loop for
+            // good — the timed retry is the backstop
+            schedulePumpRetry(project);
+          }
+        } while (pumpDirty.has(project));
+      } finally {
+        pumpInFlight.delete(project);
+      }
+    })();
+  }
+
+  // Failures that mean "the tree/engine is busy right now" (retry later, ticket
+  // stays queued) — everything else is about THIS ticket and parks it.
+  const TRANSIENT_START_RE = /working tree|not clean|dirty|held by|winding down|still active|busy|another run/i;
+
   async function pumpOnce(project) {
+    if (loadTickets(project).queue.state === "paused") return;
+    const projectPath = resolveProject(project).path;
+    reconcileGates(project, projectPath);
+    if (parkUnrunnable(project)) broadcastQueue(project);
     const store = loadTickets(project);
-    if (store.queue.state === "paused") return;
-    if (engine.treeLockHolder(resolveProject(project).path)) {
+    if (engine.treeLockHolder(projectPath)) {
       // A build is in flight; its settle re-pumps — but if that settle never
       // comes (stuck run, lost callback), the retry is the backstop.
       schedulePumpRetry(project);
@@ -274,19 +417,29 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       broadcastQueue(project);
       return;
     }
-    const t = ready[0];
-    if (!t.runId) {
-      // clarified without a run (imported/stale store) — cannot build
-      setTicketStatus(project, t.id, "blocked", { reason: "provider-failures", note: "clarified ticket has no run — re-clarify" });
-      broadcastQueue(project);
-      return pump(project);
-    }
-    const out = await startOrResumeBuildRun(project, t);
-    if (!out.ok) {
-      if (out.park) {
-        setTicketStatus(project, t.id, "blocked", { reason: "provider-failures", note: String(out.error ?? "cannot start") });
+    // Walk the ready list: a ticket that cannot start for ITS OWN reasons is
+    // parked and the next one gets its turn (one stuck head ticket must not
+    // stall the queue). A busy/dirty tree is global — stop and retry.
+    for (const t of ready) {
+      if (!t.runId) {
+        // clarified without a run (imported/stale store) — cannot build
+        setTicketStatus(project, t.id, "blocked", { reason: "provider-failures", note: "clarified ticket has no run — re-clarify", from: "queued" });
+        parkUnrunnable(project);
         broadcastQueue(project);
-        return pump(project);
+        continue;
+      }
+      const out = await startOrResumeBuildRun(project, t);
+      if (out.ok) {
+        setTicketStatus(project, t.id, "running", { runId: out.runId });
+        syncQueueState(project);
+        broadcastQueue(project);
+        return;
+      }
+      if (out.park || !TRANSIENT_START_RE.test(String(out.error ?? ""))) {
+        setTicketStatus(project, t.id, "blocked", { reason: "provider-failures", note: String(out.error ?? "cannot start"), from: "queued" });
+        parkUnrunnable(project);
+        broadcastQueue(project);
+        continue;
       }
       // Holder appeared between checks (a direct run, another queue) or the
       // tree is dirty — the next settle re-pumps AND a timed retry backstops
@@ -299,9 +452,8 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
       schedulePumpRetry(project);
       return;
     }
-    setTicketStatus(project, t.id, "running", { runId: out.runId });
-    syncQueueState(project);
-    broadcastQueue(project);
+    // every ready ticket was parked — re-evaluate (dependents may now be unrunnable)
+    pumpDirty.add(project);
   }
 
   function readRunState(runId) {
@@ -376,6 +528,10 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
   }
 
   function onBuildSettled(project, ticketId, runId, status) {
+    const pk = parking.get(runId);
+    if (pk?.timer) clearTimeout(pk.timer);
+    parking.delete(runId);
+    directRuns.delete(runId);
     const store = loadTickets(project);
     const t = store.tickets.find((x) => x.id === ticketId);
     if (!t || t.runId !== runId) return;
@@ -405,7 +561,7 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
         for (const d of dependents) {
           if (seen.has(d.id)) continue;
           seen.add(d.id);
-          setTicketStatus(project, d.id, "blocked", { reason: `depends on ${id}` });
+          setTicketStatus(project, d.id, "blocked", { reason: `depends on ${id}`, from: d.status });
           blockedOn(d.id, seen);
         }
       };
@@ -442,23 +598,28 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
   }
 
   // A completed ticket releases its dependents: dependency-blocked tickets
-  // whose deps are ALL done return to queued (their own gates never failed —
-  // the blocker did). Own-gate blocks (stale-spec, gates-exhausted, …) stay
-  // parked for the owner. The pump that follows picks them up in order.
+  // whose deps are ALL done go back to where the cascade took them from (their
+  // own gates never failed — the blocker did). A ticket that had only reached
+  // draft/clarified returns THERE — it must still pass the owner's release gate
+  // (Q-H2: it used to jump straight to queued and get built unreleased). Own-
+  // gate blocks (stale-spec, gates-exhausted, …) stay parked for the owner.
+  // The pump that follows picks released ones up in order.
+  const RESTORABLE = { draft: "draft", clarifying: "draft", clarified: "clarified", queued: "queued", running: "queued" };
   function unblockDependents(project) {
     const store = loadTickets(project);
     const byId = new Map(store.tickets.map((x) => [x.id, x]));
     for (const x of store.tickets) {
       if (x.status !== "blocked" || !String(x.blockedReason ?? "").startsWith("depends on")) continue;
-      if ((x.dependsOn ?? []).every((d) => byId.get(d)?.status === "done")) {
-        setTicketStatus(project, x.id, "queued", { runId: x.runId });
-      }
+      if (!(x.dependsOn ?? []).every((d) => byId.get(d)?.status === "done")) continue;
+      // Legacy rows (no blockedFrom): fail closed — a ticket with a clarify run
+      // returns to clarified (owner re-releases), one without to draft.
+      const back = RESTORABLE[x.blockedFrom] ?? (x.runId ? "clarified" : "draft");
+      setTicketStatus(project, x.id, back, { runId: x.runId });
     }
   }
 
   // Flip the ticket's backlog marker (🔴→🟢) and commit it on the base branch.
-  // NEVER while another run holds the tree (its branch is checked out — the
-  // flip would land there instead of base). Returns a promise so the caller can
+  // NEVER while another run holds the tree (its merge may be in flight). Returns a promise so the caller can
   // sequence the pump after the commit; never rejects.
   //
   // The commit is attempted even when the markers are already flipped: the
@@ -474,42 +635,74 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     let projectPath;
     try { projectPath = resolveProject(project).path; } catch { return Promise.resolve(); }
     const abs = path.resolve(projectPath, ticket.sourceDoc.split("#")[0]);
-    if (!abs.startsWith(path.resolve(projectPath)) || !fs.existsSync(abs)) return Promise.resolve();
+    if (!isPathInside(projectPath, abs) || !fs.existsSync(abs)) return Promise.resolve();
     if (engine.treeLockHolder(projectPath)) {
       note(`backlog: flip skipped for ${ticket.id} — the working tree is held by another run; flip ${ticket.sourceDoc} manually`);
       return Promise.resolve();
     }
-    let wroteFlip = false;
-    try {
-      const text = fs.readFileSync(abs, "utf8");
-      const flipped = flipStatus(text, ticket.id, true);
-      if (flipped && flipped !== text) {
-        fs.writeFileSync(abs, flipped);
-        wroteFlip = true;
-      }
-      return (async () => {
-        try {
-          if (!(await git.isRepo(projectPath))) return;
-          const sha = await git.commitFile(projectPath, path.relative(projectPath, abs), `chore: mark ${ticket.id} done (${ticket.id})`);
-          if (sha) {
-            note(
-              wroteFlip
-                ? `backlog: ${ticket.id} marked done in ${ticket.sourceDoc}`
-                : `backlog: landed uncommitted ${ticket.sourceDoc} edit for ${ticket.id} (${String(sha).slice(0, 7)}) — the tree stays clean for the next ticket`,
-            );
-          }
-        } catch (e) {
-          note(`backlog: flip commit failed for ${ticket.id} (${String(e?.message ?? e).slice(0, 160)}) — doc flipped, commit not landed`);
+    return (async () => {
+      let wroteFlip = false;
+      try {
+        // Runs no longer switch the owner's checkout: it may sit on any branch.
+        // The flip belongs on the branch the run merged into — check BEFORE
+        // writing so a foreign branch never gets a stray edit.
+        const baseBranch = readRunState(ticket.runId)?.git?.baseBranch;
+        const onBranch = (git.isRepo ? await git.isRepo(projectPath) : false) && typeof git.currentBranch === "function"
+          ? await git.currentBranch(projectPath)
+          : null;
+        if (baseBranch && onBranch && onBranch !== baseBranch) {
+          note(`backlog: flip skipped for ${ticket.id} — the project checkout is on ${onBranch}, not ${baseBranch}; flip ${ticket.sourceDoc} manually`);
+          return;
         }
-      })();
-    } catch {
-      return Promise.resolve(); // flip is best-effort
-    }
+        const text = fs.readFileSync(abs, "utf8");
+        const flipped = flipStatus(text, ticket.id, true);
+        if (flipped && flipped !== text) {
+          fs.writeFileSync(abs, flipped);
+          wroteFlip = true;
+        }
+        if (!(await git.isRepo(projectPath))) return;
+        const sha = await git.commitFile(projectPath, path.relative(projectPath, abs), `chore: mark ${ticket.id} done (${ticket.id})`);
+        if (sha) {
+          note(
+            wroteFlip
+              ? `backlog: ${ticket.id} marked done in ${ticket.sourceDoc}`
+              : `backlog: landed uncommitted ${ticket.sourceDoc} edit for ${ticket.id} (${String(sha).slice(0, 7)}) — the tree stays clean for the next ticket`,
+          );
+        }
+      } catch (e) {
+        if (wroteFlip) note(`backlog: flip commit failed for ${ticket.id} (${String(e?.message ?? e).slice(0, 160)}) — doc flipped, commit not landed`);
+        /* otherwise the flip is best-effort */
+      }
+    })();
   }
 
   // --- owner actions -------------------------------------------------------------
 
-  function retry(project, ticketId) {
+  // Resume a ticket's parked BUILD run (gates/branch/session kept). A gates-
+  // failed run with a verify report resumes in FIX mode: one build turn against
+  // the last report, no wasted re-verify. In-session first (its settle callback
+  // is still wired); after a restart the controller is rebuilt from disk WITH
+  // the queue's settle callback. On success the ticket is `running` again.
+  function resumeTicketRun(project, ticketId, runId, { fix } = {}) {
+    const hasVerify = !!readRunState(runId)?.artifacts?.verify;
+    const useFix = fix === undefined ? hasVerify : fix === true;
+    let out = engine.resume(runId, { fix: useFix });
+    if (!out.ok && !/only cancelled or failed runs can be resumed|still winding down/.test(String(out.error ?? ""))) {
+      out = engine.resumeFromDisk(runId, resolveProject(project), {
+        onSettled: (status) => onBuildSettled(project, ticketId, runId, status),
+        fix: useFix,
+      });
+    }
+    if (out.ok) {
+      parking.delete(runId); // a fresh gate on the resumed run must park again
+      setTicketStatus(project, ticketId, "running", { runId });
+      syncQueueState(project);
+      broadcastQueue(project);
+    }
+    return out;
+  }
+
+  function retry(project, ticketId, opts = {}) {
     const store = loadTickets(project);
     const t = store.tickets.find((x) => x.id === ticketId);
     if (!t) return { ok: false, error: `unknown ticket "${ticketId}"` };
@@ -521,21 +714,73 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     if (!rs || rs.status === "clarified" || (rs.wave?.ticketIds?.length ?? 0) > 0) {
       return { ok: false, error: "ticket is parked at the clarify stage — use re-clarify" };
     }
-    // Resume the parked BUILD run (gates/branch/session kept). A gates-failed
-    // run with a verify report resumes in FIX mode: one build turn against the
-    // last report, no wasted re-verify. In-session first (its settle callback
-    // is still wired); after a restart the controller is rebuilt from disk
-    // WITH the queue's settle callback.
-    const hasVerify = !!readRunState(t.runId)?.artifacts?.verify;
-    let out = engine.resume(t.runId, { fix: hasVerify });
-    if (!out.ok && !/only cancelled or failed runs can be resumed|still winding down/.test(String(out.error ?? ""))) {
-      out = engine.resumeFromDisk(t.runId, resolveProject(project), {
-        onSettled: (status) => onBuildSettled(project, ticketId, t.runId, status),
-        fix: hasVerify,
-      });
+    return resumeTicketRun(project, ticketId, t.runId, opts);
+  }
+
+  // Which ticket does a BUILD run belong to? Disk is the source of truth (the
+  // run's own ticketId + project), falling back to a ticket pointing at it.
+  function ticketForRun(runId) {
+    const rs = readRunState(runId);
+    if ((rs?.wave?.ticketIds?.length ?? 0) > 0) return null; // clarify wave: not a build
+    const candidates = rs?.project ? [rs.project] : projectIds();
+    for (const project of candidates) {
+      let store;
+      try { store = loadTickets(project); } catch { continue; }
+      const t = store.tickets.find((x) => x.runId === runId || (rs?.ticketId && x.id === rs.ticketId && rs.project === project));
+      if (t) return { project, ticket: t, rs };
     }
-    if (out.ok) setTicketStatus(project, ticketId, "running", { runId: t.runId });
-    return out;
+    return null;
+  }
+
+  // Q-H4: POST /api/runs/:id/resume must keep the ticket in sync. Returns null
+  // when the run belongs to no ticket (the caller resumes it directly).
+  function resumeRun(runId, opts = {}) {
+    const hit = ticketForRun(runId);
+    if (!hit) return null;
+    const { project, ticket } = hit;
+    // The ticket has moved on (done, or bound to a different run): this is a
+    // stale run — resuming it must not hijack the ticket, so the caller
+    // resumes it as a plain run.
+    if (ticket.status === "done" || (ticket.runId && ticket.runId !== runId)) return null;
+    return resumeTicketRun(project, ticket.id, runId, opts);
+  }
+
+  // Q-H4: the owner's "Run now" on a ticket. The caller starts a plain run with
+  // `ticketId`; adopting it here makes the ticket `running` and wires the SAME
+  // settle callback as a queued build, so completion marks it done, unblocks
+  // dependents, flips the backlog and re-pumps — instead of the ticket sitting
+  // draft/queued after its work shipped. Returns { ok, onSettled, revert }.
+  function adoptDirectRun(project, ticketId, runId) {
+    const store = loadTickets(project);
+    const t = store.tickets.find((x) => x.id === ticketId);
+    if (!t) return { ok: false, error: `unknown ticket "${ticketId}"` };
+    if (["running", "clarifying", "done"].includes(t.status)) {
+      return { ok: false, error: `ticket "${ticketId}" is ${t.status} — it cannot be run directly` };
+    }
+    const prev = { status: t.status, runId: t.runId, blockedReason: t.blockedReason, blockedNote: t.blockedNote, blockedFrom: t.blockedFrom };
+    directRuns.add(runId);
+    setTicketStatus(project, ticketId, "running", { runId });
+    syncQueueState(project);
+    broadcastQueue(project);
+    return {
+      ok: true,
+      onSettled: (status) => onBuildSettled(project, ticketId, runId, status),
+      // the start itself failed (tree held…): put the ticket back
+      revert: () => {
+        directRuns.delete(runId);
+        try {
+          const st = loadTickets(project);
+          const row = st.tickets.find((x) => x.id === ticketId);
+          if (row?.status === "running" && row.runId === runId) {
+            Object.assign(row, prev, { updatedAt: new Date().toISOString() });
+            row.history.push({ at: row.updatedAt, from: "running", to: prev.status, note: "run-now start failed" });
+            saveTickets(project, st);
+            syncQueueState(project);
+            broadcastQueue(project);
+          }
+        } catch { /* best-effort */ }
+      },
+    };
   }
 
   function reclarify(project, ticketId) {
@@ -643,6 +888,8 @@ export function createQueueManager({ engine, emit, resolveProject, git, broadcas
     pump,
     retry,
     reclarify,
+    resumeRun,
+    adoptDirectRun,
     pause,
     resume,
     reorder,
