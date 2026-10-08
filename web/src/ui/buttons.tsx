@@ -7,6 +7,10 @@ import type { ReactNode } from "react";
 
 const SANS = "system-ui, sans-serif";
 
+// Phone tap targets: every button is at least 40x40 below the md breakpoint;
+// desktop keeps the compact Chakra sizes.
+const TAP = { minH: { base: "40px", md: "0" }, minW: { base: "40px", md: "0" } } as const;
+
 export function PrimaryButton({
   children,
   ...rest
@@ -19,6 +23,7 @@ export function PrimaryButton({
 }) {
   return (
     <Button
+      {...TAP}
       size={rest.size ?? "sm"}
       bg="accent"
       color="onAccent"
@@ -49,6 +54,7 @@ export function OutlineButton({
 }) {
   return (
     <Button
+      {...TAP}
       size={rest.size ?? "sm"}
       variant="outline"
       bg={active ? "surface2" : "transparent"}
@@ -76,6 +82,7 @@ export function DangerOutlineButton({
 }) {
   return (
     <Button
+      {...TAP}
       size={rest.size ?? "sm"}
       variant="outline"
       bg="transparent"
@@ -102,6 +109,7 @@ export function GhostButton({
 }) {
   return (
     <Button
+      {...TAP}
       size={rest.size ?? "xs"}
       variant="ghost"
       color="muted"
@@ -128,6 +136,7 @@ export function WarningButton({
 }) {
   return (
     <Button
+      {...TAP}
       size={rest.size ?? "sm"}
       bg="#f0b429"
       color="#1a1503"

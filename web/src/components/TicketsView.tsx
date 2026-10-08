@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Flex, HStack, Input, Stack, Text, Textarea } from "@chakra-ui/react";
 import {
   ArrowDown,
@@ -26,6 +26,9 @@ import { DangerOutlineButton, OutlineButton, PrimaryButton, WarningButton } from
 import ModelPicker from "../ui/ModelPicker";
 import { SelectEl, selectStyleMini } from "../ui/controls";
 import { api, ticketsApi } from "../api";
+import { STICKY_ACTIONS } from "../ui/layout";
+import { changedPatch, fieldsOf, mergeExternal } from "../lib/ticket-edit";
+import type { TicketFieldKey, TicketFields } from "../lib/ticket-edit";
 import type { InboxItem, ModelInfo, RunState, Ticket, TicketStore } from "../api";
 
 const STATUS_ICON: Record<string, { Icon: typeof Circle; color: string; spin?: boolean; fill?: boolean }> = {
@@ -63,15 +66,49 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
   const [cfgDraft, setCfgDraft] = useState<TicketStore["config"] | null>(null);
   const [showReview, setShowReview] = useState(false);
 
+  // Poll + websocket pushes + post-action refreshes all race: only the newest
+  // request may write (an older, slower response used to clobber fresher data),
+  // and a response for a project the user has since left is dropped.
+  const refreshSeq = useRef(0);
   const refresh = useCallback(() => {
-    ticketsApi.store(project).then(setStore).catch((e) => setErr(String(e)));
-    ticketsApi.inbox(project).then((r) => setInbox(r.items)).catch(() => {});
+    const seq = ++refreshSeq.current;
+    ticketsApi
+      .store(project)
+      .then((st) => {
+        if (seq === refreshSeq.current) setStore(st);
+      })
+      .catch((e) => {
+        if (seq === refreshSeq.current) setErr(String(e));
+      });
+    ticketsApi
+      .inbox(project)
+      .then((r) => {
+        if (seq === refreshSeq.current) setInbox(r.items);
+      })
+      .catch(() => {});
+  }, [project]);
+
+  // A different project is a different backlog — don't show the old one while loading.
+  useEffect(() => {
+    setStore(null);
+    setInbox([]);
+    setErr(null);
   }, [project]);
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 4000);
-    return () => clearInterval(t);
+    // Fallback poll — skipped while the tab is hidden (phones background tabs).
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 4000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [refresh]);
 
   // The App's socket dispatches every broadcast here — queue/tickets messages
@@ -79,7 +116,8 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
   useEffect(() => {
     const onWs = (e: Event) => {
       const msg = (e as CustomEvent<{ type?: string; project?: string }>).detail;
-      if (msg?.type === "queue" || msg?.type === "tickets") {
+      if (msg?.type === "ws-reconnected") refresh();
+      else if (msg?.type === "queue" || msg?.type === "tickets") {
         if (!msg.project || msg.project === project) refresh();
       }
     };
@@ -297,7 +335,7 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
                 <Box
                   key={key}
                   as="button"
-                  px={2} py={1.5} fontSize="11px" borderRadius="sm"
+                  px={2} py={1.5} fontSize="11px" borderRadius="sm" minH={{ base: "40px", md: "0" }}
                   border="1px solid"
                   borderColor={cfgDraft.options[key] ? "accent" : "line"}
                   bg={cfgDraft.options[key] ? "surface2" : "transparent"}
@@ -527,7 +565,11 @@ export default function TicketsView({ project, models, onOpenRun }: { project: s
                   try {
                     await ticketsApi.update(project, t.id, patch);
                     refresh();
-                  } catch (e) { setErr(String(e)); }
+                    return true;
+                  } catch (e) {
+                    setErr(String(e));
+                    return false;
+                  }
                 }}
               />
               );
@@ -549,19 +591,51 @@ function TicketRow({
   onReclarify: () => void;
   onRunNow: (t: Ticket) => void;
   onMove: (t: Ticket, dir: -1 | 1) => void;
-  onEdit: (patch: Partial<Ticket>) => void;
+  /** Resolves true when the server accepted the patch (the editor stays open on failure). */
+  onEdit: (patch: Partial<Ticket>) => Promise<boolean>;
   isFirstQueued: boolean;
   isLastQueued: boolean;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(t.title);
-  const [description, setDescription] = useState(t.description);
-  const [dependsOn, setDependsOn] = useState(t.dependsOn.join(", "));
-  const [order, setOrder] = useState(String(t.order ?? 0));
+  // The editor works on a draft + the `base` it started from — never on a
+  // one-time copy of props. `base` tracks the server record, so an update that
+  // lands mid-edit flows into fields the user hasn't touched, and Save sends
+  // only the fields they changed (it can no longer overwrite newer server data
+  // with a stale snapshot of fields they never edited).
+  const [edit, setEdit] = useState<{ base: TicketFields; draft: TicketFields; conflicts: TicketFieldKey[] } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const editing = edit !== null;
+  const depsKey = t.dependsOn.join(",");
+  useEffect(() => {
+    setEdit((cur) => {
+      if (!cur) return cur;
+      const m = mergeExternal(cur.base, cur.draft, fieldsOf(t));
+      return { base: m.base, draft: m.draft, conflicts: [...new Set([...cur.conflicts, ...m.conflicts])] };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t.title, t.description, depsKey, t.order, t.updatedAt]);
   const meta = STATUS_ICON[t.status] ?? STATUS_ICON.draft;
   const providerBlocked = t.status === "blocked" && t.blockedReason === "provider-failures";
   const editable = !["running", "clarifying"].includes(t.status);
   const StatusIcon = meta.Icon;
+  // A ticket that started running / clarifying can no longer be edited.
+  useEffect(() => {
+    if (!editable) setEdit(null);
+  }, [editable]);
+  const setField = (k: TicketFieldKey, v: string) => setEdit((cur) => (cur ? { ...cur, draft: { ...cur.draft, [k]: v } } : cur));
+  const patch = edit ? changedPatch(edit.base, edit.draft) : {};
+  const save = async () => {
+    if (!edit) return;
+    if (Object.keys(patch).length === 0) {
+      setEdit(null);
+      return;
+    }
+    setSaving(true);
+    try {
+      if (await onEdit(patch)) setEdit(null);
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <Flex alignItems="flex-start" gap={2} py={2} px={2} borderRadius="md" border="1px solid" borderColor={t.status === "blocked" ? "bad" : "line"} bg={t.status === "running" ? "surface2" : "transparent"} flexWrap="wrap">
       <Box mt="2px" color={meta.color} style={meta.spin ? { animation: "ncSpin 1.2s linear infinite" } : undefined} title={t.status}>
@@ -595,44 +669,38 @@ function TicketRow({
           {t.status}
           {t.runId ? " · run " + t.runId : ""}
         </Text>
-        {editing && (
+        {edit && (
           <Stack gap={2} mt={2}>
+            {edit.conflicts.length > 0 && (
+              <Text fontSize="10.5px" color="warn" fontFamily="system-ui, sans-serif">
+                Changed elsewhere while you were editing ({edit.conflicts.join(", ")}) — saving will overwrite it with your text.
+              </Text>
+            )}
             <Input
-              placeholder="Title" value={title}
-              onChange={(e) => setTitle((e.target as HTMLInputElement).value)}
+              placeholder="Title" value={edit.draft.title}
+              onChange={(e) => setField("title", (e.target as HTMLInputElement).value)}
               bg="surface2" borderColor="line" color="ink" fontSize="12px"
             />
             <Textarea
-              placeholder="Description" value={description} rows={3}
-              onChange={(e) => setDescription((e.target as HTMLTextAreaElement).value)}
+              placeholder="Description" value={edit.draft.description} rows={3}
+              onChange={(e) => setField("description", (e.target as HTMLTextAreaElement).value)}
               bg="surface2" borderColor="line" color="ink" fontSize="12px"
             />
             <Flex gap={2} flexWrap="wrap" alignItems="center">
               <Input
-                placeholder="Depends on (comma-separated ids)" value={dependsOn} flex="1" minW="200px"
-                onChange={(e) => setDependsOn((e.target as HTMLInputElement).value)}
+                placeholder="Depends on (comma-separated ids)" value={edit.draft.dependsOn} flex="1" minW="200px"
+                onChange={(e) => setField("dependsOn", (e.target as HTMLInputElement).value)}
                 bg="surface2" borderColor="line" color="ink" fontSize="12px"
               />
               <Input
-                placeholder="Order" value={order} width="80px"
-                onChange={(e) => setOrder((e.target as HTMLInputElement).value)}
+                placeholder="Order" value={edit.draft.order} width="80px"
+                onChange={(e) => setField("order", (e.target as HTMLInputElement).value)}
                 bg="surface2" borderColor="line" color="ink" fontSize="12px"
               />
-              <PrimaryButton
-                size="xs"
-                onClick={() => {
-                  onEdit({
-                    title,
-                    description,
-                    dependsOn: dependsOn.split(",").map((s) => s.trim()).filter(Boolean),
-                    order: Number(order) || 0,
-                  });
-                  setEditing(false);
-                }}
-              >
-                Save
+              <PrimaryButton size="xs" disabled={saving} onClick={save}>
+                {Object.keys(patch).length === 0 ? "Done" : "Save"}
               </PrimaryButton>
-              <OutlineButton size="xs" onClick={() => setEditing(false)}>Cancel</OutlineButton>
+              <OutlineButton size="xs" onClick={() => setEdit(null)}>Cancel</OutlineButton>
             </Flex>
           </Stack>
         )}
@@ -681,7 +749,7 @@ function TicketRow({
           </OutlineButton>
         )}
         {editable && (
-          <OutlineButton size="xs" onClick={() => setEditing(!editing)} title="Edit title, description, dependencies, order.">
+          <OutlineButton size="xs" onClick={() => setEdit(edit ? null : { base: fieldsOf(t), draft: fieldsOf(t), conflicts: [] })} title="Edit title, description, dependencies, order.">
             <Pencil size={12} />
           </OutlineButton>
         )}
@@ -695,6 +763,7 @@ function TicketRow({
   );
 }
 const ACCENT = (_s: string) => "accent";
+
 const INKC = "ink";
 
 /** One inbox ticket: its pending questions + an answer form. */
@@ -725,7 +794,7 @@ function InboxTicket({ item, onAnswer }: { item: InboxItem; onAnswer: (answers: 
                     <Box
                       key={o.label}
                       as="button"
-                      px={2} py={1} fontSize="11px" borderRadius="sm"
+                      px={2} py={1} fontSize="11px" borderRadius="sm" minH={{ base: "40px", md: "0" }}
                       border="1px solid"
                       borderColor={active ? "accent" : "line"}
                       bg={active ? "surface2" : "transparent"}
@@ -752,7 +821,7 @@ function InboxTicket({ item, onAnswer }: { item: InboxItem; onAnswer: (answers: 
           </Box>
         ))}
       </Stack>
-      <HStack mt={3}>
+      <HStack mt={3} {...STICKY_ACTIONS}>
         <PrimaryButton
           size="xs"
           onClick={() =>
@@ -836,7 +905,13 @@ function ReleaseReview({ tickets, busy, onClose, onRelease }: {
               <Flex gap={2} alignItems="flex-start">
                 <Box
                   as="button"
-                  mt="2px"
+                  display="flex"
+                  alignItems="center"
+                  justifyContent="center"
+                  minW={{ base: "40px", md: "0" }}
+                  minH={{ base: "40px", md: "0" }}
+                  mt={{ base: "-8px", md: "2px" }}
+                  ml={{ base: "-8px", md: 0 }}
                   onClick={() => setChecked({ ...checked, [t.id]: !on })}
                   fontSize="14px"
                   color={on ? "accent" : "muted"}
@@ -879,7 +954,7 @@ function ReleaseReview({ tickets, busy, onClose, onRelease }: {
           );
         })}
       </Stack>
-      <HStack mt={3}>
+      <HStack mt={3} {...STICKY_ACTIONS}>
         <PrimaryButton
           disabled={busy || selected.length === 0}
           onClick={() => onRelease(selected.map((t) => t.id))}

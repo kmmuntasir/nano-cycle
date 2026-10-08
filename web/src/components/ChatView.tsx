@@ -22,6 +22,8 @@ import ThinkingBlock from "./chat/ThinkingBlock";
 import ToolCallCard from "./chat/ToolCallCard";
 import ConfirmDialog from "./ConfirmDialog";
 import ModelPicker from "../ui/ModelPicker";
+import { SelectEl } from "../ui/controls";
+import { BELOW_HEADER_H } from "../ui/layout";
 import { chatApi } from "../api";
 import type {
   ChatEventMessage,
@@ -72,6 +74,9 @@ function formatTime(isoOrTs?: string | number | null) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+const readModel = (p: string) => localStorage.getItem(`nano-chat-model-${p}`) || localStorage.getItem("nano-chat-model") || "auto";
+const readThinking = (p: string) => localStorage.getItem(`nano-chat-thinking-${p}`) || "medium";
+
 export default function ChatView({ project, models }: ChatViewProps) {
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -88,13 +93,9 @@ export default function ChatView({ project, models }: ChatViewProps) {
   const [streamToolCalls, setStreamToolCalls] = useState<ChatToolCall[]>([]);
   const [streamStatus, setStreamStatus] = useState<string | null>(null);
 
-  // Model & Thinking level selections
-  const [selectedModel, setSelectedModel] = useState<string>(() => {
-    return localStorage.getItem(`nano-chat-model-${project}`) || localStorage.getItem("nano-chat-model") || "auto";
-  });
-  const [thinkingLevel, setThinkingLevel] = useState<string>(() => {
-    return localStorage.getItem(`nano-chat-thinking-${project}`) || "medium";
-  });
+  // Model & Thinking level selections (remembered per project)
+  const [selectedModel, setSelectedModel] = useState<string>(() => readModel(project));
+  const [thinkingLevel, setThinkingLevel] = useState<string>(() => readThinking(project));
 
   // Rename & Delete dialogs
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
@@ -107,24 +108,59 @@ export default function ChatView({ project, models }: ChatViewProps) {
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Save selected model / thinking level
-  useEffect(() => {
-    if (selectedModel) {
-      localStorage.setItem(`nano-chat-model-${project}`, selectedModel);
-      localStorage.setItem("nano-chat-model", selectedModel);
-    }
-  }, [selectedModel, project]);
+  // Persist only on a user pick, under the project it was picked in. (An effect
+  // keyed on [selectedModel, project] used to run on a project switch with the
+  // PREVIOUS project's model still in state and write it into the new
+  // project's key.) A session's own model, applied by loadSession, is not a pick.
+  const pickModel = (m: string) => {
+    setSelectedModel(m);
+    if (!m) return;
+    localStorage.setItem(`nano-chat-model-${project}`, m);
+    localStorage.setItem("nano-chat-model", m);
+  };
+  const pickThinking = (l: string) => {
+    setThinkingLevel(l);
+    if (l) localStorage.setItem(`nano-chat-thinking-${project}`, l);
+  };
 
-  useEffect(() => {
-    if (thinkingLevel) {
-      localStorage.setItem(`nano-chat-thinking-${project}`, thinkingLevel);
-    }
-  }, [thinkingLevel, project]);
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = activeSessionId;
+  // Increments on every session load / project switch: a slower response for
+  // a session or project the user has left must not overwrite the current view.
+  const loadSeq = useRef(0);
+
+  // Streamed deltas are buffered and applied once per animation frame — one
+  // markdown re-render per frame instead of one per token.
+  const thinkBuf = useRef("");
+  const textBuf = useRef("");
+  const rafId = useRef<number | null>(null);
+  const flushStream = useCallback(() => {
+    rafId.current = null;
+    const th = thinkBuf.current;
+    const tx = textBuf.current;
+    thinkBuf.current = "";
+    textBuf.current = "";
+    if (th) setStreamThinking((prev) => prev + th);
+    if (tx) setStreamText((prev) => prev + tx);
+  }, []);
+  const scheduleFlush = useCallback(() => {
+    if (rafId.current === null) rafId.current = requestAnimationFrame(flushStream);
+  }, [flushStream]);
+  const dropStreamBuffers = useCallback(() => {
+    thinkBuf.current = "";
+    textBuf.current = "";
+    if (rafId.current !== null) cancelAnimationFrame(rafId.current);
+    rafId.current = null;
+  }, []);
+  useEffect(() => dropStreamBuffers, [dropStreamBuffers]);
 
   // Load session list on project change
   const refreshSessions = useCallback(async () => {
     try {
       const list = await chatApi.listSessions(project);
+      if (projectRef.current !== project) return [];
       setSessions(list);
       return list;
     } catch {
@@ -132,40 +168,58 @@ export default function ChatView({ project, models }: ChatViewProps) {
     }
   }, [project]);
 
-  // Initial load
-  useEffect(() => {
-    refreshSessions().then((list) => {
-      if (list.length > 0) {
-        // Pick latest session
-        loadSession(list[0].id);
-      } else {
-        // No sessions yet, start clean
-        setActiveSessionId(null);
-        setActiveSession(null);
-      }
-    });
-  }, [project, refreshSessions]);
-
   const loadSession = async (sessionId: string) => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const detail = await chatApi.getSession(project, sessionId);
+      if (seq !== loadSeq.current) return;
       setActiveSessionId(sessionId);
       setActiveSession(detail);
       setIsGenerating(detail.isGenerating);
       if (detail.model) setSelectedModel(detail.model);
       if (detail.thinkingLevel) setThinkingLevel(detail.thinkingLevel);
       // Reset stream buffers
+      dropStreamBuffers();
       setStreamThinking("");
       setStreamText("");
       setStreamToolCalls([]);
       setStreamStatus(null);
     } catch (e) {
-      console.error("Failed to load session:", e);
+      if (seq === loadSeq.current) console.error("Failed to load session:", e);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   };
+
+  // Project switch: drop the old project's conversation and its remembered
+  // picks, then open the new project's latest session.
+  useEffect(() => {
+    let cancelled = false;
+    ++loadSeq.current;
+    setSelectedModel(readModel(project));
+    setThinkingLevel(readThinking(project));
+    setActiveSessionId(null);
+    setActiveSession(null);
+    setIsGenerating(false);
+    setSessions([]);
+    dropStreamBuffers();
+    setStreamThinking("");
+    setStreamText("");
+    setStreamToolCalls([]);
+    setStreamStatus(null);
+    refreshSessions().then((list) => {
+      if (cancelled) return;
+      if (list.length > 0) {
+        // Pick latest session
+        loadSession(list[0].id);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project, refreshSessions]);
 
   const handleCreateSession = async () => {
     try {
@@ -243,6 +297,30 @@ export default function ChatView({ project, models }: ChatViewProps) {
   useEffect(() => {
     const handleWs = (e: Event) => {
       const msg = (e as CustomEvent<WsMessage>).detail;
+      if (msg.type === "ws-reconnected") {
+        // Deltas were missed while the socket was down: re-read the session.
+        const sid = activeIdRef.current;
+        refreshSessions();
+        if (sid) {
+          const seq = loadSeq.current;
+          chatApi
+            .getSession(project, sid)
+            .then((d) => {
+              if (seq !== loadSeq.current || activeIdRef.current !== sid) return;
+              setActiveSession(d);
+              setIsGenerating(d.isGenerating);
+              if (!d.isGenerating) {
+                dropStreamBuffers();
+                setStreamThinking("");
+                setStreamText("");
+                setStreamToolCalls([]);
+                setStreamStatus(null);
+              }
+            })
+            .catch(() => {});
+        }
+        return;
+      }
       if (msg.type !== "chat_event") return;
       if (msg.project !== project) return;
       if (activeSessionId && msg.sessionId !== activeSessionId) return;
@@ -251,6 +329,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
 
       switch (ev.event) {
         case "prompt_start": {
+          dropStreamBuffers();
           setIsGenerating(true);
           setStreamThinking("");
           setStreamText("");
@@ -260,14 +339,16 @@ export default function ChatView({ project, models }: ChatViewProps) {
         }
         case "thinking_delta": {
           if (ev.delta) {
-            setStreamThinking((prev) => prev + ev.delta);
+            thinkBuf.current += ev.delta;
+            scheduleFlush();
             setStreamStatus("Thinking...");
           }
           break;
         }
         case "text_delta": {
           if (ev.delta) {
-            setStreamText((prev) => prev + ev.delta);
+            textBuf.current += ev.delta;
+            scheduleFlush();
             setStreamStatus("Generating response...");
           }
           break;
@@ -314,12 +395,15 @@ export default function ChatView({ project, models }: ChatViewProps) {
           setStreamStatus(null);
           // Reload fresh session history from server
           if (activeSessionId) {
-            chatApi.getSession(project, activeSessionId).then((updated) => {
+            const sid = activeSessionId;
+            chatApi.getSession(project, sid).then((updated) => {
+              if (activeIdRef.current !== sid) return;
+              dropStreamBuffers();
               setActiveSession(updated);
               setStreamThinking("");
               setStreamText("");
               setStreamToolCalls([]);
-            });
+            }).catch(() => {});
             refreshSessions();
           }
           break;
@@ -352,7 +436,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
 
     window.addEventListener("nano-ws", handleWs);
     return () => window.removeEventListener("nano-ws", handleWs);
-  }, [project, activeSessionId, activeSession, refreshSessions]);
+  }, [project, activeSessionId, activeSession, refreshSessions, scheduleFlush, dropStreamBuffers]);
 
   const handleSendMessage = async (promptToSend?: string) => {
     const text = (promptToSend ?? inputPrompt).trim();
@@ -404,6 +488,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
     });
 
     setInputPrompt("");
+    dropStreamBuffers();
     setIsGenerating(true);
     setStreamThinking("");
     setStreamText("");
@@ -468,7 +553,18 @@ export default function ChatView({ project, models }: ChatViewProps) {
   );
 
   return (
-    <Box h="calc(100dvh - 53px)" display="flex" bg="canvas" overflow="hidden" position="relative">
+    <Box h={BELOW_HEADER_H} display="flex" bg="canvas" overflow="hidden" position="relative">
+      {/* tap-outside backdrop for the phone drawer */}
+      {mobileSidebarOpen && (
+        <Box
+          display={{ base: "block", md: "none" }}
+          position="absolute"
+          inset={0}
+          zIndex={19}
+          bg="rgba(0,0,0,0.5)"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
       {/* Left Sidebar (Desktop & Mobile Drawer) */}
       <Box
         w={{ base: mobileSidebarOpen ? "280px" : "0", md: "260px", lg: "280px" }}
@@ -492,11 +588,17 @@ export default function ChatView({ project, models }: ChatViewProps) {
             {mobileSidebarOpen && (
               <Box
                 as="button"
-                display={{ base: "block", md: "none" }}
+                display={{ base: "flex", md: "none" }}
+                alignItems="center"
+                justifyContent="center"
+                w="40px"
+                h="40px"
+                mr="-8px"
                 color="muted"
+                aria-label="Close chat list"
                 onClick={() => setMobileSidebarOpen(false)}
               >
-                <X size={16} />
+                <X size={18} />
               </Box>
             )}
           </Flex>
@@ -582,6 +684,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
                       key={s.id}
                       px={2.5}
                       py={2}
+                      minH={{ base: "48px", md: "0" }}
                       my={0.5}
                       borderRadius="md"
                       bg={isActive ? "surface2" : "transparent"}
@@ -651,7 +754,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
                         <Flex gap={1} display={{ base: "flex", md: "none" }} _groupHover={{ display: "flex" }}>
                           <Box
                             as="button"
-                            p={1}
+                            p={{ base: 3, md: 1 }}
                             color="muted"
                             _hover={{ color: "accent" }}
                             onClick={(e) => {
@@ -665,7 +768,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
                           </Box>
                           <Box
                             as="button"
-                            p={1}
+                            p={{ base: 3, md: 1 }}
                             color="muted"
                             _hover={{ color: "bad" }}
                             onClick={(e) => {
@@ -714,12 +817,17 @@ export default function ChatView({ project, models }: ChatViewProps) {
           <Flex alignItems="center" gap={2}>
             <Box
               as="button"
-              display={{ base: "block", md: "none" }}
-              p={1}
+              display={{ base: "flex", md: "none" }}
+              alignItems="center"
+              justifyContent="center"
+              w="40px"
+              h="40px"
+              ml="-8px"
               color="muted"
+              aria-label="Open chat list"
               onClick={() => setMobileSidebarOpen(true)}
             >
-              <Menu size={16} />
+              <Menu size={18} />
             </Box>
 
             <Flex alignItems="center" gap={2}>
@@ -759,7 +867,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
                 <ModelPicker
                   value={selectedModel}
                   models={models}
-                  onChange={setSelectedModel}
+                  onChange={pickModel}
                   compact
                   hideLevel
                   ariaLabel="chat model"
@@ -772,9 +880,10 @@ export default function ChatView({ project, models }: ChatViewProps) {
               <Text fontSize="11px" color="muted">
                 Thinking:
               </Text>
-              <select
+              <SelectEl
+                minH={{ base: "40px", md: "0" }}
                 value={thinkingLevel}
-                onChange={(e) => setThinkingLevel(e.target.value)}
+                onChange={(e) => pickThinking(e.target.value)}
                 style={selectControlStyle}
               >
                 <option value="none">none</option>
@@ -782,7 +891,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
                 <option value="low">low</option>
                 <option value="medium">medium</option>
                 <option value="high">high</option>
-              </select>
+              </SelectEl>
             </Flex>
 
             {/* Total tokens pill */}
@@ -1089,7 +1198,7 @@ export default function ChatView({ project, models }: ChatViewProps) {
                   lineHeight: "1.5",
                   fontFamily: "system-ui, sans-serif",
                   resize: "none",
-                  padding: "4px 8px",
+                  padding: "8px",
                 }}
               />
 
@@ -1098,6 +1207,8 @@ export default function ChatView({ project, models }: ChatViewProps) {
                   as="button"
                   onClick={handleAbort}
                   p={2}
+                  minW="40px"
+                  minH="40px"
                   borderRadius="md"
                   bg="bad"
                   color="#fff"
@@ -1114,8 +1225,10 @@ export default function ChatView({ project, models }: ChatViewProps) {
                 <Box
                   as="button"
                   onClick={() => handleSendMessage()}
-                  disabled={!inputPrompt.trim()}
+                  aria-disabled={!inputPrompt.trim()}
                   p={2}
+                  minW="40px"
+                  minH="40px"
                   borderRadius="md"
                   bg={inputPrompt.trim() ? "accent" : "surface2"}
                   color={inputPrompt.trim() ? "onAccent" : "muted"}

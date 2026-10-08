@@ -32,6 +32,7 @@ function Row({
       gap={2}
       px={2}
       py={2}
+      minH={{ base: "56px", md: "0" }}
       borderRadius="md"
       cursor="pointer"
       bg={active ? "surface2" : "transparent"}
@@ -63,7 +64,7 @@ function Row({
         <Box
           as="button"
           flexShrink={0}
-          p={1}
+          p={{ base: 3, md: 1 }}
           borderRadius="sm"
           color="muted"
           onClick={(e) => {
@@ -129,6 +130,7 @@ export default function RunsSidebar({
         onChange={(e) => setQ((e.target as HTMLInputElement).value)}
         placeholder="Filter Runs…"
         size="xs"
+        minH={{ base: "40px", md: "0" }}
         bg="surface2"
         borderColor="line"
         color="ink"

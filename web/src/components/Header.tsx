@@ -3,6 +3,8 @@ import { List, MessageCircle, Minus, Play, Plus } from "lucide-react";
 import { SelectEl, selectStyleMini } from "../ui/controls";
 import { GhostButton, PrimaryButton } from "../ui/buttons";
 import ThemeSwitcher from "../ui/ThemeSwitcher";
+import { HEADER_H } from "../ui/layout";
+import type { SocketStatus } from "../lib/socket";
 import type { Project } from "../api";
 
 export type View = "runs" | "tickets" | "chat";
@@ -14,7 +16,7 @@ const TABS: { id: View; label: string; short: string; Icon: typeof Play }[] = [
 ];
 
 function Divider() {
-  return <Box w="1px" alignSelf="stretch" my={2} bg="line" flexShrink={0} />;
+  return <Box display={{ base: "none", md: "block" }} w="1px" alignSelf="stretch" my={2} bg="line" flexShrink={0} />;
 }
 
 export default function Header({
@@ -25,7 +27,7 @@ export default function Header({
   onRemoveProject,
   showAdd,
   onNewRun,
-  connected,
+  wsStatus,
   liveCount,
   view,
   setView,
@@ -37,17 +39,24 @@ export default function Header({
   onRemoveProject: () => void;
   showAdd: boolean;
   onNewRun: () => void;
-  connected: boolean;
+  wsStatus: SocketStatus;
   liveCount: number;
   view: View;
   setView: (v: View) => void;
 }) {
+  const connected = wsStatus === "open";
+  // Below md the header is two rows (project + actions, then the view tabs);
+  // `alignContent="stretch"` splits the fixed height evenly between the lines.
+  // From md up it is the original single row.
   return (
     <Flex
       as="header"
-      h="52px"
+      h={HEADER_H}
       alignItems="center"
-      gap={2}
+      alignContent="stretch"
+      flexWrap={{ base: "wrap", md: "nowrap" }}
+      columnGap={2}
+      rowGap={0}
       px={3}
       borderBottom="1px solid"
       borderColor="line"
@@ -57,12 +66,13 @@ export default function Header({
       left={0}
       right={0}
       zIndex={40}
-      overflowX="auto"
+      overflowX={{ base: "hidden", md: "auto" }}
       overflowY="hidden"
       whiteSpace="nowrap"
     >
-      {/* brand */}
+      {/* brand — desktop only; the phone header spends that space on the project picker */}
       <Text
+        display={{ base: "none", md: "block" }}
         fontWeight="800"
         fontSize="15px"
         letterSpacing="tight"
@@ -73,6 +83,7 @@ export default function Header({
       </Text>
       {liveCount > 0 && (
         <Box
+          display={{ base: "none", md: "inline-flex" }}
           fontSize="10px"
           px={2}
           py="2px"
@@ -81,7 +92,6 @@ export default function Header({
           color="onAccent"
           fontWeight="700"
           fontFamily="system-ui, sans-serif"
-          display="inline-flex"
           alignItems="center"
           gap={1.5}
           flexShrink={0}
@@ -93,14 +103,23 @@ export default function Header({
 
       <Divider />
 
-      {/* view tabs */}
-      <Flex alignItems="stretch" alignSelf="stretch" flexShrink={0} gap={1}>
+      {/* view tabs — full-width second row on phones */}
+      <Flex
+        order={{ base: 10, md: 0 }}
+        flexBasis={{ base: "100%", md: "auto" }}
+        alignItems="stretch"
+        alignSelf="stretch"
+        flexShrink={0}
+        gap={1}
+      >
         {TABS.map(({ id, label, short, Icon }) => {
           const active = view === id;
           return (
             <Box
               key={id}
               as="button"
+              flex={{ base: 1, md: "none" }}
+              minH="40px"
               px={2.5}
               fontSize="12px"
               fontWeight={active ? 700 : 500}
@@ -111,15 +130,31 @@ export default function Header({
               onClick={() => setView(id)}
               _hover={{ color: active ? "accent" : "ink" }}
               title={label}
+              aria-current={active ? "page" : undefined}
             >
-              <Box as="span" display="inline-flex" alignItems="center" gap={1.5}>
-                <Icon size={13} />
+              <Box as="span" display="inline-flex" alignItems="center" justifyContent="center" gap={1.5}>
+                <Icon size={14} />
                 <Box as="span" display={{ base: "none", sm: "inline" }}>
                   {label}
                 </Box>
                 <Box as="span" display={{ base: "inline", sm: "none" }}>
                   {short}
                 </Box>
+                {id === "runs" && liveCount > 0 && (
+                  <Box
+                    as="span"
+                    display={{ base: "inline-flex", md: "none" }}
+                    fontSize="10px"
+                    px={1.5}
+                    borderRadius="full"
+                    bg="accent"
+                    color="onAccent"
+                    fontWeight={700}
+                    title={`${liveCount} live`}
+                  >
+                    {liveCount}
+                  </Box>
+                )}
               </Box>
             </Box>
           );
@@ -129,8 +164,9 @@ export default function Header({
       <Divider />
 
       {/* project */}
-      <Box w={{ base: "130px", md: "200px" }} flexShrink={0}>
+      <Box w={{ base: "auto", md: "200px" }} flex={{ base: 1, md: "none" }} minW={0} flexShrink={0}>
         <SelectEl
+          minH={{ base: "40px", md: "0" }}
           css={{ ...selectStyleMini, width: "100%" }}
           value={project}
           onChange={(e) => setProject((e.target as HTMLSelectElement).value)}
@@ -143,7 +179,7 @@ export default function Header({
           ))}
         </SelectEl>
       </Box>
-      <GhostButton onClick={onToggleAdd}>
+      <GhostButton onClick={onToggleAdd} title={showAdd ? "Close" : "Add project"}>
         <Box as="span" display="inline-flex" alignItems="center" gap={1}>
           <Plus size={12} />
           <Box as="span" display={{ base: "none", lg: "inline" }}>
@@ -167,7 +203,7 @@ export default function Header({
         </Box>
       </GhostButton>
 
-      <Box flex="1" minW={2} />
+      <Box flex="1" minW={2} display={{ base: "none", md: "block" }} />
       <Box flexShrink={0}>
         <ThemeSwitcher />
       </Box>
@@ -177,6 +213,7 @@ export default function Header({
           h="8px"
           borderRadius="full"
           bg={connected ? "good" : "warn"}
+          animation={connected ? undefined : "ncPulse 1.2s ease-in-out infinite"}
           title={connected ? "ws connected" : "ws reconnecting…"}
         />
         <Text fontSize="10px" color="muted" display={{ base: "none", md: "block" }} fontFamily="system-ui, sans-serif">

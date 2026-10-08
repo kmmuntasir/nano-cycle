@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Box, HStack, Input, Stack, Text, Textarea } from "@chakra-ui/react";
 import { ClipboardList, Hourglass, ShieldAlert, Star, TriangleAlert } from "lucide-react";
 import { DangerOutlineButton, PrimaryButton, WarningButton } from "../ui/buttons";
+import { STICKY_ACTIONS, STICKY_BELOW_HEADER } from "../ui/layout";
 import type { RunState } from "../api";
 
 /** Human gates: PM question batches + plan divergences. Sticky banner + full Q&A. */
@@ -17,7 +18,7 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
         p={3}
         bg="#221b08"
         position="sticky"
-        top="60px"
+        top={STICKY_BELOW_HEADER}
         zIndex={10}
       >
         <HStack gap={2} flexWrap="wrap" alignItems="center">
@@ -39,7 +40,7 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
   }
   if (gate.type === "divergence") {
     return (
-      <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={3} bg="#221b08" position="sticky" top="60px" zIndex={10}>
+      <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={3} bg="#221b08" position="sticky" top={STICKY_BELOW_HEADER} zIndex={10}>
         <HStack gap={2} flexWrap="wrap">
           <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
             <TriangleAlert size={14} /> Divergence Gate — {gate.nodeId}
@@ -56,7 +57,7 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
   }
   if (gate.type === "plan-approval" && gate.plan) {
     return (
-      <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={3} bg="#221b08" position="sticky" top="60px" zIndex={10}>
+      <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={3} bg="#221b08" position="sticky" top={STICKY_BELOW_HEADER} zIndex={10}>
         <HStack gap={2} flexWrap="wrap">
           <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="13px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
             <ClipboardList size={14} /> Plan Ready — Approval Needed
@@ -76,7 +77,7 @@ export function GateBanner({ state, onJump, showJump = true }: { state: RunState
   }
   if (gate.type === "security-override") {
     return (
-      <Box border="1px solid" borderColor="#f16a6a" borderRadius="md" p={3} bg="#230f0f" position="sticky" top="60px" zIndex={10}>
+      <Box border="1px solid" borderColor="#f16a6a" borderRadius="md" p={3} bg="#230f0f" position="sticky" top={STICKY_BELOW_HEADER} zIndex={10}>
         <HStack gap={2} flexWrap="wrap">
           <Box as="span" display="inline-flex" alignItems="center" gap={1.5} fontSize="13px" fontWeight={700} color="#f16a6a" fontFamily="system-ui, sans-serif">
             <ShieldAlert size={14} /> Security Override Needed — {gate.findings?.length ?? 0} unfixable critical/high finding(s)
@@ -116,10 +117,10 @@ export default function GatePanel({
     return (
       <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={4} bg="surface">
         <HStack mb={3} flexWrap="wrap">
-          <Text fontSize="14px" fontWeight={700} color="#f0b429" fontFamily="system-ui, sans-serif">
+          <Text fontSize="14px" fontWeight={700} color="warn" fontFamily="system-ui, sans-serif">
             Clarification Round {gate.round ?? 1}
           </Text>
-          <Text fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
+          <Text fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
             {answered}/{gate.questions.length} Answered · Pipeline Paused Until You Submit
           </Text>
         </HStack>
@@ -135,7 +136,7 @@ export default function GatePanel({
                 )}
               </Text>
               {q.why && (
-                <Text fontSize="11px" color="#c9cdd8" mt={1} fontFamily="system-ui, sans-serif">
+                <Text fontSize="11px" color="muted" mt={1} fontFamily="system-ui, sans-serif">
                   Why It Matters: {q.why}
                 </Text>
               )}
@@ -149,6 +150,7 @@ export default function GatePanel({
                           as="button"
                           px={3}
                           py={2}
+                          minH={{ base: "44px", md: "0" }}
                           fontSize="12px"
                           borderRadius="md"
                           cursor="pointer"
@@ -192,7 +194,7 @@ export default function GatePanel({
             </Box>
           ))}
         </Stack>
-        <HStack mt={4}>
+        <HStack mt={4} {...STICKY_ACTIONS}>
           <PrimaryButton
             onClick={() =>
               onAnswers(
@@ -215,13 +217,13 @@ export default function GatePanel({
   if (gate.type === "divergence") {
     return (
       <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={4} bg="surface">
-        <Text fontSize="14px" fontWeight={700} color="#f0b429" mb={2} fontFamily="system-ui, sans-serif">
+        <Text fontSize="14px" fontWeight={700} color="warn" mb={2} fontFamily="system-ui, sans-serif">
           Divergence Gate — {gate.nodeId}
         </Text>
         <Box as="pre" fontSize="12px" whiteSpace="pre-wrap" mb={3} fontFamily="ui-monospace, monospace">
           {gate.divergence}
         </Box>
-        <HStack>
+        <HStack {...STICKY_ACTIONS}>
           <PrimaryButton onClick={() => onGate("approve")}>
             Approve & Continue
           </PrimaryButton>
@@ -237,7 +239,7 @@ export default function GatePanel({
     const plan = gate.plan;
     return (
       <Box border="1px solid" borderColor="#f0b429" borderRadius="md" p={4} bg="surface">
-        <Text fontSize="14px" fontWeight={700} color="#f0b429" mb={2} fontFamily="system-ui, sans-serif">
+        <Text fontSize="14px" fontWeight={700} color="warn" mb={2} fontFamily="system-ui, sans-serif">
           Plan Approval — review before any code is written
         </Text>
         <Box border="1px solid" borderColor="line" borderRadius="md" p={3} mb={3}>
@@ -245,7 +247,7 @@ export default function GatePanel({
             {plan.task_summary}
           </Text>
           {plan.approach && (
-            <Text fontSize="11px" color="#c9cdd8" mt={2} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+            <Text fontSize="11px" color="muted" mt={2} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
               approach: {plan.approach}
             </Text>
           )}
@@ -310,12 +312,12 @@ export default function GatePanel({
         </Text>
         <Stack gap={1} mb={4}>
           {plan.acceptance_criteria.map((c, i) => (
-            <Text key={i} fontSize="11px" color="#c9cdd8" fontFamily="system-ui, sans-serif">
+            <Text key={i} fontSize="11px" color="muted" fontFamily="system-ui, sans-serif">
               • {c}
             </Text>
           ))}
         </Stack>
-        <HStack mt={2} alignItems="flex-start">
+        <HStack mt={2} alignItems="flex-start" {...STICKY_ACTIONS}>
           <PrimaryButton onClick={() => onGate("approve")}>
             Approve & Continue
           </PrimaryButton>
@@ -327,7 +329,7 @@ export default function GatePanel({
           <Text fontSize="10px" color="muted" mb={1} fontFamily="system-ui, sans-serif">
             Reject with comments — the builder revises the plan in its own session and resubmits:
           </Text>
-          <HStack alignItems="flex-start">
+          <Stack direction={{ base: "column", md: "row" }} alignItems={{ base: "stretch", md: "flex-start" }}>
             <Textarea
               value={rejectComments}
               onChange={(e) => setRejectComments(e.target.value)}
@@ -350,7 +352,7 @@ export default function GatePanel({
             >
               Reject ↓
             </WarningButton>
-          </HStack>
+          </Stack>
         </Box>
       </Box>
     );
@@ -362,7 +364,7 @@ export default function GatePanel({
         <Text fontSize="14px" fontWeight={700} color="#f16a6a" mb={1} fontFamily="system-ui, sans-serif">
           Security Override — {gate.findings.length} critical/high finding(s) not fixable in this run's scope
         </Text>
-        <Text fontSize="11px" color="#c9cdd8" mb={3} fontFamily="system-ui, sans-serif">
+        <Text fontSize="11px" color="muted" mb={3} fontFamily="system-ui, sans-serif">
           Accept the risk (recorded on the run, verification continues) or cancel the run.
         </Text>
         <Stack gap={2} mb={4}>
@@ -376,7 +378,7 @@ export default function GatePanel({
                   {f.title}
                 </Text>
               </HStack>
-              <Text fontSize="11px" color="#c9cdd8" mt={1} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
+              <Text fontSize="11px" color="muted" mt={1} fontFamily="system-ui, sans-serif" whiteSpace="pre-wrap">
                 {f.evidence}
               </Text>
               {f.fix && (
@@ -387,7 +389,7 @@ export default function GatePanel({
             </Box>
           ))}
         </Stack>
-        <HStack>
+        <HStack {...STICKY_ACTIONS}>
           <WarningButton onClick={() => onGate("approve")}>
             Accept Risk & Continue
           </WarningButton>

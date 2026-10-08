@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Flex, Stack, Text } from "@chakra-ui/react";
 import { GhostButton, OutlineButton, PrimaryButton } from "./ui/buttons";
 import Console from "./components/Console";
@@ -15,9 +15,13 @@ import TicketsView from "./components/TicketsView";
 import Workbench from "./components/Workbench";
 import ChatView from "./components/ChatView";
 import { SelectEl, selectStyleMini } from "./ui/controls";
-import { api, openWs } from "./api";
+import { api, isAbort } from "./api";
 import type { ModelInfo, Project, RunEvent, RunState, RunSummary, SecurityMode } from "./api";
 import { orderedUnits } from "./lib/pipeline";
+import { capAppend } from "./lib/backoff";
+import { createSocket } from "./lib/socket";
+import type { SocketStatus } from "./lib/socket";
+import { HEADER_OFFSET } from "./ui/layout";
 import { Plus } from "lucide-react";
 function useNow(active: boolean): number {
   const [now, setNow] = useState(Date.now());
@@ -30,6 +34,11 @@ function useNow(active: boolean): number {
 }
 
 type Tab = "pipeline" | "console" | "artifacts" | "qa";
+
+// Live event buffer cap (matches the server's initial payload cap), and how
+// long streamed events are coalesced before one state update.
+const EVENT_CAP = 3000;
+const EVENT_FLUSH_MS = 80;
 
 export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -58,7 +67,7 @@ export default function App() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("pipeline");
   const [showNew, setShowNew] = useState(false);
-  const [connected, setConnected] = useState(false);
+  const [wsStatus, setWsStatus] = useState<SocketStatus>("connecting");
   const [task, setTask] = useState("");
   const [security, setSecurity] = useState<SecurityMode>(() => {
     const v = localStorage.getItem("nano-cycle-security");
@@ -83,15 +92,57 @@ export default function App() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [confirmRemoveProject, setConfirmRemoveProject] = useState(false);
 
+  // The socket handler is created once; it reads the open run through a ref
+  // instead of re-subscribing (and re-dialling) on every run switch.
+  const runIdRef = useRef<string | null>(null);
+  // Bumped by every explicit run load/clear: a slower, older response must not
+  // overwrite the run the user has since moved to.
+  const loadSeq = useRef(0);
+  const loadAbort = useRef<AbortController | null>(null);
+  // Streamed events are buffered and applied in one batch per flush, so a
+  // token storm is one state update (and one array copy) per ~80ms, not per token.
+  const runsRef = useRef<RunSummary[]>([]);
+  const lastUnknownRefresh = useRef(0);
+  const evBuf = useRef<RunEvent[]>([]);
+  const evTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const refreshRuns = useCallback(() => {
     api.listRuns().then(setRuns).catch(() => {});
   }, []);
+
+  const clearEventBuffer = useCallback(() => {
+    evBuf.current = [];
+    if (evTimer.current) clearTimeout(evTimer.current);
+    evTimer.current = null;
+  }, []);
+
+  const queueEvent = useCallback((ev: RunEvent) => {
+    const buf = evBuf.current;
+    buf.push(ev);
+    // A hidden tab throttles timers hard; never let the buffer outgrow the cap.
+    if (buf.length > EVENT_CAP * 2) buf.splice(0, buf.length - EVENT_CAP);
+    if (evTimer.current) return;
+    evTimer.current = setTimeout(() => {
+      evTimer.current = null;
+      const batch = evBuf.current;
+      evBuf.current = [];
+      if (batch.length) setEvents((prev) => capAppend(prev, batch, EVENT_CAP));
+    }, EVENT_FLUSH_MS);
+  }, []);
+
+  useEffect(() => {
+    runsRef.current = runs;
+  }, [runs]);
 
   const handleDeleteRun = useCallback(
     async (id: string) => {
       try {
         await api.deleteRun(id);
-        if (runId === id) {
+        if (runIdRef.current === id) {
+          loadSeq.current++;
+          loadAbort.current?.abort();
+          clearEventBuffer();
+          runIdRef.current = null;
           setRunId(null);
           setState(null);
           history.replaceState(null, "", location.pathname);
@@ -101,7 +152,7 @@ export default function App() {
         alert(String(e));
       }
     },
-    [runId, refreshRuns],
+    [refreshRuns, clearEventBuffer],
   );
 
   useEffect(() => {
@@ -121,7 +172,25 @@ export default function App() {
   }, [security]);
 
   const loadRun = useCallback(async (id: string) => {
-    const { state: s, events: evs, totalEvents } = await api.getRun(id);
+    const seq = ++loadSeq.current;
+    loadAbort.current?.abort();
+    const ctl = new AbortController();
+    loadAbort.current = ctl;
+    let res;
+    try {
+      res = await api.getRun(id, ctl.signal);
+    } catch (e) {
+      // Superseded by a newer selection: not an error worth surfacing.
+      if (seq !== loadSeq.current || isAbort(e)) return;
+      throw e;
+    }
+    if (seq !== loadSeq.current) return;
+    const { state: s, events: evs, totalEvents } = res;
+    clearEventBuffer();
+    // Question ids ("q1"…) repeat across runs — drafts typed for another run
+    // must not leak into this one's form.
+    if (runIdRef.current !== id) setAnswerDrafts({});
+    runIdRef.current = id;
     setRunId(id);
     setState(s);
     setEvents(evs);
@@ -130,7 +199,27 @@ export default function App() {
     if (s.gate?.type === "answers" || s.gate?.type === "plan-approval") setTab("qa");
     else setTab((t) => (t === "qa" ? "pipeline" : t));
     history.replaceState(null, "", `?run=${id}`);
-  }, []);
+  }, [clearEventBuffer]);
+
+  // After a socket drop (or the tab coming back) messages were missed: re-read
+  // the open run and replace its state/events in place — selection, tab and
+  // scroll are left alone. Skipped when the user switched runs meanwhile.
+  const resyncRun = useCallback(() => {
+    const id = runIdRef.current;
+    refreshRuns();
+    if (!id) return;
+    const seq = loadSeq.current;
+    api
+      .getRun(id)
+      .then(({ state: s, events: evs, totalEvents }) => {
+        if (runIdRef.current !== id || loadSeq.current !== seq) return;
+        clearEventBuffer();
+        setState(s);
+        setEvents(evs);
+        setEventsTotal(totalEvents ?? evs.length);
+      })
+      .catch(() => {});
+  }, [refreshRuns, clearEventBuffer]);
 
   // Selection entry points (sidebar, deep link, pickers) share this wrapper —
   // a failed load surfaces as a banner instead of a silent no-op.
@@ -159,39 +248,82 @@ export default function App() {
     if (deepLink) openRun(deepLink);
   }, [refreshRuns, openRun]);
 
+  // One socket for the app's lifetime (auto-reconnect with backoff). The server
+  // broadcasts everything to everyone, so run filtering happens here via runIdRef.
   useEffect(() => {
-    const ws = openWs((msg) => {
-      if (msg.type === "state" && msg.runId === runId && msg.state) {
-        setState(msg.state);
-        if (msg.state.status !== "running" && msg.state.status !== "awaiting-gate" && msg.state.status !== "awaiting-answers") {
-          refreshRuns();
-        }
-      } else if (msg.type === "event" && msg.runId === runId && msg.nodeId && msg.ev) {
-        const ev: RunEvent = { ts: (msg.ev as { ts?: number }).ts ?? Date.now(), nodeId: msg.nodeId, ev: msg.ev };
-        setEvents((prev) => [...prev.slice(-3000), ev]);
-      }
-      // v3: queue/tickets broadcasts drive the Tickets view immediately (the
-      // 4s poll there is only a fallback). Dispatched as a DOM event so the
-      // Tickets view can subscribe without threading the socket down.
+    const emitBus = (detail: unknown) => {
+      // v3: queue/tickets/chat broadcasts drive those views immediately (their
+      // polls are only a fallback). Dispatched as a DOM event so they can
+      // subscribe without threading the socket down.
       try {
-        window.dispatchEvent(new CustomEvent("nano-ws", { detail: msg }));
+        window.dispatchEvent(new CustomEvent("nano-ws", { detail }));
       } catch {
         /* non-vital */
       }
+    };
+    const sock = createSocket({
+      onStatus: setWsStatus,
+      onOpen: ({ reconnect }) => {
+        if (!reconnect) return;
+        resyncRun();
+        emitBus({ type: "ws-reconnected" });
+      },
+      // Upgrade refused (likely 401): any authed call redirects to /login.
+      onHandshakeFailure: () => {
+        api.projects().catch(() => {});
+      },
+      onMessage: (msg) => {
+        const m = msg as { type?: string; runId?: string; state?: RunState; nodeId?: string; ev?: RunEvent["ev"] };
+        if (m.type === "state" && m.state) {
+          const st = m.state;
+          if (m.runId === runIdRef.current) setState(st);
+          // Keep the sidebar/live counter honest for every run, not just the open one.
+          setRuns((prev) => {
+            const i = prev.findIndex((r) => r.id === m.runId);
+            if (i < 0) return prev;
+            if (prev[i].status === st.status) return prev;
+            const next = prev.slice();
+            next[i] = { ...prev[i], status: st.status };
+            return next;
+          });
+          const finished = st.status !== "running" && st.status !== "awaiting-gate" && st.status !== "awaiting-answers";
+          if (m.runId === runIdRef.current && finished) refreshRuns();
+          else if (!runsRef.current.some((r) => r.id === m.runId) && Date.now() - lastUnknownRefresh.current > 1500) {
+            // A run we have never listed (started from the queue / another browser).
+            lastUnknownRefresh.current = Date.now();
+            refreshRuns();
+          }
+        } else if (m.type === "event" && m.runId === runIdRef.current && m.nodeId && m.ev) {
+          queueEvent({ ts: (m.ev as { ts?: number }).ts ?? Date.now(), nodeId: m.nodeId, ev: m.ev });
+        }
+        emitBus(msg);
+      },
     });
-    // track liveness via socket events
-    const onOpen = () => setConnected(true);
-    const onClose = () => setConnected(false);
-    (ws as WebSocket).addEventListener?.("open", onOpen);
-    (ws as WebSocket).addEventListener?.("close", onClose);
-    return () => ws.close();
-  }, [runId, refreshRuns]);
+    return () => {
+      sock.close();
+      if (evTimer.current) clearTimeout(evTimer.current);
+      evTimer.current = null;
+    };
+  }, [refreshRuns, resyncRun, queueEvent]);
+
+  // Phones freeze background tabs: when the tab comes back, re-read the open run.
+  useEffect(() => {
+    let hiddenAt = 0;
+    const onVis = () => {
+      if (document.visibilityState === "hidden") hiddenAt = Date.now();
+      else if (hiddenAt && Date.now() - hiddenAt > 5000) resyncRun();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [resyncRun]);
 
   // keyboard: 1-4 tabs, esc closes modal
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key === "Escape") setShowNew(false);
-      if ((e.target as HTMLElement)?.tagName === "INPUT" || (e.target as HTMLElement)?.tagName === "TEXTAREA") return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (e.target as HTMLElement)?.isContentEditable) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === "1") setTab("pipeline");
       if (e.key === "2") setTab("console");
       if (e.key === "3") setTab("artifacts");
@@ -249,8 +381,13 @@ export default function App() {
   }, [gateType, gateRound]);
 
   const submitAnswers = (answers: Record<string, string>) => {
-    setAnswerDrafts({});
-    if (runId) api.answers(runId, answers);
+    if (!runId) return;
+    // Keep the typed drafts until the server accepts them — a failed submit
+    // (network blip, run moved on) must not eat the user's answers.
+    api
+      .answers(runId, answers)
+      .then(() => setAnswerDrafts({}))
+      .catch((e) => alert(String(e)));
   };
 
   const doCancel = () => {
@@ -266,7 +403,7 @@ export default function App() {
       setConfirmCancel(true);
       return;
     }
-    if (runId) api.gate(runId, action, comments);
+    if (runId) api.gate(runId, action, comments).catch((e) => alert(String(e)));
   };
 
   const handleResume = async (fix = false) => {
@@ -341,13 +478,35 @@ export default function App() {
         onRemoveProject={() => setConfirmRemoveProject(true)}
         showAdd={showAdd}
         onNewRun={() => setShowNew(true)}
-        connected={connected}
+        wsStatus={wsStatus}
         liveCount={liveCount}
         view={view}
         setView={setView}
       />
-      {/* Offset for the fixed header (52px + 1px border). */}
-      <Box pt="53px">
+      {/* Offset for the fixed header (two rows on phones, one from md up). */}
+      {wsStatus === "reconnecting" && (
+        <Box
+          position="fixed"
+          top={{ base: "103px", md: "59px" }}
+          left="50%"
+          transform="translateX(-50%)"
+          zIndex={45}
+          px={3}
+          py={1}
+          borderRadius="full"
+          bg="surface2"
+          border="1px solid"
+          borderColor="warn"
+          color="warn"
+          fontSize="11px"
+          fontFamily="system-ui, sans-serif"
+          pointerEvents="none"
+          role="status"
+        >
+          Reconnecting…
+        </Box>
+      )}
+      <Box pt={HEADER_OFFSET}>
       {showAdd && (
         <Box bg="surface" borderBottom="1px solid" borderColor="line" px={4} py={3}>
           <Flex gap={2} flexWrap="wrap" alignItems="center" maxW="720px">
@@ -387,9 +546,10 @@ export default function App() {
         {/* main */}
         <Box flex="1" minW={0} p={{ base: 3, md: 5 }} maxW="1100px" mx="auto" w="100%">
           {/* mobile run picker */}
-          <Box display={{ base: "block", lg: "none" }} mb={3}>
+          <Box display={{ base: view === "runs" ? "block" : "none", lg: "none" }} mb={3}>
             {runs.length > 0 && (
               <SelectEl
+                minH="40px"
                 css={{ ...selectStyleMini, width: "100%" }}
                 value={runId ?? ""}
                 onChange={(e) => {
@@ -429,7 +589,7 @@ export default function App() {
               <TicketsView project={project} models={models} onOpenRun={(rid) => { setView("runs"); openRun(rid); }} />
             </Box>
           ) : !state ? (
-            <Box border="1px dashed" borderColor="line" borderRadius="lg" p={8} textAlign="center" bg="surface">
+            <Box border="1px dashed" borderColor="line" borderRadius="lg" p={{ base: 4, md: 8 }} textAlign="center" bg="surface">
               <Text fontSize="18px" fontWeight={800} fontFamily="system-ui, sans-serif" mb={2}>
                 No Run Selected
               </Text>
@@ -448,7 +608,7 @@ export default function App() {
                   </OutlineButton>
                 )}
               </Flex>
-              <Box mt={6} display={{ base: "block", lg: "none" }}>
+              <Box mt={6} display={{ base: "block", lg: "none" }} textAlign="left">
                 <RunsSidebar runs={projectRuns} runId={runId} onSelect={openRun} onDelete={handleDeleteRun} />
               </Box>
             </Box>
@@ -458,7 +618,7 @@ export default function App() {
               <GateBanner state={state} onJump={() => setTab("qa")} showJump={tab !== "qa"} />
 
               {/* tabs */}
-              <Flex gap={1} borderBottom="1px solid" borderColor="line" pb={0}>
+              <Flex gap={1} borderBottom="1px solid" borderColor="line" pb={0} overflowX="auto" css={{ scrollbarWidth: "none" }}>
                 {tabs
                   .map((t) => {
                     const active = tab === t.id;
@@ -469,6 +629,9 @@ export default function App() {
                         as="button"
                         px={3}
                         py={2}
+                        minH={{ base: "44px", md: "0" }}
+                        flexShrink={0}
+                        whiteSpace="nowrap"
                         fontSize="12px"
                         fontWeight={active ? 700 : 500}
                         fontFamily="system-ui, sans-serif"
@@ -479,6 +642,7 @@ export default function App() {
                       >
                         <Text
                           as="span"
+                          display={{ base: "none", md: "inline" }}
                           fontSize="9px"
                           color={active ? "accent" : "muted"}
                           mr={1.5}

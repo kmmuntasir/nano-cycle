@@ -12,8 +12,31 @@ const OPTIONS: { id: ThemeMode; label: string; title: string; Icon: typeof Sun }
 /** Light / dark / system segmented switcher. Lives in the global header. */
 export default function ThemeSwitcher() {
   const { mode, setMode } = useTheme();
+  const cur = OPTIONS.find((o) => o.id === mode) ?? OPTIONS[2];
+  const next = OPTIONS[(OPTIONS.findIndex((o) => o.id === mode) + 1) % OPTIONS.length];
   return (
+    <>
+    {/* phone: one 40px button that cycles light → dark → system */}
+    <Box
+      as="button"
+      display={{ base: "flex", md: "none" }}
+      alignItems="center"
+      justifyContent="center"
+      w="40px"
+      h="40px"
+      borderRadius="md"
+      border="1px solid"
+      borderColor="line"
+      bg="surface2"
+      color="accent"
+      title={`${cur.title} — tap for ${next.label.toLowerCase()}`}
+      aria-label={`Theme: ${cur.label}. Switch to ${next.label}`}
+      onClick={() => setMode(next.id)}
+    >
+      <cur.Icon size={16} />
+    </Box>
     <Flex
+      display={{ base: "none", md: "flex" }}
       alignItems="center"
       border="1px solid"
       borderColor="line"
@@ -58,5 +81,6 @@ export default function ThemeSwitcher() {
         );
       })}
     </Flex>
+    </>
   );
 }

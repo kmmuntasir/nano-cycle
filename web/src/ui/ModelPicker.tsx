@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Input, Text } from "@chakra-ui/react";
 import { Check, ChevronDown } from "lucide-react";
+import { SelectEl } from "./controls";
 import type { ModelInfo } from "../api";
 
 const KNOWN_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -105,6 +106,7 @@ export default function ModelPicker({
           borderRadius="6px"
           px={2}
           py={compact ? "2px" : "6px"}
+          minH={{ base: "40px", md: "0" }}
           overflow="hidden"
           textOverflow="ellipsis"
           whiteSpace="nowrap"
@@ -123,7 +125,8 @@ export default function ModelPicker({
           </Box>
         </Box>
         {levels && (
-          <select
+          <SelectEl
+            minH={{ base: "40px", md: "0" }}
             aria-label={`${ariaLabel ?? "model picker"} thinking level`}
             style={levelStyle}
             value={level ?? ""}
@@ -136,7 +139,7 @@ export default function ModelPicker({
                 {l}
               </option>
             ))}
-          </select>
+          </SelectEl>
         )}
       </Box>
       {open && (
@@ -197,6 +200,7 @@ function PickerRow({ label, active, onClick }: { label: string; active: boolean;
       textAlign="left"
       px={3}
       py={2}
+      minH={{ base: "44px", md: "0" }}
       fontSize="12px"
       fontFamily="system-ui, sans-serif"
       bg={active ? "surface2" : "transparent"}

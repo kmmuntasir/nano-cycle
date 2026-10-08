@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Flex, Input, Text } from "@chakra-ui/react";
 import { ArrowDown, ChevronRight, Pause, Play } from "lucide-react";
 import { SelectEl } from "../ui/controls";
 import { GhostButton, OutlineButton } from "../ui/buttons";
 import { fmtTimestamp, fmtTokens } from "../lib/format";
+import { buildBlocks, countByNode, filterBlocks } from "../lib/console-blocks";
+import type { Block } from "../lib/console-blocks";
 import type { NodeState, RunEvent } from "../api";
 
 const titleCase = (s: string) =>
@@ -20,26 +22,9 @@ const DOT: Record<string, string> = {
   cancelled: "muted",
 };
 
-// ---------------------------------------------------------------------------
-// Output renders as collapsible blocks, not a raw terminal stream. Streaming
-// text/think deltas arrive as tiny fragments, so consecutive same-type events
-// from a node are coalesced into one block per burst. A collapsed block is a
-// single row — arrow, type label, one-line preview, timestamp — and the full
-// content only appears on expand.
-// ---------------------------------------------------------------------------
-
-interface Block {
-  key: string;
-  t: string;
-  nodeId: string;
-  ts: number;
-  text: string;
-  name?: string;
-  args?: string;
-  ok?: boolean;
-  usage?: Record<string, number>;
-  count: number;
-}
+// Blocks (coalesced streamed bursts) are built by lib/console-blocks.ts; a
+// collapsed block is a single row — arrow, type label, one-line preview,
+// timestamp — and the full content only appears on expand.
 
 const TYPE_LABEL: Record<string, string> = {
   text: "Text",
@@ -60,14 +45,6 @@ const TYPE_COLOR: Record<string, string> = {
 };
 
 const cap = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
-
-// Cheap intrinsic disambiguator for single-event blocks — parallel tool calls
-// land in the same millisecond, and identical keys would expand together.
-const hash32 = (s: string) => {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(36);
-};
 
 // Args arrive as a JSON string (host-side preview may have truncated it);
 // pretty-print when it still parses.
@@ -128,84 +105,27 @@ export default function Console({
   // Scrolling up pins the view; scrolling back to the bottom resumes follow.
   const [stick, setStick] = useState(true);
 
-  const countOf = (id: string) => events.filter((e) => e.nodeId === id).length;
+  // One pass instead of an events.filter per node per render.
+  const nodeCounts = useMemo(() => countByNode(events), [events]);
+  const countOf = (id: string) => nodeCounts.get(id) ?? 0;
 
-  // Node filter first (steps sidebar), then coalesce, then type/query — so a
-  // "Thinking"-only view merges fragments that tool calls split apart live.
-  const blocks = useMemo(() => {
-    const list = nodeId ? events.filter((e) => e.nodeId === nodeId) : events;
-    const out: Block[] = [];
-    // Parallel lanes interleave their streamed deltas (two coders thinking at
-    // once alternate token-by-token), so adjacency alone can't define a burst:
-    // keep one open block per node+type and only a discrete event from the
-    // same node (tool call, result, usage, notice) closes its open bursts.
-    const open = new Map<string, Block>();
-    for (const e of list) {
-      const t = e.ev.t;
-      // Intrinsic key — node+ts+type of the block's own first event. Must not
-      // depend on list position: live runs rotate a ~3000-event buffer, so
-      // positional keys (indexes, ordinals) churn on every message and would
-      // collapse expanded rows under the user's cursor. Streamed text/think
-      // blocks exclude content (it grows); single-event blocks mix in a
-      // content hash so same-millisecond twins stay independently expandable.
-      const single = t !== "text" && t !== "think";
-      const h = single ? `:${hash32(`${e.ev.name ?? ""}|${e.ev.args ?? ""}|${e.ev.ok ?? ""}|${JSON.stringify(e.ev.usage ?? {})}`)}` : "";
-      if (single) {
-        // A discrete event from this node closes its open streamed bursts —
-        // think → tool → think reads as two Thinking blocks, not one.
-        open.delete(`${e.nodeId}:text`);
-        open.delete(`${e.nodeId}:think`);
-        out.push({
-          key: `${e.nodeId}:${e.ts}:${t}${h}`,
-          t,
-          nodeId: e.nodeId,
-          ts: e.ts,
-          text: e.ev.s ?? "",
-          name: e.ev.name,
-          args: e.ev.args,
-          ok: e.ev.ok,
-          usage: e.ev.usage,
-          count: 1,
-        });
-      } else {
-        const k = `${e.nodeId}:${t}`;
-        const blk = open.get(k);
-        if (blk) {
-          blk.text += e.ev.s ?? "";
-          blk.count += 1;
-          continue;
-        }
-        const nb: Block = {
-          key: `${e.nodeId}:${e.ts}:${t}`,
-          t,
-          nodeId: e.nodeId,
-          ts: e.ts,
-          text: e.ev.s ?? "",
-          count: 1,
-        };
-        open.set(k, nb);
-        out.push(nb);
-      }
-    }
-    let filtered = out;
-    if (typeFilter === "errors") filtered = filtered.filter((b) => (b.t === "tool_end" && !b.ok) || b.t === "notice");
-    else if (typeFilter !== "all") filtered = filtered.filter((b) => b.t === typeFilter);
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      filtered = filtered.filter((b) =>
-        `${b.nodeId} ${b.text} ${b.name ?? ""} ${b.args ?? ""}`.toLowerCase().includes(q),
-      );
-    }
-    return filtered;
-  }, [events, nodeId, typeFilter, query]);
+  // Node filter + coalescing depends only on events/node; the type/search
+  // filter runs on the built blocks — typing in the search box no longer
+  // regroups thousands of events, and a streamed token only rebuilds when
+  // `events` flushes (batched upstream).
+  const grouped = useMemo(() => buildBlocks(events, nodeId), [events, nodeId]);
+  const blocks = useMemo(() => filterBlocks(grouped, typeFilter, query), [grouped, typeFilter, query]);
 
-  const toggle = (key: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  const toggle = useCallback(
+    (key: string) =>
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      }),
+    [],
+  );
 
   // Timestamp of the last programmatic scroll — its scroll event arrives late,
   // often after new output has already grown the feed again. Without this guard
@@ -286,10 +206,15 @@ export default function Console({
         key={label}
         px={3}
         py={2}
+        minH={{ base: "44px", md: "0" }}
+        flexShrink={0}
+        minW={{ base: "120px", md: 0 }}
         cursor="pointer"
         bg={active ? "surface2" : "transparent"}
-        borderLeft="2px solid"
+        borderLeft={{ base: "none", md: "2px solid" }}
         borderLeftColor={active ? "accent" : "transparent"}
+        borderBottom={{ base: "2px solid", md: "none" }}
+        borderBottomColor={active ? "accent" : "transparent"}
         onClick={() => setNodeId(id)}
         _hover={{ bg: "surface2" }}
       >
@@ -326,20 +251,24 @@ export default function Console({
   };
 
   return (
-    <Flex>
-      {/* steps sidebar — mirrors the Pipeline tab lanes */}
+    <Flex flexDirection={{ base: "column", md: "row" }}>
+      {/* steps sidebar — mirrors the Pipeline tab lanes; a scrolling chip strip on phones */}
       <Box
-        w="190px"
+        w={{ base: "100%", md: "190px" }}
         flexShrink={0}
-        borderRight="1px solid"
+        display={{ base: "flex", md: "block" }}
+        borderRight={{ base: "none", md: "1px solid" }}
+        borderBottom={{ base: "1px solid", md: "none" }}
         borderColor="line"
         bg="chatPanel"
-        maxH={height}
-        minH="200px"
-        overflowY="auto"
+        maxH={{ base: "none", md: height }}
+        minH={{ base: "0", md: "200px" }}
+        overflowY={{ base: "hidden", md: "auto" }}
+        overflowX={{ base: "auto", md: "hidden" }}
+        css={{ scrollbarWidth: "none", "&::-webkit-scrollbar": { display: "none" } }}
         py={1}
       >
-        <Text fontSize="10px" color="muted" px={3} py={1} fontFamily="system-ui, sans-serif">
+        <Text display={{ base: "none", md: "block" }} fontSize="10px" color="muted" px={3} py={1} fontFamily="system-ui, sans-serif">
           Steps · {nodes.length}
         </Text>
         {stepRow(null, "All Nodes", null, events.length)}
@@ -349,6 +278,7 @@ export default function Console({
       <Box flex="1" minW={0} p={3}>
         <Flex gap={2} mb={2} flexWrap="wrap" alignItems="center">
           <SelectEl
+            minH={{ base: "40px", md: "0" }}
             css={{ fontSize: "12px", bg: "surface2", color: "ink", border: "1px solid", borderColor: "line", borderRadius: "6px", px: "2", py: "1", width: "130px" }}
             value={typeFilter}
             onChange={(e) => setTypeFilter((e.target as HTMLSelectElement).value)}
@@ -368,6 +298,8 @@ export default function Console({
             onChange={(e) => setQuery((e.target as HTMLInputElement).value)}
             placeholder="Search…"
             size="xs"
+            minH={{ base: "40px", md: "0" }}
+            flex={{ base: "1 1 120px", md: "none" }}
             maxW="200px"
             bg="surface2"
             borderColor="line"
@@ -411,133 +343,9 @@ export default function Console({
               No events yet — try All Nodes / clear filters.
             </Text>
           )}
-          {blocks.map((b) => {
-            const open = expanded.has(b.key);
-            const err = b.t === "tool_end" && !b.ok;
-            const accent = err ? "bad" : (TYPE_COLOR[b.t] ?? "muted");
-            const body = open ? bodyOf(b) : null;
-            return (
-              <Box key={b.key} borderBottom="1px solid rgba(255,255,255,0.045)">
-                <Box
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={open}
-                  onClick={() => toggle(b.key)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      toggle(b.key);
-                    }
-                  }}
-                  display="flex"
-                  alignItems="center"
-                  gap={2}
-                  px={2}
-                  py="3px"
-                  cursor="pointer"
-                  bg={open ? "surface2" : "transparent"}
-                  _hover={{ bg: "surface2" }}
-                  _focusVisible={{ outline: "1px solid var(--chakra-colors-accent)", outlineOffset: "-1px" }}
-                >
-                  <Box
-                    as="span"
-                    fontSize="10px"
-                    color="muted"
-                    flexShrink={0}
-                    transform={open ? "rotate(90deg)" : "none"}
-                    transition="transform 120ms"
-                    lineHeight="1"
-                    display="inline-flex"
-                  >
-                    <ChevronRight size={12} />
-                  </Box>
-                  <Text
-                    as="span"
-                    fontSize="9px"
-                    fontWeight={700}
-                    letterSpacing="0.08em"
-                    textTransform="uppercase"
-                    fontFamily="ui-monospace, monospace"
-                    color={accent}
-                    w="92px"
-                    flexShrink={0}
-                  >
-                    {TYPE_LABEL[b.t] ?? b.t}
-                  </Text>
-                  {nodeId === null && (
-                    <Text
-                      as="span"
-                      fontSize="9px"
-                      color="muted"
-                      fontFamily="ui-monospace, monospace"
-                      flexShrink={0}
-                    >
-                      {b.nodeId}
-                    </Text>
-                  )}
-                  <Text
-                    as="span"
-                    fontSize="12px"
-                    fontFamily="ui-monospace, monospace"
-                    color={b.t === "think" ? "muted" : err ? "bad" : "ink"}
-                    fontStyle={b.t === "think" ? "italic" : "normal"}
-                    flex="1"
-                    minW={0}
-                    overflow="hidden"
-                    textOverflow="ellipsis"
-                    whiteSpace="nowrap"
-                  >
-                    {previewOf(b)}
-                  </Text>
-                  <Text
-                    as="span"
-                    fontSize="10px"
-                    color="muted"
-                    fontFamily="ui-monospace, monospace"
-                    flexShrink={0}
-                  >
-                    {fmtTimestamp(b.ts)}
-                  </Text>
-                </Box>
-                {body && (
-                  <Box
-                    px={2}
-                    pb={2}
-                    pl="30px"
-                    fontSize="12px"
-                    lineHeight="1.55"
-                    fontFamily="ui-monospace, monospace"
-                    whiteSpace="pre-wrap"
-                    wordBreak="break-word"
-                    color={
-                      b.t === "think"
-                        ? "muted"
-                        : b.t === "tool"
-                          ? "muted"
-                          : b.t === "notice"
-                            ? "warn"
-                            : err
-                              ? "bad"
-                              : "ink"
-                    }
-                    fontStyle={b.t === "think" ? "italic" : "normal"}
-                  >
-                    {body.text}
-                    {body.truncated && (
-                      <Text as="span" display="block" mt={1} fontSize="9px" color="warn">
-                        output truncated at {BODY_CAP.toLocaleString()} chars
-                      </Text>
-                    )}
-                    {b.count > 1 && (
-                      <Text as="span" display="block" mt={1} fontSize="9px" color="muted" fontStyle="normal">
-                        {b.count} streamed fragments merged
-                      </Text>
-                    )}
-                  </Box>
-                )}
-              </Box>
-            );
-          })}
+          {blocks.map((b) => (
+            <BlockRow key={b.key} b={b} open={expanded.has(b.key)} showNode={nodeId === null} onToggle={toggle} />
+          ))}
         </Box>
         {(!stick || paused) && blocks.length > 0 && (
           <Box
@@ -567,3 +375,148 @@ export default function Console({
     </Flex>
   );
 }
+
+// One console row. Memoised on block identity-by-content: a regroup after each
+// flush creates new Block objects, but only the rows whose key / fragment
+// count / text length / expansion actually changed re-render.
+const BlockRow = memo(
+  function BlockRow({ b, open, showNode, onToggle }: { b: Block; open: boolean; showNode: boolean; onToggle: (key: string) => void }) {
+    const err = b.t === "tool_end" && !b.ok;
+    const accent = err ? "bad" : (TYPE_COLOR[b.t] ?? "muted");
+    const body = open ? bodyOf(b) : null;
+    return (
+      <Box borderBottom="1px solid rgba(255,255,255,0.045)">
+        <Box
+          role="button"
+          tabIndex={0}
+          aria-expanded={open}
+          onClick={() => onToggle(b.key)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onToggle(b.key);
+            }
+          }}
+          display="flex"
+          alignItems="center"
+          gap={2}
+          px={2}
+          py="3px"
+          minH={{ base: "40px", md: "0" }}
+          cursor="pointer"
+          bg={open ? "surface2" : "transparent"}
+          _hover={{ bg: "surface2" }}
+          _focusVisible={{ outline: "1px solid var(--chakra-colors-accent)", outlineOffset: "-1px" }}
+        >
+          <Box
+            as="span"
+            fontSize="10px"
+            color="muted"
+            flexShrink={0}
+            transform={open ? "rotate(90deg)" : "none"}
+            transition="transform 120ms"
+            lineHeight="1"
+            display="inline-flex"
+          >
+            <ChevronRight size={12} />
+          </Box>
+          <Text
+            as="span"
+            fontSize="9px"
+            fontWeight={700}
+            letterSpacing="0.08em"
+            textTransform="uppercase"
+            fontFamily="ui-monospace, monospace"
+            color={accent}
+            w={{ base: "62px", md: "92px" }}
+            flexShrink={0}
+          >
+            {TYPE_LABEL[b.t] ?? b.t}
+          </Text>
+          {showNode && (
+            <Text
+              as="span"
+              display={{ base: "none", sm: "inline" }}
+              fontSize="9px"
+              color="muted"
+              fontFamily="ui-monospace, monospace"
+              flexShrink={0}
+            >
+              {b.nodeId}
+            </Text>
+          )}
+          <Text
+            as="span"
+            fontSize="12px"
+            fontFamily="ui-monospace, monospace"
+            color={b.t === "think" ? "muted" : err ? "bad" : "ink"}
+            fontStyle={b.t === "think" ? "italic" : "normal"}
+            flex="1"
+            minW={0}
+            overflow="hidden"
+            textOverflow="ellipsis"
+            whiteSpace="nowrap"
+          >
+            {previewOf(b)}
+          </Text>
+          <Text
+            as="span"
+            display={{ base: "none", sm: "inline" }}
+            fontSize="10px"
+            color="muted"
+            fontFamily="ui-monospace, monospace"
+            flexShrink={0}
+          >
+            {fmtTimestamp(b.ts)}
+          </Text>
+        </Box>
+        {body && (
+          <Box
+            px={2}
+            pb={2}
+            pl={{ base: 2, md: "30px" }}
+            fontSize="12px"
+            lineHeight="1.55"
+            fontFamily="ui-monospace, monospace"
+            whiteSpace="pre-wrap"
+            wordBreak="break-word"
+            color={
+              b.t === "think"
+                ? "muted"
+                : b.t === "tool"
+                  ? "muted"
+                  : b.t === "notice"
+                    ? "warn"
+                    : err
+                      ? "bad"
+                      : "ink"
+            }
+            fontStyle={b.t === "think" ? "italic" : "normal"}
+          >
+            <Text as="span" display={{ base: "block", sm: "none" }} fontSize="9px" color="muted" mb={1}>
+              {b.nodeId} · {fmtTimestamp(b.ts)}
+            </Text>
+            {body.text}
+            {body.truncated && (
+              <Text as="span" display="block" mt={1} fontSize="9px" color="warn">
+                output truncated at {BODY_CAP.toLocaleString()} chars
+              </Text>
+            )}
+            {b.count > 1 && (
+              <Text as="span" display="block" mt={1} fontSize="9px" color="muted" fontStyle="normal">
+                {b.count} streamed fragments merged
+              </Text>
+            )}
+          </Box>
+        )}
+      </Box>
+    );
+  },
+  (p, n) =>
+    p.open === n.open &&
+    p.showNode === n.showNode &&
+    p.onToggle === n.onToggle &&
+    p.b.key === n.b.key &&
+    p.b.count === n.b.count &&
+    p.b.text.length === n.b.text.length,
+);

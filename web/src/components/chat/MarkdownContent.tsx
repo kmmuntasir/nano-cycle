@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Box, Flex, Text } from "@chakra-ui/react";
+import { Box, Flex, Text, chakra } from "@chakra-ui/react";
 import { marked, Tokens } from "marked";
 import { Check, Copy } from "lucide-react";
 
@@ -115,10 +115,10 @@ function renderInline(tokens?: Tokens.Generic[]): React.ReactNode {
         );
       case "link":
         return (
-          <Box
-            as="a"
+          <chakra.a
             key={index}
-            href={token.href}
+            // Agent output is untrusted: never emit javascript:/data: URLs.
+            href={/^(https?:|mailto:|\/|#)/i.test(token.href) ? token.href : undefined}
             target="_blank"
             rel="noopener noreferrer"
             color="accent"
@@ -126,7 +126,7 @@ function renderInline(tokens?: Tokens.Generic[]): React.ReactNode {
             _hover={{ color: "accent" }}
           >
             {renderInline(token.tokens)}
-          </Box>
+          </chakra.a>
         );
       case "del":
         return (

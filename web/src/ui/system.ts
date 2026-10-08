@@ -19,6 +19,14 @@ export const system = createSystem(
       body: {
         bg: "var(--chakra-colors-canvas)",
         color: "var(--chakra-colors-ink)",
+        // No sideways page scroll on phones, and no tap-delay/highlight flash.
+        overflowX: "hidden",
+        WebkitTapHighlightColor: "transparent",
+      },
+      // iOS Safari zooms the page when a focused field is under 16px — keep
+      // inputs at 16px on phone widths so tapping one doesn't shift the layout.
+      "input, select, textarea": {
+        "@media (max-width: 47.99em)": { fontSize: "16px !important" },
       },
     },
     theme: {

@@ -193,6 +193,8 @@ export default function StepTimeline({
               as="button"
               fontSize="11px"
               color="accent"
+              minH={{ base: "40px", md: "0" }}
+              px={{ base: 2, md: 0 }}
               onClick={() => onViewLogs(selectedNode)}
               style={{ fontFamily: "system-ui, sans-serif" }}
             >

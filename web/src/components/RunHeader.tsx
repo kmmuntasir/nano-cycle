@@ -151,7 +151,7 @@ export default function RunHeader({
         )}
         {(state.status === "cancelled" || state.status === "failed") && (
           <Box textAlign="right">
-            {state.status === "failed" && state.artifacts?.verify && (
+            {state.status === "failed" && !!state.artifacts?.verify && (
               <Box mb={2}>
                 <PrimaryButton onClick={onFixResume}>
                   Fix From Last Verify

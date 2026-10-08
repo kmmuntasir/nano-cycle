@@ -1,3 +1,5 @@
+import { redirectToLogin } from "./lib/auth";
+
 export type NodeStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "awaiting-gate";
 
 export interface NodeState {
@@ -153,13 +155,20 @@ export interface Project {
   path: string;
 }
 
+export const isAbort = (e: unknown): boolean => e instanceof DOMException && e.name === "AbortError";
+
 async function jfetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  const res = await fetch(url, { credentials: "same-origin", ...init });
+  // Session expired / not signed in: the server answers JSON 401 (or, behind a
+  // proxy, bounces to its login page). Hand the browser to /login once.
+  const bounced = res.redirected && new URL(res.url).pathname === "/login";
+  if (res.status === 401 || bounced) redirectToLogin();
   const text = await res.text();
   let body: unknown;
   try {
     body = JSON.parse(text);
   } catch {
+    if (res.status === 401 || bounced) throw new Error("unauthorized");
     // Never resolve with garbage (e.g. an SPA-fallback HTML page) — fail loudly.
     throw new Error(`non-JSON response from ${url}: ${text.slice(0, 80)}`);
   }
@@ -180,8 +189,8 @@ export const api = {
   removeProject: (name: string) =>
     jfetch<Project[]>(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" }),
   listRuns: () => jfetch<RunSummary[]>(`/api/runs?_=${Date.now()}`),
-  getRun: (id: string) =>
-    jfetch<{ state: RunState; events: RunEvent[]; totalEvents?: number }>(`/api/runs/${id}`),
+  getRun: (id: string, signal?: AbortSignal) =>
+    jfetch<{ state: RunState; events: RunEvent[]; totalEvents?: number }>(`/api/runs/${id}`, { signal }),
   deleteRun: (id: string) => jfetch<{ ok: boolean }>(`/api/runs/${id}`, { method: "DELETE" }),
   start: (
     task: string,
@@ -418,16 +427,3 @@ export type WsMessage = {
   event?: string;
   [key: string]: unknown;
 };
-
-export function openWs(onMessage: (msg: WsMessage) => void): WebSocket {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onmessage = (m) => {
-    try {
-      onMessage(JSON.parse(m.data));
-    } catch {
-      /* ignore malformed */
-    }
-  };
-  return ws;
-}
