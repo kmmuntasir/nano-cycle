@@ -114,7 +114,7 @@ export function clarifyPrompt(task, history, workspace) {
 }
 
 // ============================================================================
-// v2 — the four-step workflow prompts (docs/PLAN-v2-step-workflow.md). Additive:
+// Four-step workflow prompts (docs/ARCHITECTURE.md). Additive:
 // the v1 node functions above stay until the engine switch + cleanup phase.
 // ============================================================================
 

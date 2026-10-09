@@ -1,5 +1,5 @@
 // Queue manager — the v3 two-phase scheduler that sits ABOVE the engine
-// (docs/PLAN-v3-ticket-queue.md §2.4). Owns: clarify waves (parallel
+// (docs/ARCHITECTURE.md, "Ticket queue and single-PM waves"). Owns: clarify waves (parallel
 // clarify-only runs), the release gate, the sequential build pump, the
 // park-don't-block policy, dependency cascade, and crash recovery.
 //

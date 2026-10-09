@@ -1,4 +1,4 @@
-// Engine v2 — the four-step workflow state machine (docs/PLAN-v2-step-workflow.md).
+// Engine — the four-step workflow state machine (docs/ARCHITECTURE.md).
 //
 //   Step 1 clarify  — PM loop, one short session per Q&A round (lifted from v1)
 //   Step 2 build    — ONE persistent session: plan → tasks → implement
@@ -460,7 +460,7 @@ export function createEngine({ modelRuntime, emit, webTools, adapters }) {
 
   // --- git (v1, milestone-granular) --------------------------------------------
 
-  // One git worktree per run (REWRITE-ANALYSIS §2.4 / §6.7): the run branch is
+  // One git worktree per run (ARCHITECTURE.md, "Per-run git worktree lifecycle"): the run branch is
   // cut from a PINNED base sha into <runDir>/wt and every agent session, bash
   // tool, check, scan, commit and CI push uses it as cwd (workDir(run)). The
   // owner's checkout is never switched, never has to be clean, and is touched

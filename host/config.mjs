@@ -116,7 +116,7 @@ export const ARTIFACT_SCHEMAS = {
 // host/rules.mjs. Verify/audit carry no coding rules: their method lives in
 // their system prompts (host/prompts.mjs).
 // ============================================================================
-// v2 — the four-step workflow (docs/PLAN-v2-step-workflow.md). Additive: v1
+// Four-step workflow (docs/ARCHITECTURE.md, "The four-step workflow"). Additive: v1
 // exports above stay until the engine switch + cleanup phase.
 // ============================================================================
 

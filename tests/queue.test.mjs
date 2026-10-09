@@ -589,7 +589,7 @@ await test("Q16: flip commits an already-flipped-but-dirty sourceDoc so the next
   fs.rmSync(projDir, { recursive: true, force: true });
 });
 
-// === Regression block: REWRITE-ANALYSIS §3 queue bugs =============================
+// === Regression block: queue regressions =============================
 
 const byIdOf = (st) => Object.fromEntries(st.tickets.map((t) => [t.id, t]));
 

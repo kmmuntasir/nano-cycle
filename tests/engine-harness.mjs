@@ -1187,7 +1187,7 @@ await test("leftover hook: undeclared agent edits are swept into a labelled comm
 
 
 // ============================================================================
-// Engine-correctness scenarios (REWRITE-ANALYSIS §3: E-1…E-10, Q-C2/C3/H6, #11-#21)
+// Engine-correctness scenarios (E-1…E-10, Q-C2/C3/H6, #11-#21)
 // ============================================================================
 
 const MODELS = { clarify: "auto", builder: "auto", verifier: "auto", security: "auto" };

@@ -326,17 +326,16 @@ host/
   state.mjs      runs/<id>/state.json + events.jsonl (+ sessions/)
 skills/          7 workflow skills + markdown-writer (+ scanner script)
 tests/           engine harness + unit/integration suites (npm test)
-docs/            PLAN-v2/v3/v3.1 design docs · SPIKE-NOTES.md · V2/V3-VALIDATION.md · V3-GAP-AUDIT.md · reports/ (post-mortems, rewrite analysis)
+docs/            ARCHITECTURE.md (how it works and why) · KNOWN-ISSUES.md (open problems, non-goals)
 web/             React 19 + Vite + Chakra UI v3 monitoring GUI
 ```
 
-## Design docs
+## Further reading
 
-- `docs/PLAN-v2-step-workflow.md` — the redesign: rationale (RC1–RC10), the
-  five agreed amendments, architecture, and the sequenced implementation plan.
-- `docs/SPIKE-NOTES.md` — SDK session-persistence proofs the engine rests on.
-- `docs/V2-VALIDATION.md` — the manual validation runbook (V1–V12).
-- `docs/PLAN-v3-ticket-queue.md`, `docs/PLAN-v3.1-single-pm-waves.md` — the ticket queue and single-PM waves.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the engine, gates,
+  queue, worktrees, persistence and auth work, and the invariants to preserve.
+- [`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) — open problems and
+  deliberate limits.
 
 ## License
 

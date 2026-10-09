@@ -159,7 +159,7 @@ export async function commitFile(projectPath, relPath, subject) {
 }
 
 
-// --- worktrees (one per run — REWRITE-ANALYSIS §2.4 / §6.7) ------------------------
+// --- worktrees (one per run — ARCHITECTURE.md, "Per-run git worktree lifecycle") ------------------------
 //
 // The owner's checkout is never switched to a run branch: every run works in
 // `git worktree add <runDir>/wt -b <runBranch> <baseSha>` and only the final,
@@ -285,8 +285,8 @@ export async function updateBranchRef(cwd, branch, newSha, oldSha) {
 
 // Dependencies: a fresh worktree lacks gitignored node_modules. Symlink the
 // main checkout's (root + one level of workspace dirs + packages/*, apps/*, …).
-// LIMITATION: only node_modules is shared — other gitignored build output and
-// env files (.env, dist/, .venv, …) are NOT copied into the worktree, and an
+// LIMITATION: other gitignored build output (dist/, .venv, …) is NOT carried
+// into the worktree (.env files are copied, see copyEnvFiles), and an
 // `npm install` run by the agent writes through the link into the owner's
 // node_modules.
 const WORKSPACE_PARENTS = ["packages", "apps", "libs", "services", "modules"];

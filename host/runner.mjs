@@ -4,7 +4,7 @@
 //
 // v2 additions (additive): per-step bundled-skill filtering and openStepSession
 // — persistent sessions stored under runs/<id>/sessions that survive close and
-// server restart (docs/SPIKE-NOTES.md).
+// server restart (docs/ARCHITECTURE.md, "SDK facts").
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -366,7 +366,7 @@ function makeStepPrompt(session, bridge, onAbort) {
  * - prompt(text): one full model turn; throws on provider error or stall.
  * - The event bridge stays attached for the handle's lifetime; the watchdog is
  *   per-turn. The system prompt comes from the loader on every (re)open, so a
- *   resumed session gets the same (or evolved) step law — see SPIKE-NOTES (e).
+ *   resumed session gets the same (or evolved) step law — see ARCHITECTURE.md "SDK facts".
  */
 export async function openStepSession({ stepId, sessionFile, sessionsDir, tools, customTools = [], systemPrompt, cwd, modelSpec, modelRuntime, onEvent, signal, thinking, runId }) {
   const { model, thinking: lvl } = resolveModel(modelSpec, modelRuntime);
