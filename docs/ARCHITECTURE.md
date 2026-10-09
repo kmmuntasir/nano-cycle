@@ -5,6 +5,42 @@ README covers usage, deployment and the user-visible workflow; this file covers
 the contracts and invariants you must not break. Open problems live in
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
 
+## 0. The benchmark: the omni-isp Claude Code workflow
+
+nano-cycle exists because of a hand-built Claude Code workflow in
+`omni-isp/.claude/` (committed there; `omni-isp/.pi/` is a pi port of the same
+skills). It is the bar this project has to clear: if nano-cycle cannot beat
+"one strong agent plus these skills", the skills are the product, not the
+orchestrator. The toolchain is deliberately **not** copied here; omni-isp stays
+the source of truth.
+
+| Piece | Role |
+| --- | --- |
+| `dev-cycle` skill | State-machine sequencer (`.context/dev-cycle/state.md`, resumable): PM → tickets → batch approval → per-ticket build → verify → fix loop. `--merge-to-base` ff-merges each verified ticket and pushes. A 30-minute watchdog revives stalled builds; CI runs triggered by its pushes are watched by SHA. |
+| `product-management` skill + `product-manager` agent | Clarification rounds with the owner, in batches, written to a `.context/pm-cycles/pm-cycle-<ts>/` folder (the "pm-cycle"), then deliverables documents. |
+| `convert-to-tickets`, `handle-ticket` | Deliverables or `docs/features.md` entries to ticket files; one ticket branch each. |
+| `create-implementation-plan`, `breakdown-plan-into-tasks` | Plan, then full-stack capability tasks (backend and frontend halves together). |
+| `orchestrator` skill + `backend-coder` / `frontend-coder` agents | The main agent coordinates and commits per task with explicit-path staging; coders get a findings digest and exact file list. `analyst` is a read-only fallback. |
+| `verify-deliverable` skill | Checks the ticket's acceptance criteria (deliverable to implementation) as well as plan conformance. |
+| `rules/` | Backend, frontend, security, testing, git and context-cache rules the agents follow. |
+
+How nano-cycle maps onto it: clarify is `product-management`; build is
+plan + tasks + `orchestrator` (collapsed into one builder session); verify is
+`verify-deliverable`; the queue is `dev-cycle`'s ticket loop; the worktree and
+driver-owned commits replace per-ticket branches in your checkout.
+
+Where the reference won in the September 2026 comparison (F01, scored on
+12 dimensions; the reference led on most): committed, auditable history per
+ticket; lifecycle and test depth; targeted per-gap fix tasks instead of
+requeueing everything; a builder on a strong model with the full contract in
+context. Where nano-cycle led: security defaults and operational docs. The
+full write-up (`comparison.md`, `PIPELINE-VS-REFERENCE-ROOT-CAUSE-ANALYSIS.md`)
+was removed from the tree; read it with
+`git show 4fa5a3b:comparison.md`. The `master-reference` backup it cites no
+longer exists on disk, and its F01 commits (`0902524..22e9453`) are not in
+omni-isp's git history, so the comparison write-up is the only surviving
+evidence.
+
 ## 1. Shape of the system
 
 ```mermaid
